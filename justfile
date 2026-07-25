@@ -49,9 +49,13 @@ demo:
     cargo build --quiet
     bin="target/debug/hird"
     "$bin" add "Port the config loader to serde" --priority 3 \
+        --path "src/config.rs" --path "tests/config.rs" \
         --body "Keep the env-var precedence. Tests in tests/config.rs must pass." >/dev/null
-    "$bin" add "Fix the flaky renderer test" >/dev/null
-    "$bin" add "Write the release notes" --priority -1 >/dev/null
+    "$bin" add "Fix the flaky renderer test" --path "src/tui/**" >/dev/null
+    "$bin" add "Write the release notes" --priority -1 --needs 1,2 >/dev/null
+    # Someone is already in the config loader, so the board has a live overlap
+    # and one blocked task to show off.
+    "$bin" add "Audit the config tests" --path "tests/**" >/dev/null
     "$bin" mem add "Integration tests need HIRD_DB set or they touch the real database" \
         --tags testing >/dev/null
     echo "demo database: $db"

@@ -147,7 +147,7 @@ fn initialize_advertises_tools_and_the_queue_rules() {
 }
 
 #[test]
-fn tools_list_returns_exactly_the_eight_designed_tools() {
+fn tools_list_returns_exactly_the_designed_tools() {
     let sandbox = Sandbox::new();
     let mut session = McpSession::start(&sandbox, "claude-code");
 
@@ -169,6 +169,10 @@ fn tools_list_returns_exactly_the_eight_designed_tools() {
             "task_fail",
             "task_get",
             "task_list",
+            "task_next",
+            "task_release",
+            "task_scope",
+            "task_split",
             "task_update",
         ]
     );
@@ -388,4 +392,162 @@ fn an_unknown_harness_still_gets_a_usable_identity() {
         claimed["holder"]
     );
     session.shutdown();
+}
+
+/// Two harnesses, one queue, no human dispatcher: the scenario the whole
+/// design exists for. Each agent asks for work, is handed a different task,
+/// and neither ends up in the other's files.
+#[test]
+fn two_harnesses_asking_for_work_spread_out_across_the_queue() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["add", "port the config loader", "--path", "src/config.rs"]);
+    sandbox.run(&["add", "rewrite the renderer", "--path", "src/tui/**"]);
+
+    let mut claude = McpSession::start(&sandbox, "claude-code");
+    let mut codex = McpSession::start(&sandbox, "codex");
+
+    let first = claude.call("task_next", json!({})).unwrap();
+    let second = codex.call("task_next", json!({})).unwrap();
+
+    let a = first["claimed"]["claimed"]
+        .as_i64()
+        .expect("claude got work");
+    let b = second["claimed"]["claimed"]
+        .as_i64()
+        .expect("codex got work");
+    assert_ne!(a, b, "both harnesses were handed the same task");
+    // Disjoint file scopes, so neither claim reports an overlap.
+    assert!(first["claimed"].get("overlaps").is_none(), "{first}");
+    assert!(second["claimed"].get("overlaps").is_none(), "{second}");
+
+    // A third request finds the queue drained rather than double-booking.
+    let empty = claude.call("task_next", json!({})).unwrap();
+    assert!(empty.get("claimed").is_none(), "{empty}");
+    assert!(empty["idle"].as_str().unwrap().contains("queue is empty"));
+
+    claude.shutdown();
+    codex.shutdown();
+}
+
+/// The collision case: one agent is in `src/**`, the other is told about it
+/// rather than silently editing over the top.
+#[test]
+fn an_agent_is_told_when_another_harness_is_already_in_its_files() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["add", "wide refactor", "--path", "src/**"]);
+    sandbox.run(&["add", "fix the db module"]);
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    let mut claude = McpSession::start(&sandbox, "claude-code");
+
+    let held = codex.call("task_next", json!({})).unwrap();
+    assert_eq!(held["claimed"]["claimed"], 1);
+
+    // The second task declared nothing up front, so it is handed over — and
+    // the overlap surfaces the moment the agent says what it will touch.
+    let mine = claude.call("task_next", json!({})).unwrap();
+    assert_eq!(mine["claimed"]["claimed"], 2);
+    let scoped = claude
+        .call("task_scope", json!({"seq": 2, "paths": ["src/db.rs"]}))
+        .unwrap();
+    let overlap = scoped["overlaps"][0].as_str().expect("an overlap");
+    assert!(overlap.contains("src/db.rs overlaps src/**"), "{overlap}");
+    assert!(overlap.contains("codex:"), "{overlap}");
+    assert!(scoped["advice"]
+        .as_str()
+        .unwrap()
+        .contains("tell the human"));
+
+    // And the human sees the same thing from the outside.
+    let radar = sandbox.run(&["agents"]);
+    assert!(
+        radar.contains("src/db.rs also claimed by codex:"),
+        "{radar}"
+    );
+
+    codex.shutdown();
+    claude.shutdown();
+}
+
+/// An agent that finds a task too big turns it into a plan the rest of the
+/// swarm can work, without a human touching the board.
+#[test]
+fn an_agent_can_split_a_task_into_work_for_the_others() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["add", "migrate the storage layer"]);
+
+    let mut claude = McpSession::start(&sandbox, "claude-code");
+    claude.call("task_claim", json!({"seq": 1})).unwrap();
+    let split = claude
+        .call(
+            "task_split",
+            json!({
+                "seq": 1,
+                "subtasks": [
+                    {"title": "write the migration", "paths": ["src/db.rs"]},
+                    {"title": "port the repository", "paths": ["src/repo/**"]},
+                ],
+            }),
+        )
+        .unwrap();
+    assert_eq!(split["status"], "open");
+    assert_eq!(split["subtasks"].as_array().unwrap().len(), 2);
+
+    // Two other harnesses take one piece each, in parallel.
+    let mut codex = McpSession::start(&sandbox, "codex");
+    let mut copilot = McpSession::start(&sandbox, "copilot");
+    let a = codex.call("task_next", json!({})).unwrap()["claimed"]["claimed"]
+        .as_i64()
+        .expect("codex got a piece");
+    let b = copilot.call("task_next", json!({})).unwrap()["claimed"]["claimed"]
+        .as_i64()
+        .expect("copilot got a piece");
+    assert_ne!(a, b);
+    assert!([2, 3].contains(&a) && [2, 3].contains(&b));
+
+    // The parent is not workable until both pieces are done.
+    let blocked = claude.call("task_claim", json!({"seq": 1})).unwrap_err();
+    assert!(blocked.contains("task 1 is blocked by"), "{blocked}");
+
+    codex
+        .call("task_complete", json!({"seq": a, "result": "done"}))
+        .unwrap();
+    copilot
+        .call("task_complete", json!({"seq": b, "result": "done"}))
+        .unwrap();
+
+    let freed = claude.call("task_next", json!({})).unwrap();
+    assert_eq!(
+        freed["claimed"]["claimed"], 1,
+        "the parent is workable again"
+    );
+
+    claude.shutdown();
+    codex.shutdown();
+    copilot.shutdown();
+}
+
+/// Handing work back has to be cheaper than failing it, or agents will sit on
+/// leases they cannot use.
+#[test]
+fn a_released_task_goes_straight_back_to_the_next_agent() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["add", "deploy to staging"]);
+
+    let mut claude = McpSession::start(&sandbox, "claude-code");
+    claude.call("task_claim", json!({"seq": 1})).unwrap();
+    let released = claude
+        .call(
+            "task_release",
+            json!({"seq": 1, "reason": "no deploy credentials in this session"}),
+        )
+        .unwrap();
+    assert_eq!(released["status"], "open");
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    let taken = codex.call("task_next", json!({})).unwrap();
+    assert_eq!(taken["claimed"]["claimed"], 1);
+
+    claude.shutdown();
+    codex.shutdown();
 }

@@ -9,9 +9,10 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::config::Config;
 use crate::db::Db;
+use crate::glob;
 use crate::identity::ACTOR_TUI;
-use crate::model::{Assertion, Status, Task, TaskEvent, TaskSummary};
-use crate::repo::{MemoryQuery, ProjectScope};
+use crate::model::{Assertion, Blocker, Conflict, Status, Task, TaskEvent, TaskSummary};
+use crate::repo::{dispatch_waves, MemoryQuery, ProjectScope};
 
 /// How often the database is re-read.
 pub const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
@@ -19,20 +20,62 @@ pub const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(
 /// Upper bound on rows pulled into the memory browser at once.
 const MEMORY_PAGE: usize = 200;
 
-/// The two screens, switched with `Tab`.
+/// The three screens, cycled with `Tab`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
     Queue,
     Memory,
+    /// Who is working what, where they overlap, and what is workable next.
+    Swarm,
 }
 
 impl Screen {
     fn next(self) -> Screen {
         match self {
             Screen::Queue => Screen::Memory,
-            Screen::Memory => Screen::Queue,
+            Screen::Memory => Screen::Swarm,
+            Screen::Swarm => Screen::Queue,
         }
     }
+
+    fn previous(self) -> Screen {
+        match self {
+            Screen::Queue => Screen::Swarm,
+            Screen::Memory => Screen::Queue,
+            Screen::Swarm => Screen::Memory,
+        }
+    }
+}
+
+/// One live agent, as the swarm screen shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentRow {
+    pub holder: String,
+    pub seq: i64,
+    pub title: String,
+    pub status: Status,
+    pub lease_expires_at: Option<String>,
+    pub patterns: Vec<String>,
+    /// Overlaps with the other rows, already resolved to who and where.
+    pub overlaps: Vec<Overlap>,
+}
+
+/// Two live agents in the same files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Overlap {
+    pub pattern: String,
+    pub other_seq: i64,
+    pub other_holder: String,
+    pub other_pattern: String,
+}
+
+/// What a task is waiting for and who it is in the way of.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Readiness {
+    pub waiting_for: Vec<Blocker>,
+    pub blocks: Vec<i64>,
+    pub paths: Vec<String>,
+    pub conflicts: Vec<Conflict>,
 }
 
 /// A column of the kanban board.
@@ -96,6 +139,7 @@ pub enum Mode {
         task: Box<Task>,
         events: Vec<TaskEvent>,
         learned: Vec<Assertion>,
+        readiness: Box<Readiness>,
     },
     /// One assertion with its provenance.
     AssertionDetail { assertion: Box<Assertion> },
@@ -137,6 +181,16 @@ pub struct App {
     pub column: Column,
     selected: [usize; 4],
 
+    /// Task number to the unfinished tasks it waits for.
+    pub unmet: BTreeMap<i64, Vec<i64>>,
+
+    // Swarm screen.
+    pub agents: Vec<AgentRow>,
+    /// Unfinished tasks grouped by how many rounds of work stand in front of
+    /// them; wave 0 is workable now.
+    pub waves: Vec<Vec<i64>>,
+    pub swarm_selected: usize,
+
     // Memory screen.
     pub assertions: Vec<Assertion>,
     pub memory_total: i64,
@@ -166,6 +220,10 @@ impl App {
             filter: String::new(),
             column: Column::Open,
             selected: [0; 4],
+            unmet: BTreeMap::new(),
+            agents: Vec::new(),
+            waves: Vec::new(),
+            swarm_selected: 0,
             assertions: Vec::new(),
             memory_total: 0,
             query: String::new(),
@@ -188,6 +246,9 @@ impl App {
         let scope = self.scope();
         self.tasks = db.tasks().list(&scope, None)?;
         self.counts = db.tasks().counts(&scope)?;
+        self.unmet = db.deps().unmet_map(&scope)?;
+        self.waves = dispatch_waves(&self.tasks, &db.deps().edges(&scope)?);
+        self.agents = agent_rows(&self.tasks, &db.scopes().declared(&scope, true)?);
         self.assertions = db.memory().search(
             &MemoryQuery::new(&self.query, scope.clone())
                 .limit(MEMORY_PAGE)
@@ -242,6 +303,23 @@ impl App {
         self.assertions.get(self.memory_selected)
     }
 
+    pub fn selected_agent(&self) -> Option<&AgentRow> {
+        self.agents.get(self.swarm_selected)
+    }
+
+    /// Unfinished tasks task `seq` is waiting for. Empty means claimable.
+    pub fn blocked_by(&self, seq: i64) -> &[i64] {
+        self.unmet.get(&seq).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Tasks an agent could be handed right now: open, and waiting for nothing.
+    pub fn workable(&self) -> Vec<&TaskSummary> {
+        self.tasks
+            .iter()
+            .filter(|t| t.status == Status::Open && self.blocked_by(t.seq).is_empty())
+            .collect()
+    }
+
     /// Keep every cursor inside its list after the data changes underneath.
     fn clamp_selection(&mut self) {
         for column in Column::ALL {
@@ -252,6 +330,7 @@ impl App {
         self.memory_selected = self
             .memory_selected
             .min(self.assertions.len().saturating_sub(1));
+        self.swarm_selected = self.swarm_selected.min(self.agents.len().saturating_sub(1));
     }
 
     // ------------------------------------------------------------------ keys
@@ -298,7 +377,8 @@ impl App {
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('?') => self.mode = Mode::Help,
-            KeyCode::Tab | KeyCode::BackTab => self.screen = self.screen.next(),
+            KeyCode::Tab => self.screen = self.screen.next(),
+            KeyCode::BackTab => self.screen = self.screen.previous(),
             KeyCode::Char('p') => {
                 self.all_projects = !self.all_projects;
                 self.refresh(db)?;
@@ -309,12 +389,13 @@ impl App {
                 });
             }
             KeyCode::Char('/') => match self.screen {
-                Screen::Queue => self.mode = Mode::Filter,
                 Screen::Memory => self.mode = Mode::Search,
+                _ => self.mode = Mode::Filter,
             },
             _ => match self.screen {
                 Screen::Queue => self.queue_key(key, db)?,
                 Screen::Memory => self.memory_key(key, db)?,
+                Screen::Swarm => self.swarm_key(key, db)?,
             },
         }
         Ok(())
@@ -344,6 +425,29 @@ impl App {
             KeyCode::Esc if !self.filter.is_empty() => {
                 self.filter.clear();
                 self.clamp_selection();
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn swarm_key(&mut self, key: KeyEvent, db: &Db) -> anyhow::Result<()> {
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                let last = self.agents.len().saturating_sub(1);
+                self.swarm_selected = (self.swarm_selected + 1).min(last);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.swarm_selected = self.swarm_selected.saturating_sub(1);
+            }
+            KeyCode::Char('g') | KeyCode::Home => self.swarm_selected = 0,
+            KeyCode::Char('G') | KeyCode::End => {
+                self.swarm_selected = self.agents.len().saturating_sub(1);
+            }
+            KeyCode::Enter => {
+                if let Some(seq) = self.selected_agent().map(|a| a.seq) {
+                    self.show_task(seq, db)?;
+                }
             }
             _ => {}
         }
@@ -549,13 +653,31 @@ impl App {
         let Some(seq) = self.selected_task().map(|t| t.seq) else {
             return Ok(());
         };
+        self.show_task(seq, db)
+    }
+
+    /// Load one task and everything around it into the detail overlay.
+    fn show_task(&mut self, seq: i64, db: &Db) -> anyhow::Result<()> {
         let task = db.tasks().get(seq)?;
         let events = db.tasks().events(&task.id, 40)?;
         let learned = db.memory().for_task(&task.id)?;
+        let (waiting_for, conflicts) = db.tasks().readiness(seq)?;
+        let readiness = Readiness {
+            waiting_for,
+            blocks: db
+                .deps()
+                .dependents(seq)?
+                .into_iter()
+                .map(|b| b.seq)
+                .collect(),
+            paths: db.scopes().for_task(seq)?,
+            conflicts,
+        };
         self.mode = Mode::TaskDetail {
             task: Box::new(task),
             events,
             learned,
+            readiness: Box::new(readiness),
         };
         Ok(())
     }
@@ -593,6 +715,54 @@ impl App {
             is_error: true,
         });
     }
+}
+
+/// Join live tasks to their declared files and cross-check them all.
+///
+/// Overlap is decided by pattern intersection, not by comparing strings, so
+/// `src/**` and `src/db.rs` are recognised as the same territory even though
+/// neither declaration mentions the other.
+fn agent_rows(tasks: &[TaskSummary], declared: &[crate::model::ScopedTask]) -> Vec<AgentRow> {
+    let scopes: BTreeMap<i64, &Vec<String>> =
+        declared.iter().map(|s| (s.seq, &s.patterns)).collect();
+    let mut rows: Vec<AgentRow> = tasks
+        .iter()
+        .filter(|t| t.status.is_active())
+        .map(|t| AgentRow {
+            holder: t.claimed_by.clone().unwrap_or_else(|| "unknown".into()),
+            seq: t.seq,
+            title: t.title.clone(),
+            status: t.status,
+            lease_expires_at: t.lease_expires_at.clone(),
+            patterns: scopes.get(&t.seq).map(|p| (*p).clone()).unwrap_or_default(),
+            overlaps: Vec::new(),
+        })
+        .collect();
+    rows.sort_by(|a, b| a.holder.cmp(&b.holder).then(a.seq.cmp(&b.seq)));
+
+    // Quadratic, over the handful of agents that can be live at once.
+    for i in 0..rows.len() {
+        let mut found = Vec::new();
+        for (j, other) in rows.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            for pattern in &rows[i].patterns {
+                for other_pattern in &other.patterns {
+                    if glob::intersects(pattern, other_pattern) {
+                        found.push(Overlap {
+                            pattern: pattern.clone(),
+                            other_seq: other.seq,
+                            other_holder: other.holder.clone(),
+                            other_pattern: other_pattern.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        rows[i].overlaps = found;
+    }
+    rows
 }
 
 #[cfg(test)]
@@ -691,7 +861,13 @@ mod tests {
         app.on_key(key(KeyCode::Tab), &db).unwrap();
         assert_eq!(app.screen, Screen::Memory);
         app.on_key(key(KeyCode::Tab), &db).unwrap();
+        assert_eq!(app.screen, Screen::Swarm);
+        app.on_key(key(KeyCode::Tab), &db).unwrap();
         assert_eq!(app.screen, Screen::Queue);
+
+        // Shift-Tab walks the same ring backwards.
+        app.on_key(key(KeyCode::BackTab), &db).unwrap();
+        assert_eq!(app.screen, Screen::Swarm);
 
         app.on_key(ch('?'), &db).unwrap();
         assert_eq!(app.mode, Mode::Help);
@@ -867,6 +1043,7 @@ mod tests {
                 task: shown,
                 events,
                 learned,
+                ..
             } => {
                 assert_eq!(shown.id, task.id);
                 assert_eq!(shown.body, "body");

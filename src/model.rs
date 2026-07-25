@@ -83,9 +83,15 @@ impl Status {
     /// open ──claim──► claimed ──start──► in_progress ──complete──► done
     ///   ▲                │                    │        └─fail────► failed
     ///   │                └── lease expiry ────┘
+    ///   │                └──── release ───────┘
     ///   └──────── reopen (human) ◄── done|failed|cancelled
     /// open ──cancel (human)──► cancelled
     /// ```
+    ///
+    /// `release` is the agent-side counterpart of a lease expiry: an agent
+    /// that cannot finish a task hands it straight back rather than making
+    /// everyone wait out the lease, and without the `failed` state a human
+    /// would have to clear by hand.
     pub fn apply(self, transition: Transition) -> Option<Status> {
         use Status::*;
         use Transition::*;
@@ -96,7 +102,7 @@ impl Status {
             (Claimed, Start) | (InProgress, Start) => Some(InProgress),
             (Claimed | InProgress, Complete) => Some(Done),
             (Claimed | InProgress, Fail) => Some(Failed),
-            (Claimed | InProgress, LeaseExpiry) => Some(Open),
+            (Claimed | InProgress, LeaseExpiry | Release) => Some(Open),
             (Open | Claimed | InProgress, Cancel) => Some(Cancelled),
             (Done | Failed | Cancelled, Reopen) => Some(Open),
             _ => None,
@@ -146,6 +152,8 @@ pub enum Transition {
     Fail,
     /// Lease ran out and the task returns to the pool.
     LeaseExpiry,
+    /// Lease holder hands the task back unfinished.
+    Release,
     /// Human abandons the task.
     Cancel,
     /// Human puts a terminal task back in the pool.
@@ -154,12 +162,13 @@ pub enum Transition {
 
 impl Transition {
     /// Every transition, for exhaustive iteration in tests.
-    pub const ALL: [Transition; 7] = [
+    pub const ALL: [Transition; 8] = [
         Transition::Claim,
         Transition::Start,
         Transition::Complete,
         Transition::Fail,
         Transition::LeaseExpiry,
+        Transition::Release,
         Transition::Cancel,
         Transition::Reopen,
     ];
@@ -171,6 +180,7 @@ impl Transition {
             Transition::Complete => "complete",
             Transition::Fail => "fail",
             Transition::LeaseExpiry => "lease_expiry",
+            Transition::Release => "release",
             Transition::Cancel => "cancel",
             Transition::Reopen => "reopen",
         }
@@ -193,10 +203,17 @@ pub enum EventKind {
     Note,
     LeaseRenewed,
     LeaseExpired,
+    /// The holder handed the task back unfinished.
+    Released,
     Completed,
     Failed,
     Cancelled,
     Reopened,
+    /// A dependency on another task was added or removed.
+    DepAdded,
+    DepRemoved,
+    /// The task's declared file scope changed.
+    Scoped,
 }
 
 impl EventKind {
@@ -208,10 +225,14 @@ impl EventKind {
             EventKind::Note => "note",
             EventKind::LeaseRenewed => "lease_renewed",
             EventKind::LeaseExpired => "lease_expired",
+            EventKind::Released => "released",
             EventKind::Completed => "completed",
             EventKind::Failed => "failed",
             EventKind::Cancelled => "cancelled",
             EventKind::Reopened => "reopened",
+            EventKind::DepAdded => "dep_added",
+            EventKind::DepRemoved => "dep_removed",
+            EventKind::Scoped => "scoped",
         }
     }
 }
@@ -233,10 +254,14 @@ impl FromStr for EventKind {
             "note" => Ok(EventKind::Note),
             "lease_renewed" => Ok(EventKind::LeaseRenewed),
             "lease_expired" => Ok(EventKind::LeaseExpired),
+            "released" => Ok(EventKind::Released),
             "completed" => Ok(EventKind::Completed),
             "failed" => Ok(EventKind::Failed),
             "cancelled" => Ok(EventKind::Cancelled),
             "reopened" => Ok(EventKind::Reopened),
+            "dep_added" => Ok(EventKind::DepAdded),
+            "dep_removed" => Ok(EventKind::DepRemoved),
+            "scoped" => Ok(EventKind::Scoped),
             other => Err(format!("unknown event kind {other:?}")),
         }
     }
@@ -293,6 +318,88 @@ pub struct TaskEvent {
     pub detail: String,
 }
 
+/// A task that must finish before another one can start.
+///
+/// Carries enough context to explain a refusal without a second lookup, which
+/// is what makes the error message actionable to a model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Blocker {
+    pub seq: i64,
+    pub title: String,
+    pub status: Status,
+}
+
+impl Blocker {
+    /// A blocker is cleared only by reaching `done`; a `failed` or `cancelled`
+    /// dependency keeps the dependent task off the ready list, because the work
+    /// it was waiting for did not happen.
+    pub fn is_cleared(&self) -> bool {
+        self.status == Status::Done
+    }
+}
+
+/// One glob a task has declared it will touch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PathClaim {
+    pub task_id: String,
+    pub pattern: String,
+    pub declared_by: String,
+    pub at: String,
+}
+
+/// A task together with the file scope it has declared.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopedTask {
+    pub seq: i64,
+    pub title: String,
+    pub status: Status,
+    pub holder: Option<String>,
+    pub patterns: Vec<String>,
+}
+
+/// Two tasks whose declared file scopes can name the same path.
+///
+/// Reported whenever one of the two is being actively worked, which is the
+/// only time an overlap can turn into a lost edit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Conflict {
+    /// The pattern declared by the task being checked.
+    pub pattern: String,
+    /// The task already in the way.
+    pub other_seq: i64,
+    pub other_title: String,
+    pub other_pattern: String,
+    pub other_status: Status,
+    pub other_holder: Option<String>,
+}
+
+impl Conflict {
+    /// One sentence, aimed at a model that has to relay it to a human.
+    pub fn describe(&self) -> String {
+        match &self.other_holder {
+            Some(holder) => format!(
+                "{} overlaps {} on task {} ({}), held by {holder}",
+                self.pattern,
+                self.other_pattern,
+                self.other_seq,
+                truncate_title(&self.other_title),
+            ),
+            None => format!(
+                "{} overlaps {} on task {} ({}, {})",
+                self.pattern,
+                self.other_pattern,
+                self.other_seq,
+                truncate_title(&self.other_title),
+                self.other_status,
+            ),
+        }
+    }
+}
+
+fn truncate_title(title: &str) -> String {
+    crate::fmt::truncate(title, 40)
+}
+
 /// One durable factual claim recorded by an agent or a human.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Assertion {
@@ -346,6 +453,8 @@ mod tests {
             (Status::InProgress, Transition::Fail, Status::Failed),
             (Status::Claimed, Transition::LeaseExpiry, Status::Open),
             (Status::InProgress, Transition::LeaseExpiry, Status::Open),
+            (Status::Claimed, Transition::Release, Status::Open),
+            (Status::InProgress, Transition::Release, Status::Open),
             (Status::Open, Transition::Cancel, Status::Cancelled),
             (Status::Claimed, Transition::Cancel, Status::Cancelled),
             (Status::InProgress, Transition::Cancel, Status::Cancelled),

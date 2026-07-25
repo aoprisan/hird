@@ -17,3 +17,21 @@ lease_ttl_minutes = 15
 # Explicit `--all-projects` / `all_projects: true` arguments still win, so this
 # only changes what happens when nothing is specified.
 all_projects_by_default = false
+
+# What to do when a task declares files that overlap what another agent is
+# already working on.
+#
+#   "report"  record the declaration and tell the agent who else is in there
+#   "refuse"  reject the claim outright, rolling back anything it had taken
+#
+# "report" suits a human who is watching the board and can arbitrate; "refuse"
+# suits an unattended swarm where a lost edit costs more than a stalled task.
+path_conflicts = "report"
+
+# Whether `task_next` — the tool agents call to be handed the next piece of
+# work — passes over tasks whose declared file scope overlaps live work.
+#
+# On by default: when the queue gets to choose which task to hand out, there is
+# no reason to choose one that will collide. Turn it off to have agents take
+# work strictly in priority order and sort the overlaps out themselves.
+dispatch_avoids_conflicts = true

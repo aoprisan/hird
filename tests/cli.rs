@@ -250,3 +250,106 @@ fn help_and_version_work_without_a_database() {
     assert!(sandbox.run(&["--version"]).contains("hird"));
     assert!(!sandbox.db().exists());
 }
+
+#[test]
+fn a_plan_can_be_filed_in_one_go_and_read_back_as_waves() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["add", "write the schema", "--path", "src/db.rs"]);
+    sandbox.run(&[
+        "add",
+        "write the api",
+        "--needs",
+        "1",
+        "--path",
+        "src/api.rs",
+    ]);
+    sandbox.run(&["add", "write the docs", "--needs", "1,2"]);
+
+    let graph = sandbox.run(&["graph"]);
+    assert!(graph.contains("wave 1  (workable now)"), "{graph}");
+    // Each task lands one wave behind the last thing it waits for.
+    let wave_of = |seq: &str| {
+        graph
+            .lines()
+            .rev()
+            .find(|l| l.contains(&format!("#{seq}")))
+            .map(|_| {
+                graph
+                    .lines()
+                    .take_while(|l| !l.contains(&format!("#{seq}")))
+                    .filter(|l| l.starts_with("wave"))
+                    .count()
+            })
+            .unwrap_or(0)
+    };
+    assert_eq!(wave_of("1"), 1, "{graph}");
+    assert_eq!(wave_of("2"), 2, "{graph}");
+    assert_eq!(wave_of("3"), 3, "{graph}");
+
+    let listed = sandbox.run(&["ls"]);
+    assert!(listed.contains("waits #1"), "{listed}");
+    assert!(listed.contains("waits #1,#2"), "{listed}");
+}
+
+#[test]
+fn a_cycle_is_refused_with_the_chain_that_would_have_closed_it() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["add", "a"]);
+    sandbox.run(&["add", "b"]);
+    sandbox.run(&["dep", "add", "2", "--needs", "1"]);
+
+    let err = sandbox.run_failing(&["dep", "add", "1", "--needs", "2"]);
+    assert!(err.contains("that would be a cycle"), "{err}");
+    assert!(err.contains("2 -> 1"), "{err}");
+}
+
+#[test]
+fn show_reports_what_a_task_waits_for_and_what_it_touches() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["add", "write the schema"]);
+    sandbox.run(&[
+        "add",
+        "write the api",
+        "--needs",
+        "1",
+        "--path",
+        "src/api.rs",
+    ]);
+
+    let shown = sandbox.run(&["show", "2"]);
+    assert!(shown.contains("waits for #1 (open)"), "{shown}");
+    assert!(shown.contains("files     src/api.rs"), "{shown}");
+
+    let upstream = sandbox.run(&["show", "1"]);
+    assert!(upstream.contains("blocks    #2"), "{upstream}");
+}
+
+#[test]
+fn a_scope_can_be_set_inspected_and_cleared() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["add", "refactor"]);
+
+    let set = sandbox.run(&["scope", "1", "--path", "./src/tui/", "--path", "README.md"]);
+    assert_eq!(set, "src/tui/**\nREADME.md\n");
+    assert_eq!(sandbox.run(&["scope", "1"]), "src/tui/**\nREADME.md\n");
+
+    sandbox.run(&["scope", "1", "--clear"]);
+    assert!(sandbox.run(&["scope", "1"]).contains("declares no files"));
+}
+
+#[test]
+fn a_path_that_climbs_out_of_the_project_is_refused() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["add", "t"]);
+    let err = sandbox.run_failing(&["scope", "1", "--path", "../../etc/passwd"]);
+    assert!(err.contains("not a usable path pattern"), "{err}");
+}
+
+#[test]
+fn the_agents_view_is_quiet_when_nobody_is_working() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["add", "t"]);
+    assert!(sandbox
+        .run(&["agents"])
+        .contains("no agent is working anything right now"));
+}

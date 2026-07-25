@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
-use super::app::{App, Column, Mode, Screen};
+use super::app::{AgentRow, App, Column, Mode, Readiness, Screen};
 use super::theme;
 use crate::fmt;
 use crate::identity::actor_harness;
@@ -26,6 +26,7 @@ pub fn render(frame: &mut Frame, app: &App, now: DateTime<Utc>) {
     match app.screen {
         Screen::Queue => render_queue(frame, body, app, now),
         Screen::Memory => render_memory(frame, body, app, now),
+        Screen::Swarm => render_swarm(frame, body, app, now),
     }
     render_status_bar(frame, status, app, now);
 
@@ -37,7 +38,8 @@ pub fn render(frame: &mut Frame, app: &App, now: DateTime<Utc>) {
             task,
             events,
             learned,
-        } => render_task_detail(frame, task, events, learned, now),
+            readiness,
+        } => render_task_detail(frame, task, events, learned, readiness, now),
         Mode::AssertionDetail { assertion } => render_assertion_detail(frame, app, assertion, now),
         Mode::Normal | Mode::Filter | Mode::Search => {}
     }
@@ -55,6 +57,7 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled(" hird ", theme::focus_style()),
         tab("Queue", app.screen == Screen::Queue),
         tab("Memory", app.screen == Screen::Memory),
+        tab("Swarm", app.screen == Screen::Swarm),
         Span::styled("  Tab switches · ? help · q quit", theme::dim_style()),
     ]);
     frame.render_widget(Paragraph::new(line), area);
@@ -116,7 +119,7 @@ fn render_column(frame: &mut Frame, area: Rect, app: &App, column: Column, now: 
     let width = area.width.saturating_sub(4) as usize;
     let items: Vec<ListItem> = tasks
         .iter()
-        .map(|task| ListItem::new(task_card(task, width, now)))
+        .map(|task| ListItem::new(task_card(task, width, now, app.blocked_by(task.seq))))
         .collect();
 
     let mut state = ListState::default();
@@ -133,7 +136,12 @@ fn render_column(frame: &mut Frame, area: Rect, app: &App, column: Column, now: 
 }
 
 /// One card: `#seq title`, then a line of badges when there is anything to say.
-fn task_card(task: &TaskSummary, width: usize, now: DateTime<Utc>) -> Text<'static> {
+fn task_card(
+    task: &TaskSummary,
+    width: usize,
+    now: DateTime<Utc>,
+    blocked_by: &[i64],
+) -> Text<'static> {
     let marker = match task.priority {
         p if p > 0 => Span::styled(format!("▲{p} "), Style::default().yellow()),
         p if p < 0 => Span::styled(format!("▼{} ", -p), theme::dim_style()),
@@ -172,12 +180,196 @@ fn task_card(task: &TaskSummary, width: usize, now: DateTime<Utc>) -> Text<'stat
             theme::dim_style(),
         ));
     }
+    // A blocked task looks open but nobody can take it, so the card has to say
+    // so — otherwise the board shows work that is not really available.
+    if !blocked_by.is_empty() {
+        if !badges.is_empty() {
+            badges.push(Span::raw("  "));
+        }
+        badges.push(Span::styled(
+            format!(
+                "waits {}",
+                blocked_by
+                    .iter()
+                    .map(|s| format!("#{s}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+            theme::blocked_style(),
+        ));
+    }
     if !badges.is_empty() {
         let mut line = vec![Span::raw("   ")];
         line.extend(badges);
         lines.push(Line::from(line));
     }
     Text::from(lines)
+}
+
+// ------------------------------------------------------------- swarm / radar
+
+/// Who is working what, and what is ready to go out next.
+///
+/// The left pane is the conflict radar: one row per live agent, its declared
+/// files underneath, and a red line for every overlap with another agent. The
+/// right pane is the pipeline — the tasks that could be handed out right now,
+/// then what each later wave is waiting on.
+fn render_swarm(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>) {
+    let [left, right] =
+        Layout::horizontal([Constraint::Ratio(3, 5), Constraint::Ratio(2, 5)]).areas(area);
+    render_agents(frame, left, app, now);
+    render_pipeline(frame, right, app);
+}
+
+fn render_agents(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>) {
+    let clashing = app.agents.iter().filter(|a| !a.overlaps.is_empty()).count();
+    let title = if clashing == 0 {
+        format!(" Agents ({}) ", app.agents.len())
+    } else {
+        format!(" Agents ({}) · {clashing} overlapping ", app.agents.len())
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(if clashing == 0 {
+            theme::focus_style()
+        } else {
+            theme::conflict_style()
+        })
+        .title(Span::styled(title, theme::focus_style()));
+
+    if app.agents.is_empty() {
+        frame.render_widget(
+            Paragraph::new("no agent is holding a task right now")
+                .style(theme::dim_style())
+                .block(block),
+            area,
+        );
+        return;
+    }
+
+    let width = area.width.saturating_sub(4) as usize;
+    let items: Vec<ListItem> = app
+        .agents
+        .iter()
+        .map(|agent| ListItem::new(agent_card(agent, width, now)))
+        .collect();
+    let mut state = ListState::default();
+    state.select(Some(app.swarm_selected.min(app.agents.len() - 1)));
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(block)
+            .highlight_style(theme::selection_style()),
+        area,
+        &mut state,
+    );
+}
+
+fn agent_card(agent: &AgentRow, width: usize, now: DateTime<Utc>) -> Text<'static> {
+    let harness = actor_harness(&agent.holder);
+    let mut header = vec![
+        Span::styled(format!("{harness} "), theme::badge_style(harness)),
+        Span::styled(
+            format!("#{} ", agent.seq),
+            Style::default().fg(theme::status_color(agent.status)),
+        ),
+        Span::raw(fmt::truncate(&agent.title, width.saturating_sub(24).max(8))),
+    ];
+    if let Some(expires) = &agent.lease_expires_at {
+        let text = fmt::lease_remaining(expires, now);
+        let style = if text == "overdue" {
+            theme::overdue_style()
+        } else {
+            theme::dim_style()
+        };
+        header.push(Span::styled(format!("  {text}"), style));
+    }
+
+    let mut lines = vec![Line::from(header)];
+    let files = if agent.patterns.is_empty() {
+        Span::styled("   (no files declared)".to_string(), theme::dim_style())
+    } else {
+        Span::styled(
+            format!("   {}", fmt::truncate(&agent.patterns.join(", "), width)),
+            Style::default().cyan(),
+        )
+    };
+    lines.push(Line::from(files));
+    for overlap in &agent.overlaps {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "   !! {} also in {} on #{} ({})",
+                overlap.pattern,
+                overlap.other_pattern,
+                overlap.other_seq,
+                actor_harness(&overlap.other_holder),
+            ),
+            theme::conflict_style(),
+        )));
+    }
+    Text::from(lines)
+}
+
+fn render_pipeline(frame: &mut Frame, area: Rect, app: &App) {
+    let workable = app.workable();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::dim_style())
+        .title(Span::styled(
+            format!(" Ready to dispatch ({}) ", workable.len()),
+            theme::focus_style(),
+        ));
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if workable.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "nothing an agent could pick up",
+            theme::dim_style(),
+        )));
+    }
+    for task in &workable {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("#{} ", task.seq),
+                Style::default().fg(theme::status_color(task.status)),
+            ),
+            Span::raw(fmt::truncate(
+                &task.title,
+                area.width.saturating_sub(8) as usize,
+            )),
+        ]));
+    }
+
+    // Everything after the first wave is, by definition, waiting for it.
+    let later: usize = app.waves.iter().skip(1).map(Vec::len).sum();
+    if later > 0 {
+        lines.push(Line::from(""));
+        let rounds = app.waves.len() - 1;
+        lines.push(Line::from(Span::styled(
+            format!(
+                "{later} more behind them, across {rounds} later {}",
+                if rounds == 1 { "wave" } else { "waves" }
+            ),
+            theme::dim_style(),
+        )));
+        for (index, wave) in app.waves.iter().enumerate().skip(1) {
+            let listed = wave
+                .iter()
+                .map(|s| format!("#{s}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            lines.push(Line::from(Span::styled(
+                format!("  wave {}  {listed}", index + 1),
+                theme::dim_style(),
+            )));
+        }
+    }
+    frame.render_widget(
+        // `trim: false` so the wave indentation survives wrapping.
+        Paragraph::new(Text::from(lines))
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 // --------------------------------------------------------------- memory browser
@@ -310,6 +502,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc
     } else {
         shorten_path(&app.project)
     };
+    let ready = app.workable().len();
     let counts = Status::ALL
         .into_iter()
         .filter_map(|s| app.counts.get(&s).filter(|n| **n > 0).map(|n| (s, *n)))
@@ -328,6 +521,10 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc
         Span::styled(format!("{scope}  "), Style::default().cyan()),
     ];
     spans.extend(counts);
+    spans.push(Span::styled(
+        format!("· {ready} ready  "),
+        Style::default().fg(theme::status_color(Status::Open)),
+    ));
     spans.push(Span::styled(
         format!("· {} memory  ", app.memory_total),
         theme::dim_style(),
@@ -360,7 +557,7 @@ fn shorten_path(path: &str) -> String {
 
 fn render_help(frame: &mut Frame, app: &App) {
     let common: &[(&str, &str)] = &[
-        ("Tab", "switch between the queue and memory"),
+        ("Tab", "next screen (Shift-Tab for the previous one)"),
         ("p", "toggle project filter (current / all)"),
         ("/", "filter or search"),
         ("?", "this help"),
@@ -381,6 +578,10 @@ fn render_help(frame: &mut Frame, app: &App) {
         ("d", "supersede it with something truer"),
         ("s", "show or hide superseded assertions"),
     ];
+    let swarm: &[(&str, &str)] = &[
+        ("j / k", "move between agents"),
+        ("Enter", "open the task that agent is holding"),
+    ];
 
     let mut lines = Vec::new();
     let section = |title: &str, keys: &[(&str, &str)], lines: &mut Vec<Line<'static>>| {
@@ -399,6 +600,7 @@ fn render_help(frame: &mut Frame, app: &App) {
     section("Anywhere", common, &mut lines);
     section("Queue board", queue, &mut lines);
     section("Memory browser", memory, &mut lines);
+    section("Swarm", swarm, &mut lines);
     lines.push(Line::from(Span::styled(
         format!(
             "Leases last {} minutes; expired claims return to Open automatically.",
@@ -411,7 +613,10 @@ fn render_help(frame: &mut Frame, app: &App) {
         theme::dim_style(),
     )));
 
-    overlay(frame, " Keys ", Text::from(lines), 62, 26);
+    // Sized to its contents so adding a section cannot silently push the
+    // lease note off the bottom of the box.
+    let height = lines.len() as u16 + 2;
+    overlay(frame, " Keys ", Text::from(lines), 62, height);
 }
 
 fn render_add_task(frame: &mut Frame, title: &str, body: &str, focus: usize) {
@@ -469,6 +674,7 @@ fn render_task_detail(
     task: &crate::model::Task,
     events: &[crate::model::TaskEvent],
     learned: &[Assertion],
+    readiness: &Readiness,
     now: DateTime<Utc>,
 ) {
     let mut lines = vec![
@@ -496,6 +702,46 @@ fn render_task_detail(
             ),
         ]),
     ];
+    if !readiness.waiting_for.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("waits for  ", theme::focus_style()),
+            Span::styled(
+                readiness
+                    .waiting_for
+                    .iter()
+                    .map(|b| format!("#{} ({})", b.seq, b.status))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                theme::blocked_style(),
+            ),
+        ]));
+    }
+    if !readiness.blocks.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("blocks     ", theme::focus_style()),
+            Span::styled(
+                readiness
+                    .blocks
+                    .iter()
+                    .map(|s| format!("#{s}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                theme::dim_style(),
+            ),
+        ]));
+    }
+    if !readiness.paths.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("files      ", theme::focus_style()),
+            Span::raw(readiness.paths.join(", ")),
+        ]));
+    }
+    for conflict in &readiness.conflicts {
+        lines.push(Line::from(vec![
+            Span::styled("overlap    ", theme::conflict_style()),
+            Span::styled(conflict.describe(), theme::conflict_style()),
+        ]));
+    }
     if !task.body.trim().is_empty() {
         lines.push(Line::from(""));
         lines.extend(task.body.lines().map(|l| Line::from(l.to_string())));
@@ -845,6 +1091,7 @@ mod tests {
 
         let mut app = app_with(&db);
         app.mode = Mode::TaskDetail {
+            readiness: Box::new(Readiness::default()),
             task: Box::new(db.tasks().get(task.seq).unwrap()),
             events: db.tasks().events(&task.id, 40).unwrap(),
             learned: db.memory().for_task(&task.id).unwrap(),
@@ -894,5 +1141,115 @@ mod tests {
                 .draw(|frame| render(frame, &app, Utc::now()))
                 .expect("rendering must not panic at {w}x{h}");
         }
+    }
+
+    // -------------------------------------------------------- swarm / radar
+
+    /// A board with codex holding a wide refactor and claude-code holding a
+    /// task inside it, plus one blocked task waiting on both.
+    fn swarming(db: &Db) -> App {
+        use crate::repo::OnConflict;
+        let ttl = Config::default().lease_ttl();
+        let wide = db
+            .tasks()
+            .create(PROJECT, "wide refactor", "", 0, "cli")
+            .unwrap()
+            .seq;
+        let narrow = db
+            .tasks()
+            .create(PROJECT, "fix the db module", "", 0, "cli")
+            .unwrap()
+            .seq;
+        let later = db
+            .tasks()
+            .create(PROJECT, "write the release notes", "", 0, "cli")
+            .unwrap()
+            .seq;
+        db.scopes()
+            .declare(wide, &["src/**".into()], "cli", OnConflict::Report)
+            .unwrap();
+        db.scopes()
+            .declare(narrow, &["src/db.rs".into()], "cli", OnConflict::Report)
+            .unwrap();
+        db.deps().add(later, wide, "cli").unwrap();
+        db.deps().add(later, narrow, "cli").unwrap();
+        db.tasks().claim(wide, "codex:9f2c", ttl).unwrap();
+        db.tasks().claim(narrow, "claude-code:af31", ttl).unwrap();
+
+        let mut app = app_with(db);
+        app.screen = Screen::Swarm;
+        app
+    }
+
+    #[test]
+    fn the_swarm_screen_shows_both_agents_and_the_overlap_between_them() {
+        let db = Db::open_in_memory().unwrap();
+        let app = swarming(&db);
+        let out = screen(&app);
+
+        assert!(out.contains("Agents (2)"), "{out}");
+        assert!(out.contains("2 overlapping"), "{out}");
+        assert!(out.contains("codex"), "{out}");
+        assert!(out.contains("claude-code"), "{out}");
+        assert!(out.contains("src/**"), "{out}");
+        // The overlap is found by intersecting patterns, not by matching text:
+        // neither declaration mentions the other.
+        assert!(out.contains("src/db.rs also in src/**"), "{out}");
+    }
+
+    #[test]
+    fn the_swarm_screen_shows_what_could_be_dispatched_next() {
+        let db = Db::open_in_memory().unwrap();
+        let app = swarming(&db);
+        let out = screen(&app);
+
+        // Everything open is blocked, so there is nothing to hand out.
+        assert!(out.contains("Ready to dispatch (0)"), "{out}");
+        assert!(out.contains("nothing an agent could pick up"), "{out}");
+        assert!(
+            out.contains("1 more behind them, across 1 later wave"),
+            "{out}"
+        );
+        assert!(out.contains("wave 2  #3"), "{out}");
+    }
+
+    #[test]
+    fn an_idle_swarm_says_so_rather_than_showing_an_empty_box() {
+        let db = Db::open_in_memory().unwrap();
+        db.tasks()
+            .create(PROJECT, "waiting work", "", 0, "cli")
+            .unwrap();
+        let mut app = app_with(&db);
+        app.screen = Screen::Swarm;
+        let out = screen(&app);
+
+        assert!(
+            out.contains("no agent is holding a task right now"),
+            "{out}"
+        );
+        assert!(out.contains("Ready to dispatch (1)"), "{out}");
+        assert!(out.contains("waiting work"), "{out}");
+    }
+
+    #[test]
+    fn a_blocked_card_says_what_it_is_waiting_for() {
+        let db = Db::open_in_memory().unwrap();
+        let gate = db
+            .tasks()
+            .create(PROJECT, "the gate", "", 0, "cli")
+            .unwrap()
+            .seq;
+        let waiting = db
+            .tasks()
+            .create(PROJECT, "behind the gate", "", 0, "cli")
+            .unwrap()
+            .seq;
+        db.deps().add(waiting, gate, "cli").unwrap();
+
+        let app = app_with(&db);
+        let out = screen(&app);
+        assert!(out.contains("waits #1"), "{out}");
+        // And the status bar counts only the task that could actually go out.
+        assert!(out.contains("1 ready"), "{out}");
     }
 }
