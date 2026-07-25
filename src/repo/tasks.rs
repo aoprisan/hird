@@ -180,6 +180,16 @@ impl<'a> Tasks<'a> {
         Ok(rows.collect::<rusqlite::Result<BTreeMap<_, _>>>()?)
     }
 
+    /// Map every task's internal id to its human-facing number.
+    ///
+    /// Assertions reference tasks by id; the TUI shows `#seq`, and one small
+    /// lookup table beats a query per row.
+    pub fn seq_index(&self) -> Result<BTreeMap<String, i64>> {
+        let mut stmt = self.conn.prepare("SELECT id, seq FROM tasks")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<BTreeMap<_, _>>>()?)
+    }
+
     /// Every distinct project that has at least one task.
     pub fn projects(&self) -> Result<Vec<String>> {
         let mut stmt = self

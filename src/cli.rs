@@ -275,7 +275,7 @@ fn show(db: &Db, seq: i64, out: &mut impl Write) -> anyhow::Result<()> {
             .unwrap_or_default();
         writeln!(out, "held by   {holder}{lease}")?;
     }
-    writeln!(out, "created   {} ago", fmt::age(&task.created_at, now))?;
+    writeln!(out, "created   {}", fmt::age_phrase(&task.created_at, now))?;
     if !task.body.trim().is_empty() {
         writeln!(out, "\n{}", task.body.trim_end())?;
     }
@@ -294,8 +294,8 @@ fn show(db: &Db, seq: i64, out: &mut impl Write) -> anyhow::Result<()> {
             };
             writeln!(
                 out,
-                "  {:>5} ago  {:<13} {}{}",
-                fmt::age(&event.at, now),
+                "  {:>9}  {:<13} {}{}",
+                fmt::age_phrase(&event.at, now),
                 event.kind,
                 event.actor,
                 detail
@@ -356,7 +356,7 @@ fn mem(
             for assertion in hits {
                 let mut meta = vec![
                     assertion.actor.clone(),
-                    format!("{} ago", fmt::age(&assertion.created_at, now)),
+                    fmt::age_phrase(&assertion.created_at, now),
                 ];
                 if !assertion.tags.is_empty() {
                     meta.push(format!("#{}", assertion.tags.replace(',', " #")));

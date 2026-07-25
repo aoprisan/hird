@@ -12,6 +12,18 @@ pub fn age(timestamp: &str, now: DateTime<Utc>) -> String {
     }
 }
 
+/// How long ago a timestamp was, as a phrase: `2h ago` or `just now`.
+///
+/// Callers should prefer this over appending `" ago"` to [`age`] themselves,
+/// which produces the nonsense "just now ago".
+pub fn age_phrase(timestamp: &str, now: DateTime<Utc>) -> String {
+    match age(timestamp, now).as_str() {
+        "just now" => "just now".to_string(),
+        "?" => "at an unknown time".to_string(),
+        elapsed => format!("{elapsed} ago"),
+    }
+}
+
 /// How long is left on a lease, as `12m left` or `overdue`.
 pub fn lease_remaining(expires_at: &str, now: DateTime<Utc>) -> String {
     match parse_ts(expires_at) {
@@ -81,6 +93,14 @@ mod tests {
         assert_eq!(age(&ago(90), now()), "1m");
         assert_eq!(age(&ago(7200), now()), "2h");
         assert_eq!(age(&ago(172_800), now()), "2d");
+    }
+
+    #[test]
+    fn age_phrases_never_read_as_just_now_ago() {
+        assert_eq!(age_phrase(&ago(0), now()), "just now");
+        assert_eq!(age_phrase(&ago(45), now()), "45s ago");
+        assert_eq!(age_phrase(&ago(7200), now()), "2h ago");
+        assert_eq!(age_phrase("nonsense", now()), "at an unknown time");
     }
 
     #[test]
