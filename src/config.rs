@@ -129,6 +129,15 @@ mod tests {
         assert!(Config::default().all_projects(Some(true)));
     }
 
+    /// The shipped example must stay loadable, and must document the actual
+    /// defaults rather than drifting away from them.
+    #[test]
+    fn the_example_config_parses_and_matches_the_defaults() {
+        let example = include_str!("../examples/config.toml");
+        let parsed: Config = toml::from_str(example).expect("examples/config.toml must parse");
+        assert_eq!(parsed, Config::default());
+    }
+
     #[test]
     fn an_explicit_db_flag_wins() {
         let chosen = resolve_db_path(Some(Path::new("/tmp/explicit.db")));

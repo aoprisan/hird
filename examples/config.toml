@@ -1,0 +1,19 @@
+# Example hird configuration.
+#
+# Copy to ${XDG_CONFIG_HOME:-~/.config}/hird/config.toml. Every key is
+# optional; anything left out uses the default shown here.
+
+# How long a claim survives without a `task_update`, in minutes.
+#
+# Agents are told this value during the MCP handshake and asked to check in at
+# half the interval, so raising it is all that is needed to give slow tasks more
+# room. If an agent dies, its claim lapses after this long and the task returns
+# to `open` on its own.
+lease_ttl_minutes = 15
+
+# Whether `task_list`, `mem_search` and `hird ls` span every project by default
+# rather than just the current one.
+#
+# Explicit `--all-projects` / `all_projects: true` arguments still win, so this
+# only changes what happens when nothing is specified.
+all_projects_by_default = false

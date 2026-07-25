@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --check
+
+      - name: Lints
+        run: cargo clippy --all-targets -- -D warnings
+
+      # Spawns the real binary for the MCP and CLI integration tests, so the
+      # binary has to exist before they run.
+      - name: Tests
+        run: cargo test --all-targets
