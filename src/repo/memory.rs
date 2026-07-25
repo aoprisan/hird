@@ -443,7 +443,10 @@ mod tests {
         assert_eq!(contents(&hits), vec!["the parser lives in src/parse.rs"]);
 
         let by_tag = db.memory().search(&MemoryQuery::new("ui", scope)).unwrap();
-        assert_eq!(contents(&by_tag), vec!["the renderer lives in src/render.rs"]);
+        assert_eq!(
+            contents(&by_tag),
+            vec!["the renderer lives in src/render.rs"]
+        );
     }
 
     #[test]
@@ -499,7 +502,10 @@ mod tests {
         store(&db, "newer", "");
         let hits = db
             .memory()
-            .search(&MemoryQuery::new("\"((", ProjectScope::Only(PROJECT.into())))
+            .search(&MemoryQuery::new(
+                "\"((",
+                ProjectScope::Only(PROJECT.into()),
+            ))
             .unwrap();
         assert_eq!(contents(&hits), vec!["newer", "older"]);
     }
@@ -546,7 +552,10 @@ mod tests {
 
         let scoped = db
             .memory()
-            .search(&MemoryQuery::new("shared", ProjectScope::Only(PROJECT.into())))
+            .search(&MemoryQuery::new(
+                "shared",
+                ProjectScope::Only(PROJECT.into()),
+            ))
             .unwrap();
         assert_eq!(scoped.len(), 1);
 
@@ -582,7 +591,11 @@ mod tests {
         assert_eq!(replacement.actor, "tui");
         assert_eq!(replacement.tags, "api");
         assert_eq!(
-            db.memory().get(&original.id).unwrap().superseded_by.as_deref(),
+            db.memory()
+                .get(&original.id)
+                .unwrap()
+                .superseded_by
+                .as_deref(),
             Some(replacement.id.as_str())
         );
 
@@ -612,8 +625,13 @@ mod tests {
     fn an_assertion_cannot_be_superseded_twice() {
         let db = db();
         let original = store(&db, "x is true", "");
-        db.memory().supersede(&original.id, "x is false", "tui").unwrap();
-        let err = db.memory().supersede(&original.id, "again", "tui").unwrap_err();
+        db.memory()
+            .supersede(&original.id, "x is false", "tui")
+            .unwrap();
+        let err = db
+            .memory()
+            .supersede(&original.id, "again", "tui")
+            .unwrap_err();
         assert!(err.to_string().contains("already superseded"), "{err}");
     }
 
@@ -653,7 +671,9 @@ mod tests {
         let db = db();
         let a = store(&db, "findable phrase", "");
         // supersede() updates the base row, which the FTS triggers must mirror.
-        db.memory().supersede(&a.id, "replacement phrase", "tui").unwrap();
+        db.memory()
+            .supersede(&a.id, "replacement phrase", "tui")
+            .unwrap();
         let hits = db
             .memory()
             .search(

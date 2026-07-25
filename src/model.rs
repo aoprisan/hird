@@ -106,7 +106,8 @@ impl Status {
 
 impl fmt::Display for Status {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+        // `pad` rather than `write_str` so `{status:<11}` lines columns up.
+        f.pad(self.as_str())
     }
 }
 
@@ -178,7 +179,7 @@ impl Transition {
 
 impl fmt::Display for Transition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+        f.pad(self.as_str())
     }
 }
 
@@ -217,7 +218,7 @@ impl EventKind {
 
 impl fmt::Display for EventKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+        f.pad(self.as_str())
     }
 }
 

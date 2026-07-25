@@ -126,6 +126,12 @@ fn git_toplevel(start: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Canonicalize a user-supplied project path the same way detection does, so
+/// `--project .` and automatic detection agree on the scope string.
+pub fn canonical_project(path: &Path) -> String {
+    canonical(path)
+}
+
 fn canonical(path: &Path) -> String {
     let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     resolved.to_string_lossy().into_owned()

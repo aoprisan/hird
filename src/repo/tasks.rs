@@ -8,9 +8,7 @@ use rusqlite::{params, Connection, OptionalExtension, Row, Transaction, Transact
 
 use super::{new_id, ProjectScope};
 use crate::error::{Error, Result};
-use crate::model::{
-    fmt_ts, now_ts, EventKind, Status, Task, TaskEvent, TaskSummary, Transition,
-};
+use crate::model::{fmt_ts, now_ts, EventKind, Status, Task, TaskEvent, TaskSummary, Transition};
 
 /// Columns selected for a full [`Task`], in the order [`row_to_task`] expects.
 const TASK_COLUMNS: &str = "id, seq, project, title, body, status, priority, \
@@ -92,11 +90,7 @@ impl<'a> Tasks<'a> {
     ///
     /// Results are ordered so the most interesting work floats to the top:
     /// active tasks first, then by descending priority, then by recency.
-    pub fn list(
-        &self,
-        scope: &ProjectScope,
-        status: Option<Status>,
-    ) -> Result<Vec<TaskSummary>> {
+    pub fn list(&self, scope: &ProjectScope, status: Option<Status>) -> Result<Vec<TaskSummary>> {
         self.sweep_leases()?;
         let (project_clause, project_value) = scope.clause("project");
         let mut sql = format!(
@@ -165,10 +159,7 @@ impl<'a> Tasks<'a> {
                 task_id: row.get(1)?,
                 at: row.get(2)?,
                 actor: row.get(3)?,
-                kind: row
-                    .get::<_, String>(4)?
-                    .parse()
-                    .unwrap_or(EventKind::Note),
+                kind: row.get::<_, String>(4)?.parse().unwrap_or(EventKind::Note),
                 detail: row.get(5)?,
             })
         })?;
@@ -214,9 +205,7 @@ impl<'a> Tasks<'a> {
                 "SELECT id, seq, claimed_by FROM tasks
                  WHERE status IN ('claimed','in_progress') AND lease_expires_at < ?1",
             )?;
-            let rows = stmt.query_map([&now], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })?;
+            let rows = stmt.query_map([&now], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
         if due.is_empty() {
@@ -371,13 +360,7 @@ impl<'a> Tasks<'a> {
         self.finish(seq, actor, Transition::Fail, reason)
     }
 
-    fn finish(
-        &self,
-        seq: i64,
-        actor: &str,
-        transition: Transition,
-        result: &str,
-    ) -> Result<Task> {
+    fn finish(&self, seq: i64, actor: &str, transition: Transition, result: &str) -> Result<Task> {
         let result = result.trim();
         if result.is_empty() {
             return Err(Error::invalid(match transition {
@@ -516,9 +499,11 @@ fn insert_event(
 }
 
 fn task_id_for_seq(conn: &Connection, seq: i64) -> Result<String> {
-    conn.query_row("SELECT id FROM tasks WHERE seq = ?1", [seq], |row| row.get(0))
-        .optional()?
-        .ok_or(Error::TaskNotFound { seq })
+    conn.query_row("SELECT id FROM tasks WHERE seq = ?1", [seq], |row| {
+        row.get(0)
+    })
+    .optional()?
+    .ok_or(Error::TaskNotFound { seq })
 }
 
 /// Load a task and confirm `actor` currently holds its lease.
@@ -615,7 +600,10 @@ mod tests {
     #[test]
     fn creating_a_task_records_a_created_event() {
         let db = db();
-        let task = db.tasks().create(PROJECT, "build it", "", 0, "cli").unwrap();
+        let task = db
+            .tasks()
+            .create(PROJECT, "build it", "", 0, "cli")
+            .unwrap();
         let events = db.tasks().events(&task.id, 20).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, EventKind::Created);
@@ -650,7 +638,10 @@ mod tests {
             .claim(seq, "claude-code:af31", TTL)
             .unwrap_err()
             .to_string();
-        assert!(err.starts_with("task 1 is claimed by codex:9f2c until "), "{err}");
+        assert!(
+            err.starts_with("task 1 is claimed by codex:9f2c until "),
+            "{err}"
+        );
     }
 
     #[test]
@@ -667,7 +658,9 @@ mod tests {
         db.tasks().claim(seq, "codex:9f2c", TTL).unwrap();
 
         for err in [
-            db.tasks().update(seq, "other:1", true, "n", TTL).unwrap_err(),
+            db.tasks()
+                .update(seq, "other:1", true, "n", TTL)
+                .unwrap_err(),
             db.tasks().complete(seq, "other:1", "r").unwrap_err(),
             db.tasks().fail(seq, "other:1", "r").unwrap_err(),
         ] {
@@ -683,15 +676,23 @@ mod tests {
         let db = db();
         let seq = seed(&db, "t");
         let err = db.tasks().complete(seq, "a:1", "done").unwrap_err();
-        assert_eq!(err.to_string(), "task 1 is open and unclaimed; a:1 must claim it first");
+        assert_eq!(
+            err.to_string(),
+            "task 1 is open and unclaimed; a:1 must claim it first"
+        );
     }
 
     #[test]
     fn update_starts_work_renews_the_lease_and_logs_a_note() {
         let db = db();
         let seq = seed(&db, "t");
-        db.tasks().claim(seq, "a:1", Duration::from_secs(60)).unwrap();
-        let task = db.tasks().update(seq, "a:1", true, "  looking at it  ", TTL).unwrap();
+        db.tasks()
+            .claim(seq, "a:1", Duration::from_secs(60))
+            .unwrap();
+        let task = db
+            .tasks()
+            .update(seq, "a:1", true, "  looking at it  ", TTL)
+            .unwrap();
 
         assert_eq!(task.status, Status::InProgress);
         assert!(task.lease_remaining_secs(Utc::now()).unwrap() > 800);
@@ -853,7 +854,10 @@ mod tests {
         let seq = seed(&db, "t");
         db.tasks().claim(seq, "codex:dead", TTL).unwrap();
         expire_lease(&db, seq);
-        let err = db.tasks().complete(seq, "codex:dead", "too late").unwrap_err();
+        let err = db
+            .tasks()
+            .complete(seq, "codex:dead", "too late")
+            .unwrap_err();
         assert!(err.to_string().contains("must claim it first"), "{err}");
     }
 
@@ -863,7 +867,9 @@ mod tests {
         let open = seed(&db, "open one");
         let claimed = seed(&db, "claimed one");
         db.tasks().claim(claimed, "a:1", TTL).unwrap();
-        db.tasks().create("/other", "elsewhere", "", 0, "cli").unwrap();
+        db.tasks()
+            .create("/other", "elsewhere", "", 0, "cli")
+            .unwrap();
 
         let scope = ProjectScope::Only(PROJECT.into());
         let all = db.tasks().list(&scope, None).unwrap();
@@ -881,12 +887,23 @@ mod tests {
     fn listing_puts_active_work_first_then_priority() {
         let db = db();
         db.tasks().create(PROJECT, "low", "", 0, "cli").unwrap();
-        let high = db.tasks().create(PROJECT, "high", "", 5, "cli").unwrap().seq;
-        let busy = db.tasks().create(PROJECT, "busy", "", -1, "cli").unwrap().seq;
+        let high = db
+            .tasks()
+            .create(PROJECT, "high", "", 5, "cli")
+            .unwrap()
+            .seq;
+        let busy = db
+            .tasks()
+            .create(PROJECT, "busy", "", -1, "cli")
+            .unwrap()
+            .seq;
         db.tasks().claim(busy, "a:1", TTL).unwrap();
         db.tasks().update(busy, "a:1", true, "n", TTL).unwrap();
 
-        let listed = db.tasks().list(&ProjectScope::Only(PROJECT.into()), None).unwrap();
+        let listed = db
+            .tasks()
+            .list(&ProjectScope::Only(PROJECT.into()), None)
+            .unwrap();
         assert_eq!(listed[0].seq, busy);
         assert_eq!(listed[1].seq, high);
     }
@@ -898,7 +915,10 @@ mod tests {
         let b = seed(&db, "b");
         db.tasks().claim(b, "a:1", TTL).unwrap();
 
-        let counts = db.tasks().counts(&ProjectScope::Only(PROJECT.into())).unwrap();
+        let counts = db
+            .tasks()
+            .counts(&ProjectScope::Only(PROJECT.into()))
+            .unwrap();
         assert_eq!(counts.get(&Status::Open), Some(&1));
         assert_eq!(counts.get(&Status::Claimed), Some(&1));
         assert_eq!(counts.get(&Status::Done), None);
@@ -919,7 +939,9 @@ mod tests {
         let seq = seed(&db, "t");
         db.tasks().claim(seq, "a:1", TTL).unwrap();
         for i in 0..10 {
-            db.tasks().update(seq, "a:1", false, &format!("note {i}"), TTL).unwrap();
+            db.tasks()
+                .update(seq, "a:1", false, &format!("note {i}"), TTL)
+                .unwrap();
         }
         let task = db.tasks().get(seq).unwrap();
         let events = db.tasks().events(&task.id, 5).unwrap();
@@ -956,7 +978,11 @@ mod tests {
 
         let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
         let winners: Vec<_> = results.iter().filter_map(|r| r.as_ref().ok()).collect();
-        assert_eq!(winners.len(), 1, "expected exactly one winner, got {winners:?}");
+        assert_eq!(
+            winners.len(),
+            1,
+            "expected exactly one winner, got {winners:?}"
+        );
 
         let db = Db::open(&path).unwrap();
         let task = db.tasks().get(seq).unwrap();
@@ -1018,7 +1044,10 @@ mod tests {
             .flat_map(|h| h.join().unwrap())
             .collect();
         reported.sort_unstable();
-        assert_eq!(reported, seqs, "each expiry must be reported by exactly one sweeper");
+        assert_eq!(
+            reported, seqs,
+            "each expiry must be reported by exactly one sweeper"
+        );
 
         let db = Db::open(&path).unwrap();
         for seq in seqs {
@@ -1065,7 +1094,10 @@ mod tests {
             })
             .collect();
 
-        let mut seqs: Vec<i64> = handles.into_iter().flat_map(|h| h.join().unwrap()).collect();
+        let mut seqs: Vec<i64> = handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect();
         seqs.sort_unstable();
         assert_eq!(seqs, (1..=(WRITERS * EACH) as i64).collect::<Vec<_>>());
     }

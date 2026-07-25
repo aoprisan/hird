@@ -131,7 +131,9 @@ impl Db {
         &self.path
     }
 
-    /// Escape hatch for tests and for the repositories themselves.
+    /// Raw connection access, for tests that need to set up states the
+    /// repository layer deliberately refuses to create.
+    #[cfg(test)]
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn
     }
@@ -198,11 +200,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested").join("hird.db");
         let first = Db::open(&path).unwrap();
-        let seq = first
-            .tasks()
-            .create("/p", "t", "", 0, "cli")
-            .unwrap()
-            .seq;
+        let seq = first.tasks().create("/p", "t", "", 0, "cli").unwrap().seq;
         drop(first);
 
         let second = Db::open(&path).unwrap();

@@ -34,9 +34,9 @@ impl Config {
     /// Load from `path`, returning defaults when the file does not exist.
     pub fn load(path: &Path) -> anyhow::Result<Config> {
         match std::fs::read_to_string(path) {
-            Ok(raw) => Ok(toml::from_str(&raw).map_err(|e| {
-                anyhow::anyhow!("{}: {e}", path.display())
-            })?),
+            Ok(raw) => {
+                Ok(toml::from_str(&raw).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
             Err(e) => Err(anyhow::anyhow!("{}: {e}", path.display())),
         }
