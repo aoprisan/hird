@@ -4,8 +4,8 @@
 default:
     @just --list
 
-# Everything CI would check: formatting, lints, and the full test suite.
-check: fmt-check lint test
+# Everything CI would check: formatting, lints, the test suite and the site.
+check: fmt-check lint test site-check
 
 build:
     cargo build
@@ -35,6 +35,27 @@ install:
 
 docs:
     cargo doc --no-deps --open
+
+# Open the static usage guide — the same files GitHub Pages publishes.
+site:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for opener in xdg-open open; do
+        if command -v "$opener" >/dev/null; then exec "$opener" docs/index.html; fi
+    done
+    echo "open docs/index.html in a browser"
+
+# Check the site's own links and assets, the way CI does.
+site-check:
+    .github/scripts/check-docs-links.sh
+
+# Run the example scripts end to end against throwaway databases.
+examples: build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export HIRD_BIN="$PWD/target/debug/hird"
+    ./examples/manual-dispatch.sh
+    ./examples/swarm-plan.sh
 
 # Where this machine's database lives.
 db-path:

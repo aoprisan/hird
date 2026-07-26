@@ -30,3 +30,17 @@ jobs:
       # binary has to exist before they run.
       - name: Tests
         run: cargo test --all-targets
+
+      # The published site is hand-written HTML, so a renamed section id would
+      # otherwise break its own table of contents silently.
+      - name: Documentation site links
+        run: .github/scripts/check-docs-links.sh
+
+      # The examples are part of the documentation; a broken one misleads.
+      - name: Example scripts
+        env:
+          HIRD_BIN: ${{ github.workspace }}/target/debug/hird
+        run: |
+          bash -n examples/*.sh examples/lib/*.sh examples/harness/*.sh
+          ./examples/manual-dispatch.sh
+          ./examples/swarm-plan.sh

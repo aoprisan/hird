@@ -1,0 +1,444 @@
+/* hird documentation — one stylesheet, no external assets, works offline. */
+
+:root {
+  --bg: #fbfbf9;
+  --bg-raised: #ffffff;
+  --bg-sunken: #f2f1ed;
+  --ink: #23211d;
+  --ink-soft: #5c584f;
+  --ink-faint: #8b8578;
+  --rule: #e3e0d8;
+  --accent: #9a4b1f;
+  --accent-soft: #f4e9e0;
+  --green: #2f6a43;
+  --red: #a33025;
+  --yellow: #8a6a10;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #17181a;
+    --bg-raised: #1e2023;
+    --bg-sunken: #121315;
+    --ink: #e6e3dd;
+    --ink-soft: #aaa69d;
+    --ink-faint: #7d786f;
+    --rule: #2e3135;
+    --accent: #e08a54;
+    --accent-soft: #2a2320;
+    --green: #79c091;
+    --red: #e2867c;
+    --yellow: #d6b258;
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: #17181a;
+  --bg-raised: #1e2023;
+  --bg-sunken: #121315;
+  --ink: #e6e3dd;
+  --ink-soft: #aaa69d;
+  --ink-faint: #7d786f;
+  --rule: #2e3135;
+  --accent: #e08a54;
+  --accent-soft: #2a2320;
+  --green: #79c091;
+  --red: #e2867c;
+  --yellow: #d6b258;
+}
+
+:root[data-theme="light"] {
+  --bg: #fbfbf9;
+  --bg-raised: #ffffff;
+  --bg-sunken: #f2f1ed;
+  --ink: #23211d;
+  --ink-soft: #5c584f;
+  --ink-faint: #8b8578;
+  --rule: #e3e0d8;
+  --accent: #9a4b1f;
+  --accent-soft: #f4e9e0;
+  --green: #2f6a43;
+  --red: #a33025;
+  --yellow: #8a6a10;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.65;
+  -webkit-text-size-adjust: 100%;
+}
+
+/* ------------------------------------------------------------------ layout */
+
+.shell {
+  display: grid;
+  grid-template-columns: 15rem minmax(0, 1fr);
+  gap: 3rem;
+  max-width: 68rem;
+  margin: 0 auto;
+  padding: 0 1.5rem 6rem;
+}
+
+nav.toc {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  max-height: 100vh;
+  overflow-y: auto;
+  padding: 2rem 0;
+  font-size: 0.875rem;
+}
+
+nav.toc .brand {
+  font-family: var(--mono);
+  font-size: 1.25rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+  text-decoration: none;
+  display: block;
+}
+
+nav.toc .tagline {
+  color: var(--ink-faint);
+  font-size: 0.8125rem;
+  margin: 0.25rem 0 1.5rem;
+  line-height: 1.4;
+}
+
+nav.toc ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-left: 1px solid var(--rule);
+}
+
+nav.toc li a {
+  display: block;
+  padding: 0.2rem 0 0.2rem 0.9rem;
+  margin-left: -1px;
+  border-left: 2px solid transparent;
+  color: var(--ink-soft);
+  text-decoration: none;
+}
+
+nav.toc li a:hover { color: var(--ink); }
+
+nav.toc li a.here {
+  color: var(--accent);
+  border-left-color: var(--accent);
+  font-weight: 500;
+}
+
+nav.toc .sub a { padding-left: 1.7rem; font-size: 0.8125rem; }
+
+nav.toc .away {
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--rule);
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+nav.toc .away a { color: var(--ink-soft); text-decoration: none; }
+nav.toc .away a:hover { color: var(--accent); }
+
+/* The contents are a <details> so they can fold away on a phone; on a wide
+   screen they are always open and the summary is not needed. */
+nav.toc .nav-body > summary { display: none; }
+
+main { padding: 2rem 0; min-width: 0; }
+
+@media (max-width: 62rem) {
+  .shell { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  nav.toc {
+    position: static;
+    max-height: none;
+    padding-bottom: 0;
+    border-bottom: 1px solid var(--rule);
+  }
+  nav.toc ol { columns: 2; column-gap: 1.5rem; border-left: 0; padding-bottom: 1rem; }
+  nav.toc .sub { display: none; }
+  nav.toc li a { border-left: 0; padding-left: 0; }
+  nav.toc li a.here { border-left: 0; }
+  nav.toc .nav-body > summary {
+    display: list-item;
+    cursor: pointer;
+    padding: 0.3rem 0 0.6rem;
+    color: var(--ink-soft);
+    font-weight: 500;
+  }
+  nav.toc .away { margin-top: 1rem; }
+}
+
+/* ------------------------------------------------------------------- text */
+
+h1, h2, h3, h4 {
+  line-height: 1.25;
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+
+h1 {
+  font-size: clamp(2rem, 5vw, 2.75rem);
+  font-weight: 650;
+}
+
+h2 {
+  font-size: 1.5rem;
+  font-weight: 600;
+  margin: 3.5rem 0 1rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+h3 {
+  font-size: 1.125rem;
+  font-weight: 600;
+  margin: 2.25rem 0 0.75rem;
+}
+
+h4 {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  margin: 1.75rem 0 0.5rem;
+  color: var(--ink-soft);
+}
+
+section { scroll-margin-top: 1.5rem; }
+
+p { margin: 0 0 1rem; }
+
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+
+strong { font-weight: 620; }
+
+ul, ol.numbered { margin: 0 0 1rem; padding-left: 1.25rem; }
+li { margin-bottom: 0.35rem; }
+
+.lede {
+  font-size: 1.125rem;
+  color: var(--ink-soft);
+  margin-bottom: 1.5rem;
+}
+
+.quiet { color: var(--ink-faint); font-size: 0.875rem; }
+
+blockquote {
+  margin: 1rem 0;
+  padding: 0.1rem 0 0.1rem 1rem;
+  border-left: 3px solid var(--accent);
+  color: var(--ink-soft);
+  font-style: italic;
+}
+
+/* ------------------------------------------------------------------- code */
+
+code {
+  font-family: var(--mono);
+  font-size: 0.875em;
+  background: var(--bg-sunken);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 0.08em 0.32em;
+}
+
+pre {
+  margin: 0 0 1rem;
+  padding: 0.9rem 1rem;
+  background: var(--bg-sunken);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  overflow-x: auto;
+  font-size: 0.8125rem;
+  line-height: 1.6;
+}
+
+pre code {
+  background: none;
+  border: 0;
+  padding: 0;
+  font-size: inherit;
+  white-space: pre;
+}
+
+/* Box-drawing characters only join up at a line-height of about 1. */
+pre.diagram { line-height: 1.15; }
+
+pre .c { color: var(--ink-faint); }        /* comment / prompt output */
+pre .k { color: var(--accent); }           /* command name */
+pre .s { color: var(--green); }            /* string */
+pre .w { color: var(--red); }              /* warning line */
+
+.filename {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--ink-faint);
+  display: block;
+  margin-bottom: 0.35rem;
+}
+
+/* ------------------------------------------------------------------ blocks */
+
+.hero {
+  padding: 2rem 0 0;
+}
+
+.hero .badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.badge {
+  font-size: 0.75rem;
+  font-family: var(--mono);
+  color: var(--ink-soft);
+  background: var(--bg-raised);
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  padding: 0.15rem 0.6rem;
+}
+
+.cta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin: 1.5rem 0 0;
+}
+
+.cta a {
+  display: inline-block;
+  padding: 0.45rem 1rem;
+  border-radius: 6px;
+  font-size: 0.9375rem;
+  text-decoration: none;
+  border: 1px solid var(--rule);
+  background: var(--bg-raised);
+  color: var(--ink);
+}
+
+.cta a.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg-raised);
+  font-weight: 500;
+}
+
+.cta a:hover { border-color: var(--accent); }
+.cta a.primary:hover { filter: brightness(1.08); }
+
+.note {
+  background: var(--accent-soft);
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 8px 8px 0;
+  padding: 0.9rem 1.1rem;
+  margin: 1.5rem 0;
+}
+
+.note p:last-child { margin-bottom: 0; }
+.note .label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  color: var(--accent);
+  display: block;
+  margin-bottom: 0.3rem;
+}
+
+.cols {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 1rem;
+  margin: 1.5rem 0;
+}
+
+.card {
+  background: var(--bg-raised);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  padding: 1rem 1.1rem;
+}
+
+.card h4 { margin-top: 0; color: var(--ink); }
+.card p:last-child { margin-bottom: 0; }
+.card p { font-size: 0.9375rem; color: var(--ink-soft); }
+
+.table-wrap { overflow-x: auto; margin: 0 0 1rem; }
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.9375rem;
+}
+
+th, td {
+  text-align: left;
+  padding: 0.45rem 0.75rem 0.45rem 0;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: top;
+}
+
+th {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ink-faint);
+  font-weight: 600;
+}
+
+td code { white-space: nowrap; }
+
+kbd {
+  font-family: var(--mono);
+  font-size: 0.8125em;
+  background: var(--bg-raised);
+  border: 1px solid var(--rule);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 0.05em 0.4em;
+  color: var(--ink);
+}
+
+footer.page {
+  max-width: 68rem;
+  margin: 0 auto;
+  padding: 2rem 1.5rem 3rem;
+  border-top: 1px solid var(--rule);
+  color: var(--ink-faint);
+  font-size: 0.875rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  justify-content: space-between;
+}
+
+footer.page a { color: var(--ink-soft); }
+
+#theme {
+  position: fixed;
+  top: 0.75rem;
+  right: 0.75rem;
+  background: var(--bg-raised);
+  border: 1px solid var(--rule);
+  color: var(--ink-soft);
+  border-radius: 999px;
+  padding: 0.3rem 0.7rem;
+  font-size: 0.75rem;
+  font-family: var(--mono);
+  cursor: pointer;
+}
+
+#theme:hover { color: var(--accent); border-color: var(--accent); }
