@@ -59,7 +59,19 @@ say "codex checks in again — and is told before it writes"
 # Codex is holding a copy of src/config.rs that is no longer on disk. It has no
 # way to know that: it cannot see claude-code's session, and nothing has been
 # committed for git to compare.
-session_call codex 3 task_update "{\"seq\": $port, \"note\": \"carrying on\"}"
+warned=$(session_call codex 3 task_update "{\"seq\": $port, \"note\": \"carrying on\"}")
+printf '%s\n' "$warned"
+
+# The one line this whole script exists to produce. An example that prints a
+# story which did not happen is worse than one that stops, so if the warning is
+# missing, say so and fail rather than narrating past it.
+case "$warned" in
+    *contended*) ;;
+    *)
+        echo "no contention was reported — the witness is not doing its job here" >&2
+        exit 1
+        ;;
+esac
 
 say "and an edit nobody declared"
 
