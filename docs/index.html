@@ -1,0 +1,780 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hird — usage guide</title>
+<meta name="description" content="How to use hird: a shared work queue and shared assertion memory for AI coding agents across harnesses, backed by one local SQLite database.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<button id="theme" type="button" aria-label="Toggle colour theme">theme</button>
+
+<div class="shell">
+<nav class="toc" aria-label="Contents">
+  <a class="brand" href="#top">hird</a>
+  <p class="tagline">One work queue and one memory, shared by every agent you run.</p>
+  <details class="nav-body" open>
+  <summary>Contents</summary>
+  <ol>
+    <li><a href="#install">Install</a></li>
+    <li><a href="#dispatch">Dispatching work</a></li>
+    <li class="sub"><a href="#by-hand">By hand, by number</a></li>
+    <li class="sub"><a href="#work-the-queue">Letting agents pull</a></li>
+    <li><a href="#harnesses">Registering a harness</a></li>
+    <li><a href="#lifecycle">How a task moves</a></li>
+    <li><a href="#dependencies">Dependencies</a></li>
+    <li><a href="#scope">File scope and collisions</a></li>
+    <li><a href="#split">Splitting a task</a></li>
+    <li><a href="#memory">Memory</a></li>
+    <li><a href="#cli">Command line</a></li>
+    <li><a href="#tui">The TUI</a></li>
+    <li><a href="#mcp">MCP tools</a></li>
+    <li><a href="#config">Configuration</a></li>
+    <li><a href="#examples">Examples</a></li>
+    <li><a href="#faq">FAQ</a></li>
+  </ol>
+  <div class="away">
+    <a href="https://github.com/aoprisan/hird">Source on GitHub &rarr;</a>
+    <a href="https://github.com/aoprisan/hird/tree/main/examples">Examples folder &rarr;</a>
+    <a href="https://github.com/aoprisan/hird/blob/main/DESIGN.md">DESIGN.md &rarr;</a>
+  </div>
+  </details>
+</nav>
+
+<main id="top">
+
+<header class="hero">
+  <div class="badges">
+    <span class="badge">one binary</span>
+    <span class="badge">no daemon</span>
+    <span class="badge">SQLite (WAL)</span>
+    <span class="badge">MCP over stdio</span>
+  </div>
+  <h1>hird</h1>
+  <p class="lede">
+    You run Claude Code in one terminal, Codex CLI in another, maybe Copilot in
+    your editor. They cannot see each other's work, and nothing either of them
+    learns survives the session. <strong>hird</strong> is one local binary that
+    gives them a shared queue and a shared memory, in one SQLite file, with a
+    terminal UI over the top.
+  </p>
+  <div class="cta">
+    <a class="primary" href="#install">Install</a>
+    <a href="#by-hand">Dispatch a task by hand</a>
+    <a href="https://github.com/aoprisan/hird">GitHub</a>
+  </div>
+</header>
+
+<pre class="diagram" aria-label="Architecture diagram"><code>┌────────────┐  ┌────────────┐  ┌────────────┐
+│ Claude Code│  │  Codex CLI │  │  Copilot   │
+└─────┬──────┘  └─────┬──────┘  └─────┬──────┘
+      │ stdio MCP     │ stdio MCP     │ stdio MCP
+┌─────▼──────┐  ┌─────▼──────┐  ┌─────▼──────┐
+│ hird mcp   │  │ hird mcp   │  │ hird mcp   │   one process per session
+└─────┬──────┘  └─────┬──────┘  └─────┬──────┘
+      └───────────────┼────────────────┘
+                ┌─────▼──────┐        ┌──────────┐
+                │  SQLite    │◄───────┤ hird tui │
+                │  (WAL)     │◄───────┤ hird CLI │
+                └────────────┘        └──────────┘</code></pre>
+
+<section id="install">
+<h2>Install</h2>
+
+<pre><code><span class="k">cargo</span> install --path .</code></pre>
+
+<p>
+  Needs a Rust toolchain (1.88 or newer). SQLite is compiled in, so there is
+  nothing else to install and nothing to configure before first use. The
+  database is created on first write at
+  <code>${XDG_DATA_HOME:-~/.local/share}/hird/hird.db</code>; ask for the exact
+  path with <code>hird db-path</code>.
+</p>
+</section>
+
+<section id="dispatch">
+<h2>Dispatching work</h2>
+
+<p>
+  There are two ways to get work to an agent, and they are not exclusive — the
+  same queue serves both, at the same time, and you can mix them task by task.
+</p>
+
+<div class="cols">
+  <div class="card">
+    <h4>By hand, by number</h4>
+    <p>
+      You file a task, then tell a specific agent <em>"pick up task 42"</em>. It
+      calls <code>task_claim</code> on the number you said. You decide who works
+      what and when.
+    </p>
+  </div>
+  <div class="card">
+    <h4>Letting agents pull</h4>
+    <p>
+      You file a plan, then tell every agent <em>"work the queue"</em>. Each one
+      calls <code>task_next</code> and is handed the most important task that is
+      actually workable. Nobody assigns anything.
+    </p>
+  </div>
+</div>
+
+<div class="note">
+  <span class="label">Manual dispatch is not going anywhere</span>
+  <p>
+    Self-service dispatch was added alongside manual dispatch, not in place of
+    it. Nothing in hird ever pushes work at an agent: <code>task_next</code> is
+    a tool an agent chooses to call, so an agent you never tell to work the
+    queue will sit idle until you name a number. Naming a number still works
+    exactly as it did — including for tasks that were filed as part of a
+    dependency graph.
+  </p>
+</div>
+
+<h3 id="by-hand">By hand, by number</h3>
+
+<p>File the task from the shell (or with <kbd>a</kbd> in the TUI):</p>
+
+<pre><code><span class="k">hird</span> add <span class="s">"Port the config loader to serde"</span> \
+        --body <span class="s">"Keep the env-var precedence. Tests in tests/config.rs must pass."</span>
+<span class="c"># → 1</span>
+
+<span class="k">hird</span> ls
+<span class="c"># #1  open         Port the config loader to serde</span></code></pre>
+
+<p>
+  <code>hird add</code> prints the task number and nothing else, so it composes:
+  <code>seq=$(hird add "…")</code>. Then, in any
+  <a href="#harnesses">registered harness</a>, say:
+</p>
+
+<blockquote>pick up task 1</blockquote>
+
+<p>
+  The agent calls <code>task_claim</code> with <code>seq: 1</code>, gets the full
+  body back, works it, and calls <code>task_complete</code>. Watch it happen with
+  <code>hird tui</code>, or read the history afterwards with
+  <code>hird show 1</code>.
+</p>
+
+<p>
+  A claim is atomic. If you hand the same number to two agents, exactly one wins
+  and the loser gets a sentence it can repeat to you verbatim:
+</p>
+
+<pre><code><span class="w">task 42 is claimed by codex:9f2c until 2026-07-25T14:32:00.000Z</span></code></pre>
+
+<p>
+  A claim on a task whose dependencies are unfinished is refused for that reason
+  instead — see <a href="#dependencies">Dependencies</a>. Those are the only two
+  ways a claim by number fails.
+</p>
+
+<h3 id="work-the-queue">Letting agents pull</h3>
+
+<p>
+  Naming a number works, but it does not scale past one agent. Give the queue a
+  plan instead, and let the agents take it apart themselves.
+</p>
+
+<pre><code><span class="k">hird</span> add <span class="s">"Design the storage schema"</span>     --path <span class="s">'src/db.rs'</span>
+<span class="k">hird</span> add <span class="s">"Port the repository layer"</span>     --path <span class="s">'src/repo/**'</span> --needs 1
+<span class="k">hird</span> add <span class="s">"Rewrite the renderer"</span>          --path <span class="s">'src/tui/**'</span></code></pre>
+
+<p>
+  Now open three harnesses and tell each one the same thing:
+  <strong>"work the queue"</strong>. Each agent calls <code>task_next</code>, and
+  the queue hands out the most important task that is <em>actually workable</em>
+  — open, with every dependency finished, and whose files nobody else is inside.
+  Tasks 1 and 3 go out immediately, in parallel. Task 2 waits, because the schema
+  is not done yet.
+</p>
+
+<pre><code>$ <span class="k">hird</span> graph
+wave 1  (workable now)
+  #1    in_progress  Design the storage schema
+  #3    claimed      Rewrite the renderer
+wave 2  (after wave 1)
+  #2    open         Port the repository layer      waits for #1</code></pre>
+
+<p>
+  Agents keep calling <code>task_next</code> as they finish, until it comes back
+  with nothing to do — and it says why it is idle: everything done, everything
+  blocked, or everything left overlapping live work.
+</p>
+</section>
+
+<section id="harnesses">
+<h2>Registering a harness</h2>
+
+<p>
+  Each harness runs its own <code>hird mcp</code> process over stdio. The only
+  thing they need to differ on is <code>HIRD_HARNESS</code>, which is how agents
+  and the board tell each other apart (<code>claude-code:af31</code>,
+  <code>codex:9f2c</code>). Leave it unset and the agent shows up as
+  <code>unknown</code>.
+</p>
+
+<h4>Claude Code</h4>
+<pre><code><span class="k">claude</span> mcp add hird -e HIRD_HARNESS=claude-code -- hird mcp</code></pre>
+
+<h4>Codex CLI</h4>
+<span class="filename">~/.codex/config.toml</span>
+<pre><code>[mcp_servers.hird]
+command = <span class="s">"hird"</span>
+args = [<span class="s">"mcp"</span>]
+env = { HIRD_HARNESS = <span class="s">"codex"</span> }</code></pre>
+
+<h4>Copilot / VS Code</h4>
+<span class="filename">.vscode/mcp.json</span>
+<pre><code>{
+  <span class="s">"servers"</span>: {
+    <span class="s">"hird"</span>: {
+      <span class="s">"type"</span>: <span class="s">"stdio"</span>,
+      <span class="s">"command"</span>: <span class="s">"hird"</span>,
+      <span class="s">"args"</span>: [<span class="s">"mcp"</span>],
+      <span class="s">"env"</span>: { <span class="s">"HIRD_HARNESS"</span>: <span class="s">"copilot"</span> }
+    }
+  }
+}</code></pre>
+
+<p>
+  Any MCP-capable harness works the same way. The server states the queue's
+  rules during the handshake — claim before working, heartbeat before the lease
+  runs out, declare your files, write down what you learn — so agents generally
+  behave without being coached in your prompt.
+</p>
+</section>
+
+<section id="lifecycle">
+<h2>How a task moves</h2>
+
+<pre class="diagram"><code>open ──claim──► claimed ──start──► in_progress ──complete──► done
+  ▲                │                    │        └─fail────► failed
+  │                └── lease expiry ────┘
+  │                └──── release ───────┘
+  └──────── reopen (human) ◄── done|failed|cancelled
+open ──cancel (human)──► cancelled</code></pre>
+
+<p>
+  <strong>Claiming is atomic.</strong> It is a single compare-and-set, so if two
+  agents reach for the same task at the same moment exactly one wins.
+</p>
+
+<p>
+  <strong>Claims are leases, not locks.</strong> A claim lasts 15 minutes by
+  default and every <code>task_update</code> renews it. If an agent crashes,
+  gets killed, or simply wanders off, the lease lapses and the task returns to
+  <code>open</code> on its own — no stuck tasks, no manual cleanup, no
+  background process. Expiry is enforced lazily by whoever reads the table next,
+  which is usually the TUI half a second later.
+</p>
+
+<p>
+  <strong>Only the lease holder can drive a task.</strong> Another agent cannot
+  complete, fail, or update work it does not hold. You, however, can always
+  <code>cancel</code> or <code>reopen</code> anything from the CLI or the TUI.
+</p>
+
+<p>
+  <strong>An agent that cannot finish hands the task back.</strong>
+  <code>task_release</code> returns it to <code>open</code> immediately, which is
+  not the same as <code>failed</code> — a failure is a verdict on the task and
+  waits for you to reopen it, a release just says this agent stopped.
+</p>
+</section>
+
+<section id="dependencies">
+<h2>Dependencies</h2>
+
+<p>
+  Dependencies are enforced, not annotated. A task whose dependencies are
+  unfinished cannot be claimed at all — by number or by
+  <code>task_next</code> — and the refusal says what to do about it:
+</p>
+
+<pre><code><span class="w">task 2 is blocked by task 1 (Design the storage schema, in_progress);
+it becomes claimable once every dependency is done</span></code></pre>
+
+<p>
+  Only <code>done</code> clears a blocker. A failed dependency keeps its
+  dependents off the ready list, because the work they were waiting for did not
+  happen.
+</p>
+
+<pre><code><span class="c"># at filing time</span>
+<span class="k">hird</span> add <span class="s">"Write the release notes"</span> --needs 1,2
+
+<span class="c"># or afterwards</span>
+<span class="k">hird</span> dep add 3 --needs 1,2
+<span class="k">hird</span> dep rm  3 --needs 2
+
+<span class="c"># see the whole plan as dispatch waves</span>
+<span class="k">hird</span> graph</code></pre>
+
+<p>
+  <code>hird graph</code> prints waves rather than edges, because that is the
+  shape you actually want: how much of this can run at once, and what the
+  critical path is.
+</p>
+</section>
+
+<section id="scope">
+<h2>File scope and collisions</h2>
+
+<p>
+  The queue also knows which files each task expects to touch, so it can see the
+  one failure mode a status machine cannot: two agents editing the same file
+  from two harnesses, one of them about to lose their work.
+</p>
+
+<p>
+  Declarations are globs, not files, because nothing has been written yet — and
+  overlap is decided by asking whether <em>any path at all</em> is described by
+  both patterns. <code>src/*.rs</code> and <code>src/lib*</code> collide before
+  <code>src/lib.rs</code> exists.
+</p>
+
+<pre><code>$ <span class="k">hird</span> agents
+codex:9f2c        #4 in_progress  Port the config loader        11m left
+    files  src/config.rs, tests/config.rs
+claude-code:af31  #7 claimed      Rewrite the loader tests      14m left
+    files  tests/**
+    <span class="w">!!     tests/** also claimed by codex:9f2c on #4</span></code></pre>
+
+<p>The agents see it too, the moment they say what they are about to change:</p>
+
+<pre><code>{ <span class="s">"seq"</span>: 7, <span class="s">"paths"</span>: [<span class="s">"tests/**"</span>],
+  <span class="s">"overlaps"</span>: [<span class="s">"tests/** overlaps tests/config.rs on task 4 (Port the config loader), held by codex:9f2c"</span>],
+  <span class="s">"advice"</span>: <span class="s">"tell the human about the overlap before editing those files, …"</span> }</code></pre>
+
+<p>
+  By default <code>task_next</code> simply does not hand out work that would
+  collide — with several tasks to choose from there is no reason to pick the one
+  that clashes. A claim <em>by number</em> is still allowed to overlap, and only
+  reports it, on the theory that you named that task on purpose. Set
+  <code>path_conflicts = "refuse"</code> to make an overlapping claim fail
+  outright instead.
+</p>
+
+<p>
+  Scope can be set at filing time with <code>--path</code>, adjusted later with
+  <code>hird scope</code>, or declared by the agent itself through
+  <code>task_scope</code> once it knows where it is going.
+</p>
+</section>
+
+<section id="split">
+<h2>Splitting a task</h2>
+
+<p>
+  An agent that finds its task is really three jobs does not have to do them in
+  sequence, or hand the problem back to you:
+</p>
+
+<pre><code>task_split { seq: 1, subtasks: [
+  { title: <span class="s">"Write the migration"</span>,   paths: [<span class="s">"src/db.rs"</span>] },
+  { title: <span class="s">"Port the repositories"</span>, paths: [<span class="s">"src/repo/**"</span>] },
+] }</code></pre>
+
+<p>
+  The pieces are filed as real tasks. Task 1 starts waiting for both and goes
+  back in the pool — blocked, so nobody can claim it early — and the agent that
+  split it is free to pick up something else. The other harnesses take a piece
+  each, in parallel, and task 1 becomes workable again the moment they are both
+  done. Pass <code>sequential: true</code> when the pieces genuinely have to
+  happen in order.
+</p>
+</section>
+
+<section id="memory">
+<h2>Memory</h2>
+
+<p>
+  The queue is for work; memory is for what the work taught you. Agents call
+  <code>mem_store</code> with one plain-prose fact — where something lives, why a
+  decision went the way it did, which command actually works — and
+  <code>mem_search</code> finds it later, from any harness, in any session.
+</p>
+
+<p>
+  Every assertion carries provenance: who asserted it, when, and which task they
+  were working at the time. Facts are never edited or deleted; a fact that stops
+  being true is <em>superseded</em> by a new one, and the old version stays
+  searchable behind <code>--include-superseded</code>.
+</p>
+
+<pre><code><span class="k">hird</span> mem add <span class="s">"Integration tests need HIRD_DB set or they touch the real db"</span> --tags testing
+<span class="k">hird</span> mem search testing</code></pre>
+
+<p>
+  Search is SQLite FTS5. If a query is not valid FTS syntax — an agent typing
+  <code>handle_event(ctx)</code> — it degrades to a term-wise substring match
+  instead of erroring.
+</p>
+</section>
+
+<section id="cli">
+<h2>Command line</h2>
+
+<pre><code>hird add &lt;title&gt; [--body &lt;md&gt;|--body-file &lt;path&gt;] [--priority N] [--project &lt;path&gt;]
+                 [--needs &lt;seq&gt;,…] [--path &lt;glob&gt;]…
+hird ls [--status &lt;status&gt;] [--all-projects]
+hird show &lt;seq&gt;
+hird cancel &lt;seq&gt; [--reason &lt;text&gt;]
+hird reopen &lt;seq&gt; [--reason &lt;text&gt;]
+hird dep add &lt;seq&gt; --needs &lt;seq&gt;,…
+hird dep rm  &lt;seq&gt; --needs &lt;seq&gt;,…
+hird graph [--all-projects]
+hird scope &lt;seq&gt; [--path &lt;glob&gt;]… [--clear]
+hird agents [--all-projects]
+hird mem add &lt;content&gt; [--tags a,b] [--task &lt;seq&gt;]
+hird mem search [query] [--limit N] [--all-projects] [--include-superseded]
+hird tui
+hird mcp
+hird db-path</code></pre>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Command</th><th>What it is for</th></tr></thead>
+  <tbody>
+    <tr><td><code>add</code></td><td>File a task. Prints the number, which is how you and the agents refer to it.</td></tr>
+    <tr><td><code>ls</code></td><td>The queue as rows: status, holder, lease countdown, what it waits for.</td></tr>
+    <tr><td><code>show</code></td><td>One task in full — body, dependencies, scope, history, what was learned on it.</td></tr>
+    <tr><td><code>cancel</code> / <code>reopen</code></td><td>Human overrides. They work regardless of who holds the task.</td></tr>
+    <tr><td><code>dep</code></td><td>Add or remove "must wait for" edges after the fact.</td></tr>
+    <tr><td><code>graph</code></td><td>The plan as dispatch waves: workable now, and what each later wave waits for.</td></tr>
+    <tr><td><code>scope</code></td><td>Show or set the files a task is expected to touch. Warns about overlaps.</td></tr>
+    <tr><td><code>agents</code></td><td>Who is working what, with a <code>!!</code> line wherever two agents are in the same files.</td></tr>
+    <tr><td><code>mem</code></td><td>Record and search assertions.</td></tr>
+    <tr><td><code>tui</code></td><td>The live board.</td></tr>
+    <tr><td><code>mcp</code></td><td>Serve MCP on stdio. Harnesses run this, you generally do not.</td></tr>
+    <tr><td><code>db-path</code></td><td>Print the database path this invocation would use.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>
+  <code>--body-file -</code> reads the task body from stdin, which is handy for
+  piping a plan straight into the queue. Every CLI action is recorded with
+  <code>actor = "cli"</code>, so the history pane shows who did what.
+</p>
+</section>
+
+<section id="tui">
+<h2>The TUI</h2>
+
+<pre><code><span class="k">hird</span> tui</code></pre>
+
+<p>
+  Three screens, <kbd>Tab</kbd> between them (<kbd>Shift-Tab</kbd> goes back).
+  The board polls every 500&nbsp;ms, so claims from other harnesses appear as
+  they happen.
+</p>
+
+<p>
+  The <strong>Swarm</strong> screen is the one to watch while several agents are
+  running: every live agent, the files it has declared, an overlap line in red
+  wherever two of them are in the same territory, and — on the right — what is
+  workable right now and how much is queued behind it.
+</p>
+
+<div class="cols">
+<div class="card">
+<h4>Anywhere</h4>
+<div class="table-wrap"><table><tbody>
+<tr><td><kbd>Tab</kbd></td><td>next screen (<kbd>Shift-Tab</kbd> for the previous)</td></tr>
+<tr><td><kbd>p</kbd></td><td>toggle project filter (current / all)</td></tr>
+<tr><td><kbd>/</kbd></td><td>filter or search</td></tr>
+<tr><td><kbd>?</kbd></td><td>help</td></tr>
+<tr><td><kbd>q</kbd></td><td>quit</td></tr>
+</tbody></table></div>
+</div>
+
+<div class="card">
+<h4>Queue board</h4>
+<div class="table-wrap"><table><tbody>
+<tr><td><kbd>j</kbd> <kbd>k</kbd></td><td>move down / up</td></tr>
+<tr><td><kbd>h</kbd> <kbd>l</kbd></td><td>previous / next column</td></tr>
+<tr><td><kbd>g</kbd> <kbd>G</kbd></td><td>first / last card</td></tr>
+<tr><td><kbd>Enter</kbd></td><td>open the task and its history</td></tr>
+<tr><td><kbd>a</kbd></td><td>add a task (<kbd>Tab</kbd> for the body, <kbd>Enter</kbd> to save)</td></tr>
+<tr><td><kbd>c</kbd> <kbd>r</kbd></td><td>cancel / reopen the selected task</td></tr>
+</tbody></table></div>
+</div>
+
+<div class="card">
+<h4>Memory browser</h4>
+<div class="table-wrap"><table><tbody>
+<tr><td><kbd>j</kbd> <kbd>k</kbd></td><td>move down / up</td></tr>
+<tr><td><kbd>Enter</kbd></td><td>show the assertion and its provenance</td></tr>
+<tr><td><kbd>d</kbd></td><td>supersede it with something truer</td></tr>
+<tr><td><kbd>s</kbd></td><td>show or hide superseded assertions</td></tr>
+</tbody></table></div>
+</div>
+
+<div class="card">
+<h4>Swarm</h4>
+<div class="table-wrap"><table><tbody>
+<tr><td><kbd>j</kbd> <kbd>k</kbd></td><td>move between agents</td></tr>
+<tr><td><kbd>Enter</kbd></td><td>open the task that agent is holding</td></tr>
+</tbody></table></div>
+</div>
+</div>
+
+<p>
+  Cards on the queue board carry a yellow <code>waits #1 #3</code> badge when a
+  task looks open but nobody can actually claim it yet.
+</p>
+</section>
+
+<section id="mcp">
+<h2>MCP tools</h2>
+
+<p>Twelve, and no more.</p>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Tool</th><th>Purpose</th></tr></thead>
+  <tbody>
+    <tr><td><code>task_list</code></td><td>What work exists, optionally filtered by status.</td></tr>
+    <tr><td><code>task_get</code></td><td>One task in full: dependencies, file scope, recent history.</td></tr>
+    <tr><td><code>task_next</code></td><td><strong>Be handed the next workable task, already claimed.</strong></td></tr>
+    <tr><td><code>task_claim</code></td><td><strong>Take a named task.</strong> Atomic; fails if someone else has it.</td></tr>
+    <tr><td><code>task_scope</code></td><td>Say which files you will change; find out who else is in them.</td></tr>
+    <tr><td><code>task_update</code></td><td>Record progress and renew the lease. Holder only.</td></tr>
+    <tr><td><code>task_split</code></td><td>Break a task into pieces the other agents can work. Holder only.</td></tr>
+    <tr><td><code>task_complete</code></td><td>Finish, with a summary. Holder only.</td></tr>
+    <tr><td><code>task_fail</code></td><td>Give up, with a reason. Holder only.</td></tr>
+    <tr><td><code>task_release</code></td><td>Hand the task back unfinished, still claimable. Holder only.</td></tr>
+    <tr><td><code>mem_store</code></td><td>Record one durable fact.</td></tr>
+    <tr><td><code>mem_search</code></td><td>Find facts recorded earlier, by anyone.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>
+  Results are compact JSON. Failures come back as <code>isError</code> text
+  rather than protocol errors, so a model can relay them to you as-is instead of
+  reporting that a tool broke. There is deliberately no tool for filing
+  arbitrary new work: agents split what they hold, and everything else is filed
+  by you.
+</p>
+</section>
+
+<section id="config">
+<h2>Configuration</h2>
+
+<p>
+  The database lives at
+  <code>${XDG_DATA_HOME:-~/.local/share}/hird/hird.db</code>. Point hird
+  somewhere else with <code>--db</code> (highest precedence) or
+  <code>HIRD_DB</code> — pointing it at a throwaway file is how you try things
+  without touching your real board.
+</p>
+
+<p>Optional config at <code>${XDG_CONFIG_HOME:-~/.config}/hird/config.toml</code>:</p>
+
+<pre><code><span class="c"># How long a claim survives without a task_update. Default 15.</span>
+lease_ttl_minutes = 15
+
+<span class="c"># Whether list and search span every project by default. Default false.
+# Explicit --all-projects / all_projects arguments still win.</span>
+all_projects_by_default = false
+
+<span class="c"># What to do when a task declares files another agent is already working:
+#   "report"  record it and tell the agent who else is in there  (default)
+#   "refuse"  reject the claim outright, rolling back anything it took</span>
+path_conflicts = <span class="s">"report"</span>
+
+<span class="c"># Whether task_next passes over tasks whose files overlap live work. Default
+# true: when the queue gets to choose, it should not choose a collision.</span>
+dispatch_avoids_conflicts = <span class="s">true</span></code></pre>
+
+<p>
+  Unknown keys are an error rather than a shrug, so a typo is reported instead of
+  silently ignored. Agents are told the configured TTL in the MCP handshake and
+  asked to check in at half that interval, so raising it here is all that is
+  needed to give slow tasks more room.
+  <a href="https://github.com/aoprisan/hird/blob/main/examples/config.toml">The annotated example</a>
+  lists every key with its default.
+</p>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Variable</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>HIRD_HARNESS</code></td><td>This session's harness name. Set it in the MCP registration.</td></tr>
+    <tr><td><code>HIRD_PROJECT</code></td><td>Override project detection.</td></tr>
+    <tr><td><code>HIRD_DB</code></td><td>Override the database path.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>Projects</h3>
+
+<p>
+  Every task and assertion is filed under a project — the canonical path of your
+  repository root, found by walking up to the nearest <code>.git</code>. Two
+  harnesses opened in the same checkout share a queue; a different checkout gets
+  its own. One database holds them all, and <code>--all-projects</code> (or
+  <kbd>p</kbd> in the TUI) looks across everything.
+</p>
+</section>
+
+<section id="examples">
+<h2>Examples</h2>
+
+<p>
+  The <a href="https://github.com/aoprisan/hird/tree/main/examples">examples
+  folder</a> holds runnable versions of everything on this page. Each script
+  points <code>HIRD_DB</code> at a temporary file, so running one cannot disturb
+  your real queue.
+</p>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>File</th><th>What it shows</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><a href="https://github.com/aoprisan/hird/blob/main/examples/manual-dispatch.sh"><code>manual-dispatch.sh</code></a></td>
+      <td>Filing tasks and handing them out by number — the by-hand workflow, end to end.</td>
+    </tr>
+    <tr>
+      <td><a href="https://github.com/aoprisan/hird/blob/main/examples/swarm-plan.sh"><code>swarm-plan.sh</code></a></td>
+      <td>A dependency graph with file scopes, then <code>hird graph</code> and simulated concurrent <code>task_next</code> dispatch.</td>
+    </tr>
+    <tr>
+      <td><a href="https://github.com/aoprisan/hird/blob/main/examples/task-body.md"><code>task-body.md</code></a></td>
+      <td>A task body worth writing, for <code>--body-file</code>.</td>
+    </tr>
+    <tr>
+      <td><a href="https://github.com/aoprisan/hird/blob/main/examples/config.toml"><code>config.toml</code></a></td>
+      <td>Every configuration key, annotated, at its default.</td>
+    </tr>
+    <tr>
+      <td><a href="https://github.com/aoprisan/hird/tree/main/examples/harness"><code>harness/</code></a></td>
+      <td>Drop-in MCP registration for Claude Code, Codex CLI and VS&nbsp;Code / Copilot.</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+</section>
+
+<section id="faq">
+<h2>FAQ</h2>
+
+<h3>Can I still dispatch tasks manually?</h3>
+<p>
+  Yes. <code>hird add</code> then <em>"pick up task 42"</em> is unchanged, and
+  <code>task_claim</code> is a first-class tool, not a fallback. Automatic
+  dispatch is something an agent opts into by calling <code>task_next</code>;
+  if you never ask an agent to work the queue, it never will.
+</p>
+
+<h3>Do I have to declare dependencies or file scopes?</h3>
+<p>
+  No. Both are optional. A task with no <code>--needs</code> is workable
+  immediately, and a task with no <code>--path</code> simply never reports an
+  overlap — you lose collision detection for that task, not the ability to
+  dispatch it.
+</p>
+
+<h3>What happens if an agent dies mid-task?</h3>
+<p>
+  Its lease lapses after <code>lease_ttl_minutes</code> and the task returns to
+  <code>open</code> by itself. There is nothing to restart and nothing to clean
+  up. To take it back sooner, <code>hird reopen</code> it.
+</p>
+
+<h3>Can two agents work the same file?</h3>
+<p>
+  Nothing stops them at the filesystem level — hird is a coordinator, not a lock
+  manager. What it does is make the overlap visible to both agents and to you
+  the moment it is declared, refuse to <em>choose</em> a colliding task during
+  automatic dispatch, and, with
+  <code>path_conflicts = "refuse"</code>, reject the claim outright.
+</p>
+
+<h3>Is there a server to run?</h3>
+<p>
+  No. Every front end opens the same SQLite file in WAL mode. Start a harness
+  and it spawns its own short-lived <code>hird mcp</code>; close it and nothing
+  is left behind but the database.
+</p>
+
+<h3>How do I start over?</h3>
+<p>
+  Delete the file that <code>hird db-path</code> prints, or point
+  <code>HIRD_DB</code> at a new one. Schema migrations run on open, so an
+  existing database is upgraded in place when you install a newer build.
+</p>
+</section>
+
+</main>
+</div>
+
+<footer class="page">
+  <span>hird — MIT OR Apache-2.0</span>
+  <span><a href="https://github.com/aoprisan/hird">github.com/aoprisan/hird</a></span>
+</footer>
+
+<script>
+  // Theme toggle: follow the OS by default, remember an explicit choice.
+  (function () {
+    var root = document.documentElement;
+    var saved = null;
+    try { saved = localStorage.getItem("hird-theme"); } catch (e) {}
+    if (saved) root.setAttribute("data-theme", saved);
+
+    document.getElementById("theme").addEventListener("click", function () {
+      var dark = root.getAttribute("data-theme") === "dark" ||
+        (!root.getAttribute("data-theme") &&
+          window.matchMedia("(prefers-color-scheme: dark)").matches);
+      var next = dark ? "light" : "dark";
+      root.setAttribute("data-theme", next);
+      try { localStorage.setItem("hird-theme", next); } catch (e) {}
+    });
+  })();
+
+  // On a phone the contents fold away, so the page starts at the page. They
+  // stay open without JavaScript, which is the safe way round.
+  (function () {
+    var nav = document.querySelector("nav.toc .nav-body");
+    var narrow = window.matchMedia("(max-width: 62rem)");
+    if (!nav) return;
+    if (narrow.matches) nav.removeAttribute("open");
+    nav.addEventListener("click", function (event) {
+      if (narrow.matches && event.target.closest("a")) nav.removeAttribute("open");
+    });
+  })();
+
+  // Highlight the section currently in view in the sidebar.
+  (function () {
+    var links = Array.prototype.slice.call(
+      document.querySelectorAll("nav.toc a[href^='#']"));
+    var byId = {};
+    links.forEach(function (a) { byId[a.getAttribute("href").slice(1)] = a; });
+    var targets = Object.keys(byId)
+      .map(function (id) { return document.getElementById(id); })
+      .filter(Boolean);
+    if (!targets.length || !("IntersectionObserver" in window)) return;
+
+    var visible = new Set();
+    var observer = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (entry.isIntersecting) visible.add(entry.target.id);
+        else visible.delete(entry.target.id);
+      });
+      var first = targets.filter(function (t) { return visible.has(t.id); })[0];
+      links.forEach(function (a) { a.classList.remove("here"); });
+      if (first && byId[first.id]) byId[first.id].classList.add("here");
+    }, { rootMargin: "0px 0px -70% 0px" });
+
+    targets.forEach(function (t) { observer.observe(t); });
+  })();
+</script>
+</body>
+</html>

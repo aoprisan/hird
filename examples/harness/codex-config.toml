@@ -1,0 +1,18 @@
+# Register hird with the Codex CLI.
+#
+# Merge this into ~/.codex/config.toml. HIRD_HARNESS is how the board and the
+# other agents tell this session apart (codex:9f2c); leave it unset and the
+# agent shows up as `unknown`.
+
+[mcp_servers.hird]
+command = "hird"
+args = ["mcp"]
+env = { HIRD_HARNESS = "codex" }
+
+# A second registration pointed at a scratch database, for trying things out
+# without touching the real board:
+#
+# [mcp_servers.hird-scratch]
+# command = "hird"
+# args = ["mcp"]
+# env = { HIRD_HARNESS = "codex", HIRD_DB = "/tmp/scratch/hird.db" }

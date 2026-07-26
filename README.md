@@ -18,6 +18,8 @@ actually do, and nothing that collides. Nobody assigns anything.
 
 No daemon. No server. No accounts.
 
+📖 **[Usage guide](https://aoprisan.github.io/hird/)** · 🧪 **[Examples](examples/)**
+
 ```
 ┌────────────┐  ┌────────────┐  ┌────────────┐
 │ Claude Code│  │  Codex CLI │  │  Copilot   │
@@ -155,6 +157,12 @@ Each agent calls `task_next`, and the queue hands out the most important task
 that is *actually workable* — open, with every dependency finished, and whose
 files nobody else is inside. Task 1 and task 3 go out immediately, in parallel.
 Task 2 waits, because the schema is not done yet. Nobody was assigned anything.
+
+Automatic dispatch was added *alongside* dispatching by hand, not in place of
+it. Nothing here pushes work at an agent: `task_next` is a tool an agent chooses
+to call, so an agent you never tell to work the queue sits idle until you name a
+number — and naming a number still works while a swarm is running, including for
+tasks that were filed as part of a plan. The two ways mix, task by task.
 
 ```
 $ hird graph
@@ -386,6 +394,31 @@ Twelve, and no more.
 Results are compact JSON. Failures come back as `isError` text rather than
 protocol errors, so a model can relay them to you as-is instead of reporting
 that a tool broke.
+
+## Examples
+
+[`examples/`](examples/) holds runnable versions of everything above. Each script
+points `HIRD_DB` at a throwaway file, so running one cannot disturb your board.
+
+```sh
+./examples/manual-dispatch.sh   # file work, hand it out by number
+./examples/swarm-plan.sh        # file a plan, three agents pull from it
+```
+
+They open real `hird mcp` sessions and send the tool calls a harness would,
+because claiming and completing are agent-side operations with no CLI verb —
+so the transcript shows exactly what "pick up task 42" looks like on the wire.
+[`examples/harness/`](examples/harness) has drop-in MCP registration for Claude
+Code, Codex CLI and VS Code.
+
+## Documentation
+
+The usage guide at **<https://aoprisan.github.io/hird/>** is a static site with
+no build step: [`docs/`](docs/) is two files, published by
+[`.github/workflows/pages.yml`](.github/workflows/pages.yml) on every push to
+`main` that touches them. `just site` opens it locally, `just site-check` runs the
+dead-link check CI runs, and `just examples` runs both example scripts end to
+end.
 
 ## Development
 

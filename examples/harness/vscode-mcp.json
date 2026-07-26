@@ -1,0 +1,11 @@
+{
+  "//": "Register hird with Copilot in VS Code. Save as .vscode/mcp.json in your repository. HIRD_HARNESS is how the board tells this session apart (copilot:1a4f).",
+  "servers": {
+    "hird": {
+      "type": "stdio",
+      "command": "hird",
+      "args": ["mcp"],
+      "env": { "HIRD_HARNESS": "copilot" }
+    }
+  }
+}
