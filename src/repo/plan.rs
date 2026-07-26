@@ -20,7 +20,7 @@
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use super::deps::{dependency_path, id_for_seq};
-use super::scope::{declare_in_tx, OnConflict};
+use super::scope::{declare_in_tx, normalize_all, patterns_for_id, OnConflict};
 use super::tasks::{create_in_tx, insert_dep, insert_event};
 use crate::error::{Error, Result};
 use crate::model::{now_ts, Conflict, EventKind};
@@ -145,11 +145,26 @@ impl<'a> Plans<'a> {
 
         // Scopes and dependencies go on after every task exists, so a plan may
         // name its tasks in any order — `needs` points backwards or forwards.
-        for (task, _, seq) in &placed {
-            if !task.paths.is_empty() {
-                let conflicts = declare_in_tx(&tx, *seq, &task.paths, actor, OnConflict::Report)?;
-                applied.conflicts.extend(conflicts);
+        //
+        // Only patterns the task has not already declared are put through the
+        // collision check. Re-declaring what is already on record changes
+        // nothing, and warning about it would mean every re-apply reported the
+        // overlaps of tasks it did not touch.
+        for (task, id, seq) in &placed {
+            if task.paths.is_empty() {
+                continue;
             }
+            let known = patterns_for_id(&tx, id)?;
+            let fresh: Vec<String> = normalize_all(&task.paths)?
+                .into_iter()
+                .filter(|pattern| !known.contains(pattern))
+                .collect();
+            if fresh.is_empty() {
+                continue;
+            }
+            applied
+                .conflicts
+                .extend(declare_in_tx(&tx, *seq, &fresh, actor, OnConflict::Report)?);
         }
         for (task, id, seq) in &placed {
             for need in &task.needs {
@@ -517,6 +532,34 @@ title = \"Write the release notes\"
         assert_eq!(applied.conflicts.len(), 1);
         assert_eq!(applied.conflicts[0].other_seq, held.seq);
         assert_eq!(applied.conflicts[0].pattern, "src/tui/**");
+    }
+
+    #[test]
+    fn re_applying_says_nothing_about_scopes_it_did_not_touch() {
+        // The renderer goes live, which the audit has always overlapped. That
+        // was worth saying when the audit's scope was declared; saying it again
+        // on every re-apply would train the human to skip the warnings.
+        let db = db();
+        apply(&db, SAMPLE);
+        db.tasks().claim(3, "codex:9f2c", TTL).unwrap();
+
+        let again = apply(&db, SAMPLE);
+        assert!(again.conflicts.is_empty(), "{:?}", again.conflicts);
+
+        // A pattern the plan has actually gained is a different matter.
+        let widened = apply(
+            &db,
+            &SAMPLE.replace(
+                "paths = [\"src/repo/**\"]",
+                "paths = [\"src/repo/**\", \"src/tui/view.rs\"]",
+            ),
+        );
+        assert_eq!(widened.conflicts.len(), 1);
+        assert_eq!(widened.conflicts[0].other_seq, 3);
+        assert_eq!(
+            db.scopes().for_task(2).unwrap(),
+            vec!["src/repo/**", "src/tui/view.rs"]
+        );
     }
 
     #[test]

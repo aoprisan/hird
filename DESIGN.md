@@ -30,6 +30,11 @@ The human creates tasks (CLI or TUI), then tells any agent in any harness "pick 
 > declared file scopes, so the queue can see two agents heading for the same
 > file before either of them writes to it. Sections marked **(v1.1)** are
 > additions; nothing in v1 was removed.
+>
+> **v1.3 — plan files.** §13 adds a way to write a dependency graph down and
+> file it in one transaction. It is a notation for the rows §11 already
+> defined, not a workflow language: "no scheduling" above stays true, and §13
+> gives the rule that keeps it true.
 
 ## 2. Architecture
 
@@ -141,7 +146,25 @@ unfinished dependencies is still `open`, so the status machine and its `CHECK`
 constraint are untouched and there is no seventh state to keep consistent.
 **Scopes are patterns, not files**: the work has not been done yet, so there is
 nothing to observe; two agents collide when the sets their patterns describe
-intersect, which is a decidable question about the patterns themselves.
+intersect, which is a decidable question about the patterns themselves. That
+second property is what §13's plan preview is built on: two rows that do not
+exist yet can still be asked whether they would collide.
+
+**(v1.3) Migration 4 — the name a plan file gave a task.**
+
+```sql
+CREATE TABLE task_plan_nodes (
+  task_id TEXT PRIMARY KEY REFERENCES tasks(id),
+  project TEXT NOT NULL,
+  plan    TEXT NOT NULL,
+  node    TEXT NOT NULL,
+  at      TEXT NOT NULL,
+  UNIQUE (project, plan, node)
+);
+```
+
+Sparse by design — a task filed by hand has no row here — and it is what lets
+the same plan be applied twice without filing everything a second time. See §13.
 
 
 ## 5. Queue semantics
@@ -268,6 +291,7 @@ hird ls [--status s] [--all-projects]
 hird show <seq>
 hird cancel <seq> / hird reopen <seq>
 hird dep add|rm <seq> --needs <seq>,…    # (v1.1) edit the graph
+hird plan apply <file> [--dry-run] [--project <path>]  # (v1.3) file a whole graph
 hird graph [--all-projects]              # (v1.1) the queue as dispatch waves
 hird scope <seq> [--path <glob>]… [--clear]   # (v1.1) a task's file scope
 hird agents [--all-projects]             # (v1.1) who is working what, and overlaps
@@ -302,6 +326,10 @@ tasks are ready to dispatch, last-poll age.
 
 - Multi-machine: the append-only `task_events` + assertion model is CRDT-friendly; a later `hird sync` could ship via S3 like ccsync. Keep all mutations expressible as events.
 - ~~Task dependencies (`blocked_by`), auto-dispatch~~ — built in v1.1, §11.
+- **(v1.3) Not built, deliberately:** a plan file describes tasks and edges and
+  nothing else — no conditionals, loops, retries or schedules. See §13 for the
+  rule that keeps it that way, and why a queue agents pull from must not grow a
+  scheduler.
 - Embeddings for memory, HTTP mode for remote harnesses.
 - **(v1.1) Not built, deliberately:** scopes are declared, never observed. Reading
   the working tree to check what an agent *actually* touched would make the queue
@@ -472,3 +500,107 @@ could not:
 Still twelve MCP tools. Like recall, the witness needed no new one: it rides
 along on the calls agents already make, which is the only way a fact reaches an
 agent that does not know to ask for it.
+
+## 13. (v1.3) Plan files — the graph as data
+
+§11 gave the queue dependencies and file scopes, which is what makes a plan
+worth filing at all. It did not give anyone a way to *write one down*. In
+practice a plan was a shell script:
+
+```sh
+schema=$(hird add "Design the storage schema" --path 'src/db.rs')
+repos=$(hird add "Port the repository layer" --path 'src/repo/**' --needs "$schema")
+```
+
+That composes, and it stays supported. But the plan only ever exists as the act
+of filing it. There is nothing to review before three agents are pointed at it,
+nothing to commit next to the code it describes, no way to run it twice, and a
+script that dies between two lines leaves real tasks behind missing exactly the
+dependencies that were going to keep them in order.
+
+A plan file is the same graph as data, in TOML, with symbolic names in place of
+queue numbers.
+
+### The rule that keeps it a format and not a language
+
+**Nothing may appear in a plan that is not already a column.** A plan may carry
+a title, a body, a priority, declared paths and `needs`, because `tasks`,
+`task_paths` and `task_deps` hold exactly those. It may not carry a
+conditional, a loop, a retry policy or a schedule, because there is no table
+for one.
+
+This is not fastidiousness about scope. The whole of §11 rests on agents
+pulling: `task_next` is a tool an agent chooses to call, and nothing in hird
+pushes work at anybody. A file that could say *when* to run something would be
+describing a scheduler this queue does not have and does not want, and every
+workflow language that has ever shipped grew `needs` first and `on_failure`
+second. Tying the format to the schema makes the boundary structural rather
+than a matter of resolve.
+
+Two consequences follow, and both are load-bearing:
+
+- The format is a *serialization of the queue*, so it round-trips in principle:
+  a plan file and a set of rows say the same thing.
+- The likely author is a model, not a person — "plan this migration" produces a
+  file the human reviews. That argues for a syntax models already emit
+  perfectly (TOML) over any bespoke grammar, and for spending the effort on
+  validation messages rather than on notation. `deny_unknown_fields` is part of
+  that: `need = [...]` is a typo worth refusing, not a field worth ignoring.
+
+### Identity, so a plan can be applied twice
+
+```sql
+CREATE TABLE task_plan_nodes (
+  task_id TEXT PRIMARY KEY REFERENCES tasks(id),
+  project TEXT NOT NULL,
+  plan    TEXT NOT NULL,
+  node    TEXT NOT NULL,
+  at      TEXT NOT NULL,
+  UNIQUE (project, plan, node)
+);
+```
+
+A task remembers the name the plan filed it under. Applying the same plan again
+recognizes its own work and files only what the file has gained, which is what
+makes a plan something to edit rather than something you get one shot at. The
+name is scoped by project, so one plan file serves every checkout that uses it.
+
+Existing tasks are never rewritten. By the time a plan is edited an agent may
+have claimed a task, worked it, and recorded what it learned against it; a
+title that has drifted from the file is reported (`Applied::drifted`) and the
+queue's version is kept. A plan is how work is *filed*, not a description the
+queue is reconciled against — hird has no mechanism for un-filing work an agent
+is holding, and inventing one to serve a file would be the tail wagging the dog.
+
+Applying is one `IMMEDIATE` transaction: every task, every edge, every
+declaration, or nothing. The only refusal left at that point is a dependency
+that would close a cycle *through an edge added outside the plan* — the plan's
+own graph is checked for rings before anything is written — and it is the same
+check and the same message `Deps::add` produces.
+
+### Why the dry run is the point
+
+Filing is the smaller half. `--dry-run` resolves the plan through the very same
+`dispatch_waves` the board uses, and then reports the thing the queue could not
+have reported until the work was already live: **pairs of tasks that declare
+intersecting globs with no dependency ordering them.**
+
+The collision detector in §11 compares a declaration against *live* claims,
+which means the earliest it can speak is the moment an agent claims the second
+task. But glob intersection is a decidable question about the patterns alone —
+that is why §11 chose patterns over files — so the same question can be asked
+of two rows that do not exist yet. A plan whose first wave lists four tasks, two
+of which declare `src/tui/**` and `src/tui/view.rs`, is a three-wide plan with a
+queue in it, and that is worth knowing while it is still a file.
+
+The preview also names tasks that declare nothing, since a task with no scope is
+invisible to both the collision check and recall's strongest signal.
+
+### Still twelve MCP tools
+
+There is no `plan_apply` tool, and this is a boundary rather than an omission.
+The review step is the entire reason the file exists; an agent that could write
+a plan and apply it unread would have removed it. An agent that discovers its
+task is really three jobs already has `task_split`, which puts the pieces in
+front of the *other* agents and keeps the human on the board rather than in the
+loop.

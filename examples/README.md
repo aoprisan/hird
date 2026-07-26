@@ -12,6 +12,8 @@ installed, but nothing requires it.
 |---|---|
 | [`manual-dispatch.sh`](manual-dispatch.sh) | **Handing work out by number** — "pick up task 42", start to finish, ending with the next agent in those files being handed what the first one learned. |
 | [`swarm-plan.sh`](swarm-plan.sh) | **Letting agents pull** — a dependency graph, three agents, no assignment. |
+| [`plan-file.sh`](plan-file.sh) | **The plan as a file** — read it before it is filed, file the whole graph in one transaction, edit it and file it again. |
+| [`plan.toml`](plan.toml) | The plan format, annotated, every field at work. |
 | [`witness.sh`](witness.sh) | **What actually happened** — two agents, one checkout, one file, and the warning that arrives while there is still time to act on it. |
 | [`task-body.md`](task-body.md) | A task body worth writing, for `--body-file`. |
 | [`config.toml`](config.toml) | Every configuration key, annotated, at its default. |
@@ -21,6 +23,7 @@ installed, but nothing requires it.
 ```sh
 ./examples/manual-dispatch.sh
 ./examples/swarm-plan.sh
+./examples/plan-file.sh
 ./examples/witness.sh          # needs git; makes its own throwaway repository
 ```
 
@@ -52,7 +55,8 @@ Both, at once, on the same queue:
   `manual-dispatch.sh`, and it needs no dependencies and no file scopes.
 - **Automatic.** File a plan, then tell every agent *"work the queue"*. Each
   calls `task_next` and is handed the most important task that is actually
-  workable. That is `swarm-plan.sh`.
+  workable. That is `swarm-plan.sh`, or `plan-file.sh` for the same graph
+  written down and applied from a file.
 
 Nothing in hird pushes work at an agent: `task_next` is a tool the agent chooses
 to call, so an agent you never point at the queue stays idle until you name a
