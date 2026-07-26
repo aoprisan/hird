@@ -225,17 +225,24 @@ fn render_swarm(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>) {
 
 fn render_agents(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>) {
     let clashing = app.agents.iter().filter(|a| !a.overlaps.is_empty()).count();
-    let title = if clashing == 0 {
-        format!(" Agents ({}) ", app.agents.len())
-    } else {
-        format!(" Agents ({}) · {clashing} overlapping ", app.agents.len())
+    // A contention is an overlap that has stopped being hypothetical, so it is
+    // the count worth putting in the title when there is one.
+    let contended = app
+        .agents
+        .iter()
+        .filter(|a| !a.contentions.is_empty())
+        .count();
+    let title = match (contended, clashing) {
+        (0, 0) => format!(" Agents ({}) ", app.agents.len()),
+        (0, n) => format!(" Agents ({}) · {n} overlapping ", app.agents.len()),
+        (n, _) => format!(" Agents ({}) · {n} in a moving file ", app.agents.len()),
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(if clashing == 0 {
-            theme::focus_style()
-        } else {
-            theme::conflict_style()
+        .border_style(match (contended, clashing) {
+            (0, 0) => theme::focus_style(),
+            (0, _) => theme::conflict_style(),
+            _ => theme::contention_style(),
         })
         .title(Span::styled(title, theme::focus_style()));
 
@@ -296,6 +303,15 @@ fn agent_card(agent: &AgentRow, width: usize, now: DateTime<Utc>) -> Text<'stati
         )
     };
     lines.push(Line::from(files));
+    // Declared above, witnessed below. Reading the two lines against each
+    // other is the point of the screen: an agent whose second line has wandered
+    // off its first is a claim nobody else's collision check can see.
+    if !agent.changed.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("   ↳ {}", fmt::truncate(&agent.changed.join(", "), width)),
+            theme::witness_style(),
+        )));
+    }
     for overlap in &agent.overlaps {
         lines.push(Line::from(Span::styled(
             format!(
@@ -306,6 +322,13 @@ fn agent_card(agent: &AgentRow, width: usize, now: DateTime<Utc>) -> Text<'stati
                 actor_harness(&overlap.other_holder),
             ),
             theme::conflict_style(),
+        )));
+    }
+    // Last, and loudest: the overlap that has stopped being hypothetical.
+    for contention in &agent.contentions {
+        lines.push(Line::from(Span::styled(
+            format!("   ⚠ {}", fmt::truncate(contention, width)),
+            theme::contention_style(),
         )));
     }
     Text::from(lines)
@@ -1253,6 +1276,39 @@ mod tests {
         let mut app = app_with(db);
         app.screen = Screen::Swarm;
         app
+    }
+
+    /// The swarm screen's second line is what actually happened, and the last
+    /// one is the overlap that has stopped being a prediction.
+    #[test]
+    fn the_swarm_screen_separates_what_was_declared_from_what_moved() {
+        let db = Db::open_in_memory().unwrap();
+        let mut app = swarming(&db);
+
+        // Both agents declared `src/db.rs` between them, and it has now moved
+        // under both — recorded here the way a sweep would record it.
+        for (seq, hash) in [(1, "old-version"), (2, "current-version")] {
+            db.witnessed()
+                .begin(seq, &crate::witness::Tree::default())
+                .unwrap();
+            db.witnessed()
+                .record(
+                    seq,
+                    &[crate::witness::Change {
+                        path: "src/db.rs".into(),
+                        kind: crate::witness::ChangeKind::Modified,
+                        hash: hash.into(),
+                    }],
+                    "cli",
+                )
+                .unwrap();
+        }
+        app.refresh(&db).unwrap();
+        let out = screen(&app);
+
+        assert!(out.contains("↳ src/db.rs"), "what moved is shown:\n{out}");
+        assert!(out.contains("⚠"), "the contention is shown:\n{out}");
+        assert!(out.contains("in a moving file"), "{out}");
     }
 
     #[test]

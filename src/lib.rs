@@ -10,6 +10,7 @@
 //! - [`model`] — domain types and the task status machine
 //! - [`db`] — connection setup and schema migrations
 //! - [`repo`] — the only place SQL is written
+//! - [`witness`] — the only place the working tree is read
 //! - [`mcp`], [`cli`], [`tui`] — the three front ends, which call [`repo`]
 
 pub mod cli;
@@ -18,11 +19,13 @@ pub mod db;
 pub mod error;
 pub mod fmt;
 pub mod glob;
+pub mod hash;
 pub mod identity;
 pub mod mcp;
 pub mod model;
 pub mod repo;
 pub mod tui;
+pub mod witness;
 
 pub use config::Config;
 pub use db::Db;

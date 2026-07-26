@@ -17,6 +17,14 @@ use crate::repo::{dispatch_waves, MemoryQuery, ProjectScope, Recalled};
 /// How often the database is re-read.
 pub const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// How often the board looks at the working tree, as opposed to the database.
+///
+/// Slower than the poll on purpose. A database refresh is a few indexed reads
+/// of a file already in the page cache; a witness sweep spawns git and hashes
+/// whatever is dirty. Two seconds is still faster than an agent can finish a
+/// thought, and it keeps an idle board off the CPU.
+pub const WITNESS_INTERVAL: chrono::Duration = chrono::Duration::milliseconds(2_000);
+
 /// Upper bound on rows pulled into the memory browser at once.
 const MEMORY_PAGE: usize = 200;
 
@@ -58,6 +66,12 @@ pub struct AgentRow {
     pub patterns: Vec<String>,
     /// Overlaps with the other rows, already resolved to who and where.
     pub overlaps: Vec<Overlap>,
+    /// Files the witness saw move while this agent held the task — what
+    /// happened, as against `patterns`, which is what was announced.
+    pub changed: Vec<String>,
+    /// Files this agent and another both declared and that have since moved,
+    /// already written out as sentences.
+    pub contentions: Vec<String>,
 }
 
 /// Two live agents in the same files.
@@ -203,11 +217,15 @@ pub struct App {
     pub task_seqs: BTreeMap<String, i64>,
 
     pub last_poll: DateTime<Utc>,
+    /// Set when this project is somewhere the working tree can be watched.
+    witness: Option<crate::witness::Witness>,
+    last_look: DateTime<Utc>,
 }
 
 impl App {
     pub fn new(db_path: PathBuf, project: String, config: Config) -> App {
         let all_projects = config.all_projects_by_default;
+        let config_witness = config.witness(std::path::Path::new(&project));
         App {
             screen: Screen::Queue,
             mode: Mode::Normal,
@@ -233,7 +251,26 @@ impl App {
             memory_selected: 0,
             task_seqs: BTreeMap::new(),
             last_poll: DateTime::from_timestamp(0, 0).unwrap_or_default(),
+            witness: config_witness,
+            last_look: DateTime::from_timestamp(0, 0).unwrap_or_default(),
         }
+    }
+
+    /// Look at the working tree, at most every [`WITNESS_INTERVAL`].
+    ///
+    /// The human is watching, not working, so this confirms nothing on any
+    /// agent's behalf. A sweep that fails is a board that shows a little less,
+    /// never a board that stops.
+    fn look(&mut self, db: &Db) {
+        let Some(witness) = &self.witness else {
+            return;
+        };
+        let now = Utc::now();
+        if now - self.last_look < WITNESS_INTERVAL {
+            return;
+        }
+        self.last_look = now;
+        let _ = crate::witness::sweep(db, witness, &self.project, ACTOR_TUI);
     }
 
     pub fn scope(&self) -> ProjectScope {
@@ -250,7 +287,21 @@ impl App {
         self.counts = db.tasks().counts(&scope)?;
         self.unmet = db.deps().unmet_map(&scope)?;
         self.waves = dispatch_waves(&self.tasks, &db.deps().edges(&scope)?);
-        self.agents = agent_rows(&self.tasks, &db.scopes().declared(&scope, true)?);
+        self.look(db);
+        self.agents = agent_rows(
+            &self.tasks,
+            &db.scopes().declared(&scope, true)?,
+            &db.witnessed().seen(&scope, true)?,
+        );
+        for agent in &mut self.agents {
+            agent.contentions = db
+                .witnessed()
+                .contention(agent.seq)
+                .unwrap_or_default()
+                .iter()
+                .map(crate::model::Contention::describe)
+                .collect();
+        }
         self.assertions = db.memory().search(
             &MemoryQuery::new(&self.query, scope.clone())
                 .limit(MEMORY_PAGE)
@@ -733,9 +784,17 @@ impl App {
 /// Overlap is decided by pattern intersection, not by comparing strings, so
 /// `src/**` and `src/db.rs` are recognised as the same territory even though
 /// neither declaration mentions the other.
-fn agent_rows(tasks: &[TaskSummary], declared: &[crate::model::ScopedTask]) -> Vec<AgentRow> {
+fn agent_rows(
+    tasks: &[TaskSummary],
+    declared: &[crate::model::ScopedTask],
+    witnessed: &[crate::model::WitnessedTask],
+) -> Vec<AgentRow> {
     let scopes: BTreeMap<i64, &Vec<String>> =
         declared.iter().map(|s| (s.seq, &s.patterns)).collect();
+    let moved: BTreeMap<i64, Vec<String>> = witnessed
+        .iter()
+        .map(|w| (w.seq, w.changes.iter().map(|c| c.path.clone()).collect()))
+        .collect();
     let mut rows: Vec<AgentRow> = tasks
         .iter()
         .filter(|t| t.status.is_active())
@@ -747,6 +806,8 @@ fn agent_rows(tasks: &[TaskSummary], declared: &[crate::model::ScopedTask]) -> V
             lease_expires_at: t.lease_expires_at.clone(),
             patterns: scopes.get(&t.seq).map(|p| (*p).clone()).unwrap_or_default(),
             overlaps: Vec::new(),
+            changed: moved.get(&t.seq).cloned().unwrap_or_default(),
+            contentions: Vec::new(),
         })
         .collect();
     rows.sort_by(|a, b| a.holder.cmp(&b.holder).then(a.seq.cmp(&b.seq)));

@@ -13,10 +13,17 @@
 //! `src/config.rs` reaches a task that declared `src/*.rs` without either side
 //! having named the other.
 //!
+//! Territory is not only what an agent declared. The witness records the files
+//! that moved under a task whether or not anybody announced them, and those
+//! count too — which matters because declaring a scope is exactly the step an
+//! agent in a hurry skips, and it would be a poor memory that only remembered
+//! the tidy ones.
+//!
 //! Three things make an assertion relevant, strongest first:
 //!
 //! 1. it was recorded while working *this* task, before it came back around;
-//! 2. it was recorded on a task whose declared files overlap this one's;
+//! 2. it was recorded on a task whose files overlap this one's — declared or
+//!    witnessed, on either side;
 //! 3. it reads like the title.
 //!
 //! Superseded assertions never surface: recall is what is true now.
@@ -50,12 +57,18 @@ const STOPWORDS: &[&str] = &[
 pub enum RecallReason {
     /// Recorded while working this very task, on an earlier pass.
     SameTask,
-    /// Recorded on another task that declared an overlapping file.
+    /// Recorded on another task that worked an overlapping file.
     SameFiles {
         /// This task's pattern that overlaps.
         pattern: String,
-        /// The pattern the earlier task had declared.
+        /// The pattern the earlier task declared, or the path it was seen to
+        /// change.
         other_pattern: String,
+        /// Whether that path came from the witness rather than a declaration.
+        /// An earlier agent that never said where it was going still leaves
+        /// its footprint behind, and what it learned is no less relevant for
+        /// having gone unannounced.
+        observed: bool,
         seq: i64,
         title: String,
     },
@@ -71,6 +84,7 @@ impl RecallReason {
             RecallReason::SameFiles {
                 pattern,
                 other_pattern,
+                observed,
                 seq,
                 title,
             } => {
@@ -79,7 +93,12 @@ impl RecallReason {
                 } else {
                     format!("{other_pattern}, which your {pattern} overlaps")
                 };
-                format!("learned on task {seq} ({title}), working {where_}")
+                let doing = if *observed {
+                    "which changed"
+                } else {
+                    "working"
+                };
+                format!("learned on task {seq} ({title}), {doing} {where_}")
             }
             RecallReason::Wording { terms } if terms.is_empty() => {
                 "reads like this task's title".to_string()
@@ -133,7 +152,15 @@ impl<'a> Recall<'a> {
             return Ok(Vec::new());
         }
         let task = Tasks::new(self.conn).get(seq)?;
-        let patterns = Scopes::new(self.conn).for_task(seq)?;
+        // What this task said it would touch, plus what it has been seen to
+        // touch. Both are patterns as far as the intersection is concerned —
+        // a literal path is a pattern with nothing wild in it.
+        let mut patterns = Scopes::new(self.conn).for_task(seq)?;
+        for observed in super::witness::Witnessed::new(self.conn).touched(seq)? {
+            if !patterns.contains(&observed.path) {
+                patterns.push(observed.path);
+            }
+        }
 
         let mut picked: Vec<Recalled> = Vec::new();
         let mut seen: Vec<String> = Vec::new();
@@ -195,13 +222,20 @@ impl<'a> Recall<'a> {
         if patterns.is_empty() {
             return Ok(Vec::new());
         }
+        // Territory is whatever an earlier task said it would touch *or* was
+        // seen to touch. The second half is what reaches an agent whose
+        // predecessor never declared anything — most of them, in practice —
+        // and it needs no cooperation from that predecessor at all.
         let sql = format!(
-            "SELECT {ASSERTION_COLUMNS}, t.seq, t.title, p.pattern
+            "SELECT {ASSERTION_COLUMNS}, t.seq, t.title, p.pattern, p.observed
              FROM assertions a
              JOIN tasks t ON t.id = a.task_id
-             JOIN task_paths p ON p.task_id = t.id
+             JOIN (SELECT task_id, pattern, 0 AS observed, rowid AS ord FROM task_paths
+                   UNION ALL
+                   SELECT task_id, path, 1 AS observed, rowid AS ord FROM task_changes) p
+               ON p.task_id = t.id
              WHERE a.project = ?1 AND a.superseded_by IS NULL AND a.task_id <> ?2
-             ORDER BY a.created_at DESC, a.rowid DESC, p.rowid"
+             ORDER BY a.created_at DESC, a.rowid DESC, p.observed, p.ord"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query(rusqlite::params![project, task_id])?;
@@ -215,6 +249,7 @@ impl<'a> Recall<'a> {
             let other_seq: i64 = row.get(8)?;
             let other_title: String = row.get(9)?;
             let other_pattern: String = row.get(10)?;
+            let observed: i64 = row.get(11)?;
             let Some(mine) = patterns
                 .iter()
                 .find(|mine| glob::intersects(mine, &other_pattern))
@@ -226,6 +261,7 @@ impl<'a> Recall<'a> {
                 reason: RecallReason::SameFiles {
                     pattern: mine.clone(),
                     other_pattern,
+                    observed: observed == 1,
                     seq: other_seq,
                     title: other_title,
                 },
@@ -317,6 +353,7 @@ mod tests {
     use std::time::Duration;
 
     const PROJECT: &str = "/tmp/project";
+    const TTL: Duration = Duration::from_secs(900);
 
     fn db() -> Db {
         Db::open_in_memory().unwrap()
@@ -332,6 +369,23 @@ mod tests {
                 .unwrap();
         }
         seq
+    }
+
+    /// Put a task on record as having changed `paths`, the way a sweep does.
+    fn witness(db: &Db, seq: i64, paths: &[&str]) {
+        db.tasks().claim(seq, "codex:9f2c", TTL).unwrap();
+        db.witnessed()
+            .begin(seq, &crate::witness::Tree::default())
+            .unwrap();
+        let changes: Vec<crate::witness::Change> = paths
+            .iter()
+            .map(|path| crate::witness::Change {
+                path: path.to_string(),
+                kind: crate::witness::ChangeKind::Modified,
+                hash: format!("hash-of-{path}"),
+            })
+            .collect();
+        db.witnessed().record(seq, &changes, "codex:9f2c").unwrap();
     }
 
     fn learn(db: &Db, seq: Option<i64>, content: &str) {
@@ -369,6 +423,55 @@ mod tests {
         let why = recalled[0].reason.describe();
         assert!(why.contains(&format!("task {first}")), "{why}");
         assert!(why.contains("src/config.rs"), "{why}");
+    }
+
+    /// Recall used to depend on the earlier agent having declared its scope,
+    /// which is the one thing an agent in a hurry skips. The witness closes
+    /// that hole: an agent that said nothing and went ahead and edited
+    /// `src/config.rs` still leaves the file behind it, and what it learned
+    /// still reaches whoever comes next.
+    #[test]
+    fn a_fact_reaches_the_next_task_through_files_nobody_declared() {
+        let db = db();
+        let quiet = task(&db, "Port the config loader", &[]);
+        witness(&db, quiet, &["src/config.rs"]);
+        learn(&db, Some(quiet), "the loader reads HIRD_DB before the file");
+        db.tasks().complete(quiet, "codex:9f2c", "ported").unwrap();
+
+        let next = task(&db, "Audit the loader", &["src/*.rs"]);
+        let recalled = db.recall().for_task(next, 5).unwrap();
+        assert_eq!(
+            contents(&recalled),
+            vec!["the loader reads HIRD_DB before the file"]
+        );
+        let why = recalled[0].reason.describe();
+        assert!(why.contains("which changed src/config.rs"), "{why}");
+    }
+
+    /// And symmetrically: a task that declared nothing is still handed what
+    /// earlier work in the files it has wandered into learned.
+    #[test]
+    fn a_task_with_no_declaration_recalls_through_where_it_has_been() {
+        let db = db();
+        let earlier = task(&db, "Port the config loader", &["src/config.rs"]);
+        learn(&db, Some(earlier), "config precedence is env over file");
+        db.tasks().claim(earlier, "codex:9f2c", TTL).unwrap();
+        db.tasks()
+            .complete(earlier, "codex:9f2c", "ported")
+            .unwrap();
+
+        let now = task(&db, "Something unrelated-sounding", &[]);
+        assert!(
+            db.recall().for_task(now, 5).unwrap().is_empty(),
+            "nothing connects the two tasks yet"
+        );
+
+        witness(&db, now, &["src/config.rs"]);
+        let recalled = db.recall().for_task(now, 5).unwrap();
+        assert_eq!(
+            contents(&recalled),
+            vec!["config precedence is env over file"]
+        );
     }
 
     /// The intersection is exact, not a string comparison: a task declaring

@@ -17,8 +17,11 @@ use crate::config::Config;
 use crate::db::Db;
 use crate::error::Error;
 use crate::identity::{self, AgentId};
-use crate::model::{Assertion, Blocker, Conflict, Status, Task, TaskEvent, TaskSummary};
+use crate::model::{
+    Assertion, Blocker, Conflict, Contention, Observed, Status, Task, TaskEvent, TaskSummary,
+};
 use crate::repo::{Claim, Dispatch, MemoryQuery, NewAssertion, ProjectScope, Recalled, Subtask};
+use crate::witness::{self, Witness};
 
 /// Number of trailing events `task_get` returns.
 const EVENT_WINDOW: usize = 20;
@@ -45,15 +48,20 @@ pub struct HirdMcp {
     agent: AgentId,
     project: String,
     config: Config,
+    /// Resolved once at startup: whether this project is somewhere the working
+    /// tree can be watched. `None` is an ordinary state, not a degraded one.
+    witness: Option<Witness>,
 }
 
 impl HirdMcp {
     pub fn new(db: Db, agent: AgentId, project: String, config: Config) -> HirdMcp {
+        let witness = config.witness(Path::new(&project));
         HirdMcp {
             db: Mutex::new(db),
             agent,
             project,
             config,
+            witness,
         }
     }
 
@@ -78,6 +86,59 @@ impl HirdMcp {
 
     fn scope(&self, all_projects: Option<bool>) -> ProjectScope {
         ProjectScope::resolve(&self.project, self.config.all_projects(all_projects))
+    }
+
+    /// Look at the working tree on this task's behalf and report what it says.
+    ///
+    /// The order is the point. The sweep brings every live task's footprint up
+    /// to date without confirming anything; the report is read off that; and
+    /// only then is this task's holder recorded as having been shown those
+    /// versions. Confirming first would mark the agent's copy current in the
+    /// same breath as telling it the file had moved, which is to say it would
+    /// never tell it anything.
+    ///
+    /// Best-effort in the strongest sense: a sweep that fails costs the agent a
+    /// report it did not ask for, while propagating the failure would cost it
+    /// the call it did make. Nothing here can turn a completed task into an
+    /// error, and there is no configuration in which it can.
+    fn witnessed(&self, db: &Db, seq: i64) -> Evidence {
+        let Some(witness) = &self.witness else {
+            return Evidence::default();
+        };
+        let swept = witness::sweep(db, witness, &self.project, &self.actor()).ok();
+        let evidence = self.evidence(db, seq);
+        if let Some(swept) = swept {
+            let _ = db.witnessed().confirm(seq, swept.changes_for(seq));
+        }
+        evidence
+    }
+
+    /// Start watching the tree on behalf of a task this session just claimed.
+    fn begin_witnessing(&self, db: &Db, seq: i64) {
+        let Some(witness) = &self.witness else {
+            return;
+        };
+        let _ = witness::begin(db, witness, &self.project, seq, &self.actor());
+    }
+
+    /// What the witness has to say about a task, as the tools report it.
+    fn evidence(&self, db: &Db, seq: i64) -> Evidence {
+        if self.witness.is_none() {
+            return Evidence::default();
+        }
+        Evidence {
+            changed: db
+                .witnessed()
+                .touched(seq)
+                .map(|seen| seen.iter().map(Observed::describe).collect())
+                .unwrap_or_default(),
+            contended: db
+                .witnessed()
+                .contention(seq)
+                .map(|seen| seen.iter().map(Contention::describe).collect())
+                .unwrap_or_default(),
+            undeclared: db.witnessed().undeclared(seq).unwrap_or_default(),
+        }
     }
 
     /// How often an agent should call `task_update` to keep its lease.
@@ -139,13 +200,36 @@ impl HirdMcp {
              from. Read those before you start; they are the reason to declare your paths \
              early, because file scope is how the queue knows what to hand you. They are \
              assertions, not gospel: if one turns out to be wrong, `mem_store` the truth.\n\
-             \n\
+             {witness}\n\
              Everything is scoped to the current project ({project}) unless you pass \
              `all_projects: true`.",
             ttl = self.config.lease_ttl_minutes,
             heartbeat = self.heartbeat_minutes(),
             project = self.project,
+            witness = self.witness_instructions(),
         )
+    }
+
+    /// The paragraph about the witness, or nothing at all where there is none.
+    ///
+    /// Left out entirely rather than hedged: a model told about `contended` in
+    /// a project where nothing will ever populate it has been given a rule it
+    /// cannot use and a reason to doubt the ones it can.
+    fn witness_instructions(&self) -> &'static str {
+        if self.witness.is_none() {
+            return "";
+        }
+        "\nThe working tree: hird watches it. A claim fingerprints the repository, and \
+         every task_update, task_scope and finishing call compares it again, so results \
+         come back with `changed` — the files that moved while you held the task, off the \
+         disk rather than out of anyone's summary. Two things there are worth acting on. \
+         `undeclared` lists files you have changed that you never declared: call \
+         task_scope with them, because the other agents' collision checks are reading \
+         your declaration and not your edits. `contended` means a file you declared has \
+         moved under another agent that declared it too — whoever read it first is \
+         holding a copy that no longer matches, so re-read it before your next write and \
+         tell the human. hird watched the file change; it cannot see who typed, so treat \
+         `changed` as what happened in your window, not as a list of your own edits.\n"
     }
 }
 
@@ -363,6 +447,10 @@ struct TaskDetail {
     /// What earlier work in the same territory learned. Read before exploring.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     recalled: Vec<RecallRow>,
+    /// What the working tree was seen to do while this task was held, as
+    /// against `paths`, which is what somebody said it would do.
+    #[serde(flatten)]
+    witness: Evidence,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     events: Vec<EventRow>,
 }
@@ -392,6 +480,7 @@ struct TaskContext {
     paths: Vec<String>,
     conflicts: Vec<Conflict>,
     recalled: Vec<Recalled>,
+    witness: Evidence,
     events: Vec<TaskEvent>,
 }
 
@@ -419,6 +508,7 @@ impl TaskDetail {
             paths: context.paths,
             overlaps: describe_all(&context.conflicts),
             recalled: context.recalled.into_iter().map(RecallRow::from).collect(),
+            witness: context.witness,
             events: context.events.into_iter().map(EventRow::from).collect(),
         }
     }
@@ -622,12 +712,60 @@ fn plural(n: usize, one: &'static str, many: &'static str) -> &'static str {
     }
 }
 
+/// What the witness saw, in the shape every tool that reports it uses.
+///
+/// Flattened into the results rather than nested, so an agent reading a
+/// `task_update` reply sees `contended` at the top level next to its own note
+/// instead of having to know there is a witness at all. Every field disappears
+/// when it is empty, which is the ordinary case and the quiet one.
+#[derive(Debug, Default, Serialize)]
+struct Evidence {
+    /// Files that moved while you held this task, as `path (modified)`. Not a
+    /// claim about who moved them — one checkout, several agents.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    changed: Vec<String>,
+    /// Files you and another live agent both declared, which have since moved.
+    /// Somebody's copy is out of date; the sentence says whose and what to do.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    contended: Vec<String>,
+    /// Files that moved under you that none of your declared patterns covers.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    undeclared: Vec<String>,
+}
+
+impl Evidence {
+    /// The one thing to do about it, or nothing.
+    ///
+    /// Ordered by cost of ignoring it: losing another agent's work beats
+    /// leaving the board's picture of your file scope wrong.
+    fn advice(&self) -> Option<String> {
+        if !self.contended.is_empty() {
+            return Some(
+                "a file you declared has changed under another agent that declared it too — \
+                 re-read it before your next write, and tell the human"
+                    .to_string(),
+            );
+        }
+        if !self.undeclared.is_empty() {
+            return Some(format!(
+                "you have changed {} nobody was told about; call task_scope with {} so the \
+                 other agents' collision checks can see it",
+                plural(self.undeclared.len(), "a file", "files"),
+                self.undeclared.join(", "),
+            ));
+        }
+        None
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct ScopeResult {
     seq: i64,
     paths: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     overlaps: Vec<String>,
+    #[serde(flatten)]
+    witness: Evidence,
     /// What to do about it, in one sentence.
     advice: String,
 }
@@ -655,6 +793,10 @@ struct UpdateResult {
     status: Status,
     lease_expires_at: String,
     note_recorded: String,
+    #[serde(flatten)]
+    witness: Evidence,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    advice: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -662,6 +804,24 @@ struct FinishResult {
     seq: i64,
     status: Status,
     result: String,
+    /// What the working tree says this task did, which is not the same source
+    /// as `result` — that is the agent's own account of itself.
+    #[serde(flatten)]
+    witness: Evidence,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    advice: Option<String>,
+}
+
+impl FinishResult {
+    fn new(seq: i64, status: Status, result: String, witness: Evidence) -> FinishResult {
+        FinishResult {
+            seq,
+            status,
+            result,
+            advice: witness.advice(),
+            witness,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -786,6 +946,7 @@ impl HirdMcp {
                     paths: db.scopes().for_task(args.seq)?,
                     conflicts,
                     recalled: recall(db, args.seq, recall_limit),
+                    witness: self.evidence(db, args.seq),
                     events: db.tasks().events(&task.id, EVENT_WINDOW)?,
                 },
             ))
@@ -813,6 +974,10 @@ impl HirdMcp {
                 let claim = db
                     .tasks()
                     .claim_scoped(args.seq, &actor, ttl, &paths, policy)?;
+                // The tree as it stands is this task's baseline, so anything
+                // that moves from here is inside its window and everything
+                // already dirty is not.
+                self.begin_witnessing(db, args.seq);
                 Ok::<_, Error>((claim, recall(db, args.seq, recall_limit)))
             })
             .map_err(stringify)?;
@@ -841,7 +1006,10 @@ impl HirdMcp {
             .with_db(|db| {
                 let dispatch = db.tasks().claim_next(&actor, ttl, &scope, avoid)?;
                 let recalled = match &dispatch.claim {
-                    Some(claim) => recall(db, claim.task.seq, recall_limit),
+                    Some(claim) => {
+                        self.begin_witnessing(db, claim.task.seq);
+                        recall(db, claim.task.seq, recall_limit)
+                    }
                     None => Vec::new(),
                 };
                 Ok::<_, Error>((dispatch, recalled))
@@ -865,7 +1033,7 @@ impl HirdMcp {
     ) -> Result<String, String> {
         let actor = self.actor();
         let policy = self.config.on_conflict();
-        let (paths, conflicts) = self
+        let (paths, conflicts, evidence) = self
             .with_db(|db| {
                 // Holder-only, like every other write to a claimed task.
                 let task = db.tasks().get(args.seq)?;
@@ -878,22 +1046,30 @@ impl HirdMcp {
                     });
                 }
                 let conflicts = db.scopes().declare(args.seq, &args.paths, &actor, policy)?;
-                Ok::<_, Error>((db.scopes().for_task(args.seq)?, conflicts))
+                // Declaring is the moment the witness has something to say:
+                // these patterns are what the contention detector needs, and
+                // the tree may already have moved under them.
+                Ok::<_, Error>((
+                    db.scopes().for_task(args.seq)?,
+                    conflicts,
+                    self.witnessed(db, args.seq),
+                ))
             })
             .map_err(stringify)?;
 
         let overlaps = describe_all(&conflicts);
-        let advice = if overlaps.is_empty() {
-            "no other agent is in these files; go ahead".to_string()
-        } else {
-            "tell the human about the overlap before editing those files, and prefer \
-             to work elsewhere until it clears"
-                .to_string()
+        let advice = match (evidence.advice(), overlaps.is_empty()) {
+            (Some(urgent), _) => urgent,
+            (None, false) => "tell the human about the overlap before editing those files, \
+                              and prefer to work elsewhere until it clears"
+                .to_string(),
+            (None, true) => "no other agent is in these files; go ahead".to_string(),
         };
         json(&ScopeResult {
             seq: args.seq,
             paths,
             overlaps,
+            witness: evidence,
             advice,
         })
     }
@@ -961,14 +1137,21 @@ impl HirdMcp {
         Parameters(args): Parameters<TaskReleaseArgs>,
     ) -> Result<String, String> {
         let actor = self.actor();
-        let task = self
-            .with_db(|db| db.tasks().release(args.seq, &actor, &args.reason))
+        let (task, evidence) = self
+            .with_db(|db| {
+                // Before the release, while this session still holds the lease
+                // and the record of what moved under it is still its own.
+                let evidence = self.witnessed(db, args.seq);
+                let task = db.tasks().release(args.seq, &actor, &args.reason)?;
+                Ok::<_, Error>((task, evidence))
+            })
             .map_err(stringify)?;
-        json(&FinishResult {
-            seq: task.seq,
-            status: task.status,
-            result: args.reason.trim().to_string(),
-        })
+        json(&FinishResult::new(
+            task.seq,
+            task.status,
+            args.reason.trim().to_string(),
+            evidence,
+        ))
     }
 
     /// Record progress and renew your lease. Only the holder may call this.
@@ -996,8 +1179,16 @@ impl HirdMcp {
         };
         let actor = self.actor();
         let ttl = self.config.lease_ttl();
-        let task = self
-            .with_db(|db| db.tasks().update(args.seq, &actor, start, &args.note, ttl))
+        let (task, evidence) = self
+            .with_db(|db| {
+                let task = db
+                    .tasks()
+                    .update(args.seq, &actor, start, &args.note, ttl)?;
+                // The heartbeat is the natural place to look: the agent is
+                // between edits, and this is the last chance to tell it a file
+                // moved before it writes the next one.
+                Ok::<_, Error>((task, self.witnessed(db, args.seq)))
+            })
             .map_err(stringify)?;
 
         json(&UpdateResult {
@@ -1005,6 +1196,8 @@ impl HirdMcp {
             status: task.status,
             lease_expires_at: task.lease_expires_at.unwrap_or_default(),
             note_recorded: args.note.trim().to_string(),
+            advice: evidence.advice(),
+            witness: evidence,
         })
     }
 
@@ -1015,14 +1208,21 @@ impl HirdMcp {
         Parameters(args): Parameters<TaskCompleteArgs>,
     ) -> Result<String, String> {
         let actor = self.actor();
-        let task = self
-            .with_db(|db| db.tasks().complete(args.seq, &actor, &args.result))
+        let (task, evidence) = self
+            .with_db(|db| {
+                // Last look, taken while the task is still live so its
+                // footprint is complete and any contention is still true.
+                let evidence = self.witnessed(db, args.seq);
+                let task = db.tasks().complete(args.seq, &actor, &args.result)?;
+                Ok::<_, Error>((task, evidence))
+            })
             .map_err(stringify)?;
-        json(&FinishResult {
-            seq: task.seq,
-            status: task.status,
-            result: task.result.unwrap_or_default(),
-        })
+        json(&FinishResult::new(
+            task.seq,
+            task.status,
+            task.result.unwrap_or_default(),
+            evidence,
+        ))
     }
 
     /// Give up on a task you hold, saying why. The human can reopen it later.
@@ -1032,14 +1232,19 @@ impl HirdMcp {
         Parameters(args): Parameters<TaskFailArgs>,
     ) -> Result<String, String> {
         let actor = self.actor();
-        let task = self
-            .with_db(|db| db.tasks().fail(args.seq, &actor, &args.reason))
+        let (task, evidence) = self
+            .with_db(|db| {
+                let evidence = self.witnessed(db, args.seq);
+                let task = db.tasks().fail(args.seq, &actor, &args.reason)?;
+                Ok::<_, Error>((task, evidence))
+            })
             .map_err(stringify)?;
-        json(&FinishResult {
-            seq: task.seq,
-            status: task.status,
-            result: task.result.unwrap_or_default(),
-        })
+        json(&FinishResult::new(
+            task.seq,
+            task.status,
+            task.result.unwrap_or_default(),
+            evidence,
+        ))
     }
 
     /// Record one durable fact so other agents and sessions can find it later.

@@ -93,6 +93,27 @@ pub fn blocked_style() -> Style {
     Style::default().fg(Color::Yellow)
 }
 
+/// Style for what the working tree was seen to do.
+///
+/// A quieter colour than the declared scope above it: this line is the record,
+/// and most of the time it agrees with what was announced. It is worth looking
+/// at when it does not, and worth reading past when it does.
+pub fn witness_style() -> Style {
+    Style::default().fg(Color::Rgb(120, 150, 140))
+}
+
+/// Style for a declared overlap the filesystem has confirmed.
+///
+/// Louder than [`conflict_style`], and the only place on the board that blinks
+/// other than a dead lease: an overlap is two agents who might collide, while
+/// this is a file that has already moved under both of them, and the work it
+/// costs to ignore has usually been done already.
+pub fn contention_style() -> Style {
+    Style::default()
+        .fg(Color::LightRed)
+        .add_modifier(Modifier::BOLD | Modifier::SLOW_BLINK)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

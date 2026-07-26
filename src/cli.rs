@@ -18,6 +18,7 @@ use crate::glob;
 use crate::identity::{self, ACTOR_CLI};
 use crate::model::{Status, TaskSummary};
 use crate::repo::{dispatch_waves, MemoryQuery, NewAssertion, OnConflict, ProjectScope};
+use crate::witness;
 
 /// Coordinate AI coding agents across harnesses through a shared work queue
 /// and a shared assertion memory, all in one local SQLite database.
@@ -227,7 +228,10 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
         }
         Command::Add(args) => add(&db, &project, args, out),
         Command::Ls(args) => ls(&db, &project, &config, args, out),
-        Command::Show { seq } => show(&db, *seq, &config, out),
+        Command::Show { seq } => {
+            look(&db, &config, &project);
+            show(&db, *seq, &config, out)
+        }
         Command::Recall { seq, limit } => recall(
             &db,
             *seq,
@@ -248,8 +252,24 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
         Command::Dep(cmd) => dep(&db, cmd, out),
         Command::Graph(args) => graph(&db, &scope_of(&project, &config, args.all_projects), out),
         Command::Scope(args) => scope_cmd(&db, args, out),
-        Command::Agents(args) => agents(&db, &scope_of(&project, &config, args.all_projects), out),
+        Command::Agents(args) => {
+            look(&db, &config, &project);
+            agents(&db, &scope_of(&project, &config, args.all_projects), out)
+        }
     }
+}
+
+/// Bring the witness's record of the current project up to date.
+///
+/// The human is reading the board, not working a task, so this confirms nothing
+/// on any agent's behalf: it can only add to what is known, never make an
+/// agent's copy of a file look fresher than it is. Failure is silence — an
+/// unreadable working tree is not a reason to refuse to print the queue.
+fn look(db: &Db, config: &Config, project: &str) {
+    let Some(witness) = config.witness(Path::new(project)) else {
+        return;
+    };
+    let _ = witness::sweep(db, &witness, project, ACTOR_CLI);
 }
 
 fn scope_of(project: &str, config: &Config, all_projects: bool) -> ProjectScope {
@@ -414,6 +434,13 @@ fn agents(db: &Db, scope: &ProjectScope, out: &mut impl Write) -> anyhow::Result
             Some(patterns) => writeln!(out, "    files  {}", patterns.join(", "))?,
             None => writeln!(out, "    files  (undeclared)")?,
         }
+        // What was said, then what happened. Kept on separate lines because
+        // the gap between them is the most useful thing on this screen.
+        let seen = db.witnessed().touched(task.seq).unwrap_or_default();
+        if !seen.is_empty() {
+            let listed: Vec<String> = seen.iter().map(|o| o.path.clone()).collect();
+            writeln!(out, "    moved  {}", listed.join(", "))?;
+        }
         for other in &live {
             // Both directions: an agent reading this wants to see who is in
             // its way, not only who it is in the way of.
@@ -428,6 +455,9 @@ fn agents(db: &Db, scope: &ProjectScope, out: &mut impl Write) -> anyhow::Result
                     other.seq
                 )?;
             }
+        }
+        for found in db.witnessed().contention(task.seq).unwrap_or_default() {
+            writeln!(out, "    !!!    {}", found.describe())?;
         }
     }
     Ok(())
@@ -601,6 +631,19 @@ fn show(db: &Db, seq: i64, config: &Config, out: &mut impl Write) -> anyhow::Res
     }
     for conflict in &conflicts {
         writeln!(out, "overlap   {}", conflict.describe())?;
+    }
+    // `files` is what somebody said would happen; `changed` is what the
+    // working tree says did. On a finished task this is the evidence behind
+    // the result line, and it was not written by the agent that wrote it.
+    let seen = db.witnessed().touched(seq).unwrap_or_default();
+    if !seen.is_empty() {
+        writeln!(out, "changed   {}", seen[0].describe())?;
+        for observed in &seen[1..] {
+            writeln!(out, "          {}", observed.describe())?;
+        }
+    }
+    for found in db.witnessed().contention(seq).unwrap_or_default() {
+        writeln!(out, "contended {}", found.describe())?;
     }
 
     if !task.body.trim().is_empty() {
