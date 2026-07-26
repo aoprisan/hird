@@ -3,7 +3,7 @@
 //! Every variant's `Display` is written to be relayed verbatim to a human or a
 //! model — see the "errors are descriptive strings" rule in DESIGN.md §6.
 
-use crate::model::Status;
+use crate::model::{Blocker, Conflict, Status};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -41,6 +41,24 @@ pub enum Error {
         transition: &'static str,
     },
 
+    /// The task's dependencies have not all finished.
+    #[error("{}", blocked_message(*.seq, .blockers))]
+    Blocked { seq: i64, blockers: Vec<Blocker> },
+
+    /// Adding this dependency would close a cycle in the graph.
+    #[error("{}", cycle_message(*.seq, *.on, .path))]
+    DependencyCycle {
+        seq: i64,
+        on: i64,
+        /// The existing chain from `on` back to `seq`, which the new edge
+        /// would close.
+        path: Vec<i64>,
+    },
+
+    /// The declared file scope overlaps work another agent is doing.
+    #[error("{}", conflict_message(*.seq, .conflicts))]
+    PathConflict { seq: i64, conflicts: Vec<Conflict> },
+
     #[error("{0}")]
     Invalid(String),
 
@@ -66,6 +84,48 @@ fn claim_conflict_message(
         }
         (Some(holder), None) => format!("task {seq} is {status} by {holder}"),
         _ => format!("task {seq} is {status}, not open, so it cannot be claimed"),
+    }
+}
+
+fn blocked_message(seq: i64, blockers: &[Blocker]) -> String {
+    let listed = join_and(blockers.iter().map(|b| {
+        format!(
+            "task {} ({}, {})",
+            b.seq,
+            crate::fmt::truncate(&b.title, 40),
+            b.status
+        )
+    }));
+    format!(
+        "task {seq} is blocked by {listed}; it becomes claimable once every \
+         dependency is done"
+    )
+}
+
+fn cycle_message(seq: i64, on: i64, path: &[i64]) -> String {
+    let chain = path
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>()
+        .join(" -> ");
+    format!(
+        "task {seq} cannot depend on task {on}: task {on} already depends on \
+         task {seq} ({chain}), and that would be a cycle"
+    )
+}
+
+fn conflict_message(seq: i64, conflicts: &[Conflict]) -> String {
+    let listed = join_and(conflicts.iter().map(Conflict::describe));
+    format!("task {seq} would collide with work already under way: {listed}")
+}
+
+/// `a`, `a and b`, `a, b and c` — used wherever an error names several things.
+fn join_and(items: impl IntoIterator<Item = String>) -> String {
+    let items: Vec<String> = items.into_iter().collect();
+    match items.split_last() {
+        None => "nothing".to_string(),
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
     }
 }
 

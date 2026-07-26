@@ -11,6 +11,11 @@ work; you tell any agent in any harness *"pick up task 42"*; it claims the task,
 works it, records what it learned, and marks it done. Everything lands in one
 SQLite file, and a terminal UI shows you the board while it happens.
 
+Or file a whole plan and say *"work the queue"* to all three at once. The queue
+knows which tasks are blocked by unfinished dependencies and which ones would
+put two agents in the same file, so it hands each agent something it can
+actually do, and nothing that collides. Nobody assigns anything.
+
 No daemon. No server. No accounts.
 
 ```
@@ -105,6 +110,7 @@ Any MCP-capable harness works the same way: run `hird mcp` over stdio and set
 open ──claim──► claimed ──start──► in_progress ──complete──► done
   ▲                │                    │        └─fail────► failed
   │                └── lease expiry ────┘
+  │                └──── release ───────┘
   └──────── reopen (human) ◄── done|failed|cancelled
 open ──cancel (human)──► cancelled
 ```
@@ -126,6 +132,101 @@ whoever reads the table next, which is usually the TUI half a second later.
 **Only the lease holder can drive a task.** Another agent cannot complete,
 fail, or update work it does not hold. You can always `cancel` or `reopen`
 anything from the CLI or the TUI.
+
+**An agent that cannot finish hands the task back.** `task_release` returns it
+to `open` immediately, which is not the same as `failed` — a failure is a
+verdict on the task and waits for you to reopen it, a release just says this
+agent stopped.
+
+## Working the queue without assigning anything
+
+Naming a task number works, but it does not scale past one agent. Give the
+queue a plan instead, and let the agents take it apart themselves.
+
+```sh
+hird add "Design the storage schema"     --path 'src/db.rs'
+hird add "Port the repository layer"     --path 'src/repo/**' --needs 1
+hird add "Rewrite the renderer"          --path 'src/tui/**'
+```
+
+Now open three harnesses and tell each one the same thing: **"work the queue"**.
+
+Each agent calls `task_next`, and the queue hands out the most important task
+that is *actually workable* — open, with every dependency finished, and whose
+files nobody else is inside. Task 1 and task 3 go out immediately, in parallel.
+Task 2 waits, because the schema is not done yet. Nobody was assigned anything.
+
+```
+$ hird graph
+wave 1  (workable now)
+  #1    in_progress  Design the storage schema
+  #3    claimed      Rewrite the renderer
+wave 2  (after wave 1)
+  #2    open         Port the repository layer      waits for #1
+```
+
+### Dependencies are enforced, not annotated
+
+A task whose dependencies are unfinished cannot be claimed at all, and the
+refusal says what to do about it:
+
+```
+task 2 is blocked by task 1 (Design the storage schema, in_progress);
+it becomes claimable once every dependency is done
+```
+
+Only `done` clears a blocker. A failed dependency keeps its dependents off the
+ready list, because the work they were waiting for did not happen.
+
+### Two agents, one file
+
+The queue also knows which files each task expects to touch, so it can see the
+one failure mode a status machine cannot: two agents editing the same file from
+two harnesses, one of them about to lose their work.
+
+Declarations are globs, not files, because nothing has been written yet — and
+overlap is decided by asking whether *any path at all* is described by both
+patterns. `src/*.rs` and `src/lib*` collide before `src/lib.rs` exists.
+
+```
+$ hird agents
+codex:9f2c        #4 in_progress  Port the config loader        11m left
+    files  src/config.rs, tests/config.rs
+claude-code:af31  #7 claimed      Rewrite the loader tests      14m left
+    files  tests/**
+    !!     tests/** also claimed by codex:9f2c on #4
+```
+
+The agents see it too, the moment they say what they are about to change:
+
+```json
+{ "seq": 7, "paths": ["tests/**"],
+  "overlaps": ["tests/** overlaps tests/config.rs on task 4 (Port the config loader), held by codex:9f2c"],
+  "advice": "tell the human about the overlap before editing those files, …" }
+```
+
+By default `task_next` simply does not hand out work that would collide — with
+several tasks to choose from there is no reason to pick the one that clashes.
+Set `path_conflicts = "refuse"` to make an overlapping claim fail outright.
+
+### Agents can split work for each other
+
+An agent that finds its task is really three jobs does not have to do them in
+sequence, or hand the problem back to you:
+
+```
+task_split { seq: 1, subtasks: [
+  { title: "Write the migration",   paths: ["src/db.rs"] },
+  { title: "Port the repositories", paths: ["src/repo/**"] },
+] }
+```
+
+The pieces are filed as real tasks. Task 1 starts waiting for both and goes back
+in the pool — blocked, so nobody can claim it early — and the agent that split it
+is free to pick up something else. The other harnesses take a piece each, in
+parallel, and task 1 becomes workable again the moment they are both done.
+
+Pass `sequential: true` when the pieces genuinely have to happen in order.
 
 ## Memory
 
@@ -152,10 +253,16 @@ erroring.
 
 ```
 hird add <title> [--body <md>|--body-file <path>] [--priority N] [--project <path>]
+                 [--needs <seq>,…] [--path <glob>]…
 hird ls [--status <status>] [--all-projects]
 hird show <seq>
 hird cancel <seq> [--reason <text>]
 hird reopen <seq> [--reason <text>]
+hird dep add <seq> --needs <seq>,…
+hird dep rm  <seq> --needs <seq>,…
+hird graph [--all-projects]
+hird scope <seq> [--path <glob>]… [--clear]
+hird agents [--all-projects]
 hird mem add <content> [--tags a,b] [--task <seq>]
 hird mem search [query] [--limit N] [--all-projects] [--include-superseded]
 hird tui
@@ -172,12 +279,17 @@ plan straight into the queue.
 hird tui
 ```
 
-Two screens, `Tab` between them. The board polls every 500 ms, so claims from
-other harnesses appear as they happen.
+Three screens, `Tab` between them (`Shift-Tab` goes back). The board polls every
+500 ms, so claims from other harnesses appear as they happen.
+
+The **Swarm** screen is the one to watch while several agents are running: every
+live agent, the files it has declared, an overlap line in red wherever two of
+them are in the same territory, and — on the right — what is workable right now
+and how much is queued behind it.
 
 | Key | Anywhere |
 |---|---|
-| `Tab` | switch between the queue and memory |
+| `Tab` | next screen (`Shift-Tab` for the previous) |
 | `p` | toggle project filter (current / all) |
 | `/` | filter or search |
 | `?` | help |
@@ -198,6 +310,14 @@ other harnesses appear as they happen.
 | `Enter` | show the assertion and its provenance |
 | `d` | supersede it with something truer |
 | `s` | show or hide superseded assertions |
+
+| Key | Swarm |
+|---|---|
+| `j` `k` | move between agents |
+| `Enter` | open the task that agent is holding |
+
+Cards on the queue board carry a yellow `waits #1 #3` badge when a task looks
+open but nobody can actually claim it yet.
 
 ## Projects
 
@@ -223,6 +343,15 @@ lease_ttl_minutes = 15
 # Whether list and search span every project by default. Default false.
 # Explicit --all-projects / all_projects arguments still win.
 all_projects_by_default = false
+
+# What to do when a task declares files another agent is already working:
+#   "report"  record it and tell the agent who else is in there  (default)
+#   "refuse"  reject the claim outright, rolling back anything it took
+path_conflicts = "report"
+
+# Whether task_next passes over tasks whose files overlap live work. Default
+# true: when the queue gets to choose, it should not choose a collision.
+dispatch_avoids_conflicts = true
 ```
 
 Agents are told the configured TTL in the MCP handshake and asked to check in at
@@ -237,16 +366,20 @@ more room.
 
 ## MCP tools
 
-Eight, and no more.
+Twelve, and no more.
 
 | Tool | Purpose |
 |---|---|
 | `task_list` | What work exists, optionally filtered by status. |
-| `task_get` | One task in full, with its recent history. |
-| `task_claim` | Take an open task. Atomic; fails if someone else has it. |
+| `task_get` | One task in full: dependencies, file scope, recent history. |
+| `task_next` | **Be handed the next workable task, already claimed.** |
+| `task_claim` | Take a named task. Atomic; fails if someone else has it. |
+| `task_scope` | Say which files you will change; find out who else is in them. |
 | `task_update` | Record progress and renew the lease. Holder only. |
+| `task_split` | Break a task into pieces the other agents can work. Holder only. |
 | `task_complete` | Finish, with a summary. Holder only. |
 | `task_fail` | Give up, with a reason. Holder only. |
+| `task_release` | Hand the task back unfinished, still claimable. Holder only. |
 | `mem_store` | Record one durable fact. |
 | `mem_search` | Find facts recorded earlier, by anyone. |
 
@@ -274,8 +407,12 @@ Layering, from the bottom up:
 
 The rules that matter are pinned by tests rather than convention: the claim
 compare-and-set is exercised by sixteen threads racing on separate connections,
-the lease sweep by eight concurrent sweepers, and the status machine by a
-table-driven test asserting no transition exists outside the diagram above.
+the lease sweep by eight concurrent sweepers, self-dispatch by eight agents
+calling `task_next` at the same instant and having to come away with eight
+different tasks, and the status machine by a table-driven test asserting no
+transition exists outside the diagram above. Pattern intersection is checked
+against pattern matching over an exhaustive grid: whenever a concrete path
+matches two patterns, those patterns must be reported as overlapping.
 `tests/mcp_stdio.rs` spawns the real binary and speaks JSON-RPC to it, including
 a test that a cold `hird mcp` is usable within the 50 ms budget a harness
 expects — it starts a fresh one for every session.
@@ -284,9 +421,11 @@ expects — it starts a fresh one for every session.
 
 `DESIGN.md` is the specification this was built from, kept as written.
 
-Deliberately absent in v1: multi-machine sync, task dependencies, automatic
-dispatch, and vector search. The append-only event trail is meant to make sync
-tractable later; the rest can wait until the basics have earned their keep.
+`DESIGN.md` deliberately left out dependencies and automatic dispatch; both are
+here now, along with file-scope collision detection, because a queue that
+several agents work at once needs to know what is workable and what is in the
+way. Still absent: multi-machine sync and vector search. The append-only event
+trail is meant to make sync tractable later.
 
 ## Licence
 

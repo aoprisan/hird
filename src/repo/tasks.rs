@@ -6,9 +6,12 @@ use std::time::Duration;
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction, TransactionBehavior};
 
-use super::{new_id, ProjectScope};
+use super::scope::OnConflict;
+use super::{deps, new_id, scope, ProjectScope};
 use crate::error::{Error, Result};
-use crate::model::{fmt_ts, now_ts, EventKind, Status, Task, TaskEvent, TaskSummary, Transition};
+use crate::model::{
+    fmt_ts, now_ts, Conflict, EventKind, Status, Task, TaskEvent, TaskSummary, Transition,
+};
 
 /// Columns selected for a full [`Task`], in the order [`row_to_task`] expects.
 const TASK_COLUMNS: &str = "id, seq, project, title, body, status, priority, \
@@ -25,6 +28,32 @@ impl SweepOutcome {
     pub fn is_empty(&self) -> bool {
         self.expired.is_empty()
     }
+}
+
+/// A successful claim, with everything the claimant needs before it starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Claim {
+    pub task: Task,
+    /// The task's file scope, as it now stands on record.
+    pub paths: Vec<String>,
+    /// Overlaps between that scope and work other agents are holding.
+    pub conflicts: Vec<Conflict>,
+}
+
+/// The outcome of asking the queue for whatever should be worked next.
+///
+/// The reasons a request came back empty-handed are part of the answer: an
+/// agent that is told "three tasks are ready but every one of them overlaps
+/// files another agent is in" can say something useful to the human, where one
+/// told merely "no work" cannot.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Dispatch {
+    /// The task handed out, if any.
+    pub claim: Option<Claim>,
+    /// Ready tasks passed over because their file scope overlapped live work.
+    pub deferred: Vec<(i64, Vec<Conflict>)>,
+    /// Open tasks still waiting on unfinished dependencies.
+    pub blocked: Vec<i64>,
 }
 
 /// Repository over `tasks` and `task_events`.
@@ -58,28 +87,129 @@ impl<'a> Tasks<'a> {
         priority: i64,
         actor: &str,
     ) -> Result<Task> {
-        let title = title.trim();
-        if title.is_empty() {
-            return Err(Error::invalid("task title must not be empty"));
-        }
         let tx = self.immediate_tx()?;
-        let seq = next_seq(&tx)?;
-        let id = new_id();
+        let task = create_in_tx(&tx, project, title, body, priority, actor)?;
+        tx.commit()?;
+        Ok(task)
+    }
+
+    /// Break a held task into pieces, and make it wait for them.
+    ///
+    /// This is how one agent puts work in front of the others. The pieces are
+    /// filed as real tasks; the original starts depending on every one of
+    /// them and goes back into the pool, where — being blocked — nobody can
+    /// claim it until the pieces are done. The agent that called this is free
+    /// immediately, and the pieces are available to every harness at once.
+    ///
+    /// With `sequential`, each piece also waits for the one before it, for
+    /// work that genuinely has to happen in order.
+    pub fn split(
+        &self,
+        seq: i64,
+        actor: &str,
+        subtasks: &[Subtask<'_>],
+        sequential: bool,
+    ) -> Result<(Task, Vec<Task>)> {
+        if subtasks.is_empty() {
+            return Err(Error::invalid(
+                "a split needs at least one subtask; describe the pieces the work \
+                 breaks into",
+            ));
+        }
+        // Reject bad patterns before anything is written.
+        let scopes: Vec<Vec<String>> = subtasks
+            .iter()
+            .map(|s| scope::normalize_all(s.paths))
+            .collect::<Result<_>>()?;
+
+        self.sweep_leases()?;
         let now = now_ts();
-        tx.execute(
-            "INSERT INTO tasks (id, seq, project, title, body, status, priority, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, 'open', ?6, ?7, ?7)",
-            params![id, seq, project, title, body, priority, now],
-        )?;
-        insert_event(
+        let tx = self.immediate_tx()?;
+        let parent = require_holder(&tx, seq, actor)?;
+
+        let mut children = Vec::with_capacity(subtasks.len());
+        for (sub, paths) in subtasks.iter().zip(scopes) {
+            let child = create_in_tx(
+                &tx,
+                &parent.project,
+                sub.title,
+                sub.body,
+                sub.priority.unwrap_or(parent.priority),
+                actor,
+            )?;
+            if !paths.is_empty() {
+                scope::declare_in_tx(&tx, child.seq, &paths, actor, OnConflict::Report)?;
+            }
+            insert_event(
+                &tx,
+                &child.id,
+                &now,
+                actor,
+                EventKind::Created,
+                &format!("split out of task {seq}"),
+            )?;
+            // The parent waits for every piece; pieces optionally queue up
+            // behind each other. Neither edge can close a cycle: these tasks
+            // did not exist a moment ago.
+            insert_dep(&tx, &parent.id, &child.id, actor, &now)?;
+            insert_event(
+                &tx,
+                &parent.id,
+                &now,
+                actor,
+                EventKind::DepAdded,
+                &format!("now waits for task {} ({})", child.seq, child.title),
+            )?;
+            if sequential {
+                if let Some(previous) = children.last() {
+                    let previous: &Task = previous;
+                    insert_dep(&tx, &child.id, &previous.id, actor, &now)?;
+                    insert_event(
+                        &tx,
+                        &child.id,
+                        &now,
+                        actor,
+                        EventKind::DepAdded,
+                        &format!("now waits for task {}", previous.seq),
+                    )?;
+                }
+            }
+            children.push(child);
+        }
+
+        let numbers: Vec<String> = children.iter().map(|c| c.seq.to_string()).collect();
+        let parent = release_in_tx(
             &tx,
-            &id,
-            &now,
+            &parent,
             actor,
-            EventKind::Created,
-            &format!("{title:?} in {project}"),
+            &now,
+            &format!(
+                "split into task{} {}",
+                plural(children.len()),
+                numbers.join(", ")
+            ),
         )?;
-        let task = fetch_task_by_seq(&tx, seq)?.expect("task inserted in this transaction");
+        tx.commit()?;
+        Ok((parent, children))
+    }
+
+    /// Hand a held task back to the pool, unfinished but not failed.
+    ///
+    /// The distinction matters to whoever reads the board: `failed` is a
+    /// verdict on the task and needs a human to reopen it, while a release
+    /// says only that this agent stopped, and leaves the task claimable.
+    pub fn release(&self, seq: i64, actor: &str, reason: &str) -> Result<Task> {
+        let reason = reason.trim();
+        if reason.is_empty() {
+            return Err(Error::invalid(
+                "reason must not be empty; say why you are handing the task back",
+            ));
+        }
+        self.sweep_leases()?;
+        let now = now_ts();
+        let tx = self.immediate_tx()?;
+        let task = require_holder(&tx, seq, actor)?;
+        let task = release_in_tx(&tx, &task, actor, &now, reason)?;
         tx.commit()?;
         Ok(task)
     }
@@ -260,39 +390,118 @@ impl<'a> Tasks<'a> {
     /// 'open'`, so exactly one of any number of racing claimants wins. Losers
     /// get an [`Error::ClaimConflict`] naming the current holder.
     pub fn claim(&self, seq: i64, actor: &str, lease_ttl: Duration) -> Result<Task> {
+        self.claim_scoped(seq, actor, lease_ttl, &[], OnConflict::Report)
+            .map(|claim| claim.task)
+    }
+
+    /// Claim a task and declare the files it will touch, in one transaction.
+    ///
+    /// Doing both at once matters: a claim that succeeds and a declaration
+    /// that is then refused would leave the task held by an agent that has
+    /// been told not to work it. Here the refusal rolls the claim back too.
+    ///
+    /// Claiming is refused outright while any dependency is unfinished — a
+    /// dependency the queue does not enforce is only a comment.
+    pub fn claim_scoped(
+        &self,
+        seq: i64,
+        actor: &str,
+        lease_ttl: Duration,
+        paths: &[String],
+        on_conflict: OnConflict,
+    ) -> Result<Claim> {
+        self.sweep_leases()?;
+        // Validate the patterns before anything is claimed, so a typo cannot
+        // cost the caller a lease it has to hand back.
+        let paths = scope::normalize_all(paths)?;
+
+        let now = Utc::now();
+        let now_s = fmt_ts(now);
+        let expires = fmt_ts(now + chrono::Duration::from_std(lease_ttl).unwrap_or_default());
+
+        let tx = self.immediate_tx()?;
+        let claim = claim_in_tx(&tx, seq, actor, &now_s, &expires, &paths, on_conflict)?;
+        tx.commit()?;
+        Ok(claim)
+    }
+
+    /// Hand out the next task that is actually workable, and claim it.
+    ///
+    /// "Workable" is the whole point: `open`, every dependency `done`, and —
+    /// when `avoid_conflicts` is set — a declared file scope that does not
+    /// overlap what another agent is already inside. Several agents in several
+    /// harnesses can therefore run the same loop and spread themselves across
+    /// the queue without a dispatcher, without stepping on each other, and
+    /// without the human assigning anything by hand.
+    ///
+    /// Candidates are considered by descending priority and then by age, so
+    /// the queue stays first-in-first-out within a priority band.
+    pub fn claim_next(
+        &self,
+        actor: &str,
+        lease_ttl: Duration,
+        scope: &ProjectScope,
+        avoid_conflicts: bool,
+    ) -> Result<Dispatch> {
         self.sweep_leases()?;
         let now = Utc::now();
         let now_s = fmt_ts(now);
         let expires = fmt_ts(now + chrono::Duration::from_std(lease_ttl).unwrap_or_default());
 
         let tx = self.immediate_tx()?;
-        let changed = tx.execute(
-            "UPDATE tasks
-             SET status = 'claimed', claimed_by = ?1, lease_expires_at = ?2, updated_at = ?3
-             WHERE seq = ?4 AND status = 'open'",
-            params![actor, expires, now_s, seq],
-        )?;
-        if changed == 0 {
-            drop(tx);
-            let task = fetch_task_by_seq(self.conn, seq)?.ok_or(Error::TaskNotFound { seq })?;
-            return Err(Error::ClaimConflict {
+        let (project_clause, project_value) = scope.clause("project");
+        let candidates: Vec<(i64, String)> = {
+            let sql = format!(
+                "SELECT seq, id FROM tasks
+                 WHERE {project_clause} AND status = 'open'
+                 ORDER BY priority DESC, seq ASC"
+            );
+            let mut stmt = tx.prepare(&sql)?;
+            let binds: Vec<&str> = project_value.into_iter().collect();
+            let rows = stmt.query_map(rusqlite::params_from_iter(binds), |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        let mut dispatch = Dispatch::default();
+        for (seq, id) in candidates {
+            if !deps::unmet_blockers(&tx, &id)?.is_empty() {
+                dispatch.blocked.push(seq);
+                continue;
+            }
+            if avoid_conflicts {
+                let patterns = declared_patterns(&tx, &id)?;
+                let conflicts = scope::conflicts_for(&tx, &id, &patterns)?;
+                if !conflicts.is_empty() {
+                    dispatch.deferred.push((seq, conflicts));
+                    continue;
+                }
+            }
+            dispatch.claim = Some(claim_in_tx(
+                &tx,
                 seq,
-                status: task.status,
-                holder: task.claimed_by,
-                lease_expires_at: task.lease_expires_at,
-            });
+                actor,
+                &now_s,
+                &expires,
+                &[],
+                OnConflict::Report,
+            )?);
+            break;
         }
-        insert_event(
-            &tx,
-            &task_id_for_seq(&tx, seq)?,
-            &now_s,
-            actor,
-            EventKind::Claimed,
-            &format!("lease until {expires}"),
-        )?;
-        let task = fetch_task_by_seq(&tx, seq)?.expect("claimed row exists");
         tx.commit()?;
-        Ok(task)
+        Ok(dispatch)
+    }
+
+    /// Everything standing between an `open` task and an agent: unfinished
+    /// dependencies first, then overlaps with live work.
+    pub fn readiness(&self, seq: i64) -> Result<(Vec<crate::model::Blocker>, Vec<Conflict>)> {
+        self.sweep_leases()?;
+        let id = task_id_for_seq(self.conn, seq)?;
+        let blockers = deps::unmet_blockers(self.conn, &id)?;
+        let patterns = declared_patterns(self.conn, &id)?;
+        let conflicts = scope::conflicts_for(self.conn, &id, &patterns)?;
+        Ok((blockers, conflicts))
     }
 
     /// Record progress on a held task and renew its lease.
@@ -492,7 +701,169 @@ fn next_seq(tx: &Transaction<'_>) -> Result<i64> {
     Ok(current)
 }
 
-fn insert_event(
+/// One piece of a [`Tasks::split`].
+#[derive(Debug, Clone)]
+pub struct Subtask<'a> {
+    pub title: &'a str,
+    pub body: &'a str,
+    /// Defaults to the parent task's priority.
+    pub priority: Option<i64>,
+    pub paths: &'a [String],
+}
+
+fn create_in_tx(
+    tx: &Transaction<'_>,
+    project: &str,
+    title: &str,
+    body: &str,
+    priority: i64,
+    actor: &str,
+) -> Result<Task> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err(Error::invalid("task title must not be empty"));
+    }
+    let seq = next_seq(tx)?;
+    let id = new_id();
+    let now = now_ts();
+    tx.execute(
+        "INSERT INTO tasks (id, seq, project, title, body, status, priority, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'open', ?6, ?7, ?7)",
+        params![id, seq, project, title, body, priority, now],
+    )?;
+    insert_event(
+        tx,
+        &id,
+        &now,
+        actor,
+        EventKind::Created,
+        &format!("{title:?} in {project}"),
+    )?;
+    Ok(fetch_task_by_seq(tx, seq)?.expect("task inserted in this transaction"))
+}
+
+/// Move a held task back to `open`, keeping any result field untouched.
+fn release_in_tx(
+    tx: &Transaction<'_>,
+    task: &Task,
+    actor: &str,
+    now: &str,
+    detail: &str,
+) -> Result<Task> {
+    let next = task
+        .status
+        .apply(Transition::Release)
+        .ok_or(Error::InvalidTransition {
+            seq: task.seq,
+            status: task.status,
+            transition: "release",
+        })?;
+    tx.execute(
+        "UPDATE tasks
+         SET status = ?1, claimed_by = NULL, lease_expires_at = NULL, updated_at = ?2
+         WHERE id = ?3",
+        params![next.as_str(), now, task.id],
+    )?;
+    insert_event(tx, &task.id, now, actor, EventKind::Released, detail)?;
+    Ok(fetch_task_by_seq(tx, task.seq)?.expect("released row exists"))
+}
+
+fn insert_dep(
+    tx: &Transaction<'_>,
+    task_id: &str,
+    depends_on_id: &str,
+    actor: &str,
+    now: &str,
+) -> Result<()> {
+    tx.execute(
+        "INSERT OR IGNORE INTO task_deps (task_id, depends_on_id, actor, created_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![task_id, depends_on_id, actor, now],
+    )?;
+    Ok(())
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
+/// Claim `seq` inside a caller-owned transaction.
+///
+/// Every refusal — missing, blocked, already held, overlapping — happens here,
+/// before the caller commits, so a rejected claim leaves no trace at all.
+#[allow(clippy::too_many_arguments)]
+fn claim_in_tx(
+    tx: &Transaction<'_>,
+    seq: i64,
+    actor: &str,
+    now: &str,
+    expires: &str,
+    paths: &[String],
+    on_conflict: OnConflict,
+) -> Result<Claim> {
+    let id = task_id_for_seq(tx, seq)?;
+
+    let blockers = deps::unmet_blockers(tx, &id)?;
+    if !blockers.is_empty() {
+        return Err(Error::Blocked { seq, blockers });
+    }
+
+    let changed = tx.execute(
+        "UPDATE tasks
+         SET status = 'claimed', claimed_by = ?1, lease_expires_at = ?2, updated_at = ?3
+         WHERE seq = ?4 AND status = 'open'",
+        params![actor, expires, now, seq],
+    )?;
+    if changed == 0 {
+        let task = fetch_task_by_seq(tx, seq)?.ok_or(Error::TaskNotFound { seq })?;
+        return Err(Error::ClaimConflict {
+            seq,
+            status: task.status,
+            holder: task.claimed_by,
+            lease_expires_at: task.lease_expires_at,
+        });
+    }
+    insert_event(
+        tx,
+        &id,
+        now,
+        actor,
+        EventKind::Claimed,
+        &format!("lease until {expires}"),
+    )?;
+
+    // Declared after the claim lands, so the overlap check sees this task as
+    // live and any other claimant racing it is serialized behind us.
+    let conflicts = scope::declare_in_tx(tx, seq, paths, actor, on_conflict)?;
+    let declared = declared_patterns(tx, &id)?;
+    // A task can carry a scope from its plan even when the claimant declared
+    // nothing, and that scope can still be in someone's way.
+    let conflicts = if paths.is_empty() {
+        scope::conflicts_for(tx, &id, &declared)?
+    } else {
+        conflicts
+    };
+
+    let task = fetch_task_by_seq(tx, seq)?.expect("claimed row exists");
+    Ok(Claim {
+        task,
+        paths: declared,
+        conflicts,
+    })
+}
+
+fn declared_patterns(conn: &Connection, task_id: &str) -> Result<Vec<String>> {
+    let mut stmt =
+        conn.prepare("SELECT pattern FROM task_paths WHERE task_id = ?1 ORDER BY rowid")?;
+    let rows = stmt.query_map([task_id], |row| row.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub(crate) fn insert_event(
     tx: &Transaction<'_>,
     task_id: &str,
     at: &str,
@@ -1072,6 +1443,303 @@ mod tests {
                 .count();
             assert_eq!(expiries, 1, "task {seq} logged {expiries} expiry events");
         }
+    }
+
+    // -------------------------------------------------- dependencies & scope
+
+    fn declare(db: &Db, seq: i64, patterns: &[&str]) {
+        let patterns: Vec<String> = patterns.iter().map(|s| s.to_string()).collect();
+        db.scopes()
+            .declare(seq, &patterns, "cli", OnConflict::Report)
+            .unwrap();
+    }
+
+    fn finish(db: &Db, seq: i64) {
+        db.tasks().claim(seq, "finisher:1", TTL).unwrap();
+        db.tasks().complete(seq, "finisher:1", "done").unwrap();
+    }
+
+    #[test]
+    fn a_blocked_task_cannot_be_claimed_and_the_refusal_names_the_blockers() {
+        let db = db();
+        let first = seed(&db, "schema");
+        let second = seed(&db, "api");
+        db.deps().add(second, first, "cli").unwrap();
+
+        let err = db.tasks().claim(second, "a:1", TTL).unwrap_err();
+        assert!(matches!(err, Error::Blocked { .. }), "{err:?}");
+        let text = err.to_string();
+        assert!(text.contains("task 2 is blocked by task 1"), "{text}");
+        assert!(text.contains("schema"), "{text}");
+
+        // And the refusal really did leave the task open, not half-claimed.
+        let task = db.tasks().get(second).unwrap();
+        assert_eq!(task.status, Status::Open);
+        assert!(task.claimed_by.is_none());
+    }
+
+    #[test]
+    fn finishing_the_dependency_releases_the_dependent() {
+        let db = db();
+        let first = seed(&db, "schema");
+        let second = seed(&db, "api");
+        db.deps().add(second, first, "cli").unwrap();
+        finish(&db, first);
+
+        let task = db.tasks().claim(second, "a:1", TTL).unwrap();
+        assert_eq!(task.status, Status::Claimed);
+    }
+
+    #[test]
+    fn claiming_with_a_scope_records_it_and_reports_overlaps() {
+        let db = db();
+        let theirs = seed(&db, "theirs");
+        let mine = seed(&db, "mine");
+        declare(&db, theirs, &["src/**"]);
+        db.tasks().claim(theirs, "codex:9f2c", TTL).unwrap();
+
+        let claim = db
+            .tasks()
+            .claim_scoped(
+                mine,
+                "claude-code:af31",
+                TTL,
+                &["src/db.rs".to_string()],
+                OnConflict::Report,
+            )
+            .unwrap();
+        assert_eq!(claim.task.status, Status::Claimed);
+        assert_eq!(claim.paths, vec!["src/db.rs"]);
+        assert_eq!(claim.conflicts.len(), 1);
+        assert_eq!(claim.conflicts[0].other_seq, theirs);
+    }
+
+    #[test]
+    fn a_scope_from_the_plan_is_checked_even_when_the_claimant_declares_nothing() {
+        let db = db();
+        let theirs = seed(&db, "theirs");
+        let mine = seed(&db, "mine");
+        declare(&db, theirs, &["src/**"]);
+        declare(&db, mine, &["src/db.rs"]);
+        db.tasks().claim(theirs, "codex:9f2c", TTL).unwrap();
+
+        let claim = db
+            .tasks()
+            .claim_scoped(mine, "a:1", TTL, &[], OnConflict::Report)
+            .unwrap();
+        assert_eq!(claim.paths, vec!["src/db.rs"]);
+        assert_eq!(claim.conflicts.len(), 1);
+    }
+
+    #[test]
+    fn a_refused_overlap_rolls_the_claim_back_with_it() {
+        let db = db();
+        let theirs = seed(&db, "theirs");
+        let mine = seed(&db, "mine");
+        declare(&db, theirs, &["src/**"]);
+        db.tasks().claim(theirs, "codex:9f2c", TTL).unwrap();
+
+        let err = db
+            .tasks()
+            .claim_scoped(
+                mine,
+                "a:1",
+                TTL,
+                &["src/db.rs".to_string()],
+                OnConflict::Refuse,
+            )
+            .unwrap_err();
+        assert!(matches!(err, Error::PathConflict { .. }), "{err:?}");
+
+        let task = db.tasks().get(mine).unwrap();
+        assert_eq!(task.status, Status::Open, "the claim must not survive");
+        assert!(db.scopes().for_task(mine).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_unusable_pattern_costs_no_lease() {
+        let db = db();
+        let seq = seed(&db, "t");
+        let err = db
+            .tasks()
+            .claim_scoped(seq, "a:1", TTL, &["../etc".to_string()], OnConflict::Report)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("not a usable path pattern"),
+            "{err}"
+        );
+        assert_eq!(db.tasks().get(seq).unwrap().status, Status::Open);
+    }
+
+    // ------------------------------------------------------------- dispatch
+
+    fn scope() -> ProjectScope {
+        ProjectScope::Only(PROJECT.into())
+    }
+
+    #[test]
+    fn next_hands_out_the_highest_priority_task_and_claims_it() {
+        let db = db();
+        db.tasks().create(PROJECT, "low", "", 0, "cli").unwrap();
+        let high = db
+            .tasks()
+            .create(PROJECT, "high", "", 5, "cli")
+            .unwrap()
+            .seq;
+
+        let dispatch = db
+            .tasks()
+            .claim_next("codex:9f2c", TTL, &scope(), true)
+            .unwrap();
+        let claim = dispatch.claim.expect("a task was available");
+        assert_eq!(claim.task.seq, high);
+        assert_eq!(claim.task.claimed_by.as_deref(), Some("codex:9f2c"));
+    }
+
+    #[test]
+    fn next_is_first_in_first_out_within_a_priority_band() {
+        let db = db();
+        let first = seed(&db, "first");
+        let second = seed(&db, "second");
+
+        let a = db.tasks().claim_next("a:1", TTL, &scope(), true).unwrap();
+        let b = db.tasks().claim_next("b:1", TTL, &scope(), true).unwrap();
+        assert_eq!(a.claim.unwrap().task.seq, first);
+        assert_eq!(b.claim.unwrap().task.seq, second);
+    }
+
+    #[test]
+    fn next_walks_past_blocked_tasks_and_says_which() {
+        let db = db();
+        let gate = seed(&db, "gate");
+        let waiting = db
+            .tasks()
+            .create(PROJECT, "waiting", "", 9, "cli")
+            .unwrap()
+            .seq;
+        db.deps().add(waiting, gate, "cli").unwrap();
+
+        // `waiting` outranks `gate` on priority but is not workable yet.
+        let dispatch = db.tasks().claim_next("a:1", TTL, &scope(), true).unwrap();
+        assert_eq!(dispatch.claim.unwrap().task.seq, gate);
+        assert_eq!(dispatch.blocked, vec![waiting]);
+    }
+
+    #[test]
+    fn next_defers_a_task_that_would_collide_and_explains_why() {
+        let db = db();
+        let held = seed(&db, "held");
+        let overlapping = seed(&db, "overlapping");
+        declare(&db, held, &["src/**"]);
+        declare(&db, overlapping, &["src/db.rs"]);
+        db.tasks().claim(held, "codex:9f2c", TTL).unwrap();
+
+        let dispatch = db
+            .tasks()
+            .claim_next("claude-code:af31", TTL, &scope(), true)
+            .unwrap();
+        assert!(dispatch.claim.is_none(), "{dispatch:?}");
+        assert_eq!(dispatch.deferred.len(), 1);
+        let (seq, conflicts) = &dispatch.deferred[0];
+        assert_eq!(*seq, overlapping);
+        assert_eq!(conflicts[0].other_seq, held);
+        assert_eq!(conflicts[0].other_holder.as_deref(), Some("codex:9f2c"));
+
+        // The same request, with collision avoidance off, hands it over.
+        let forced = db
+            .tasks()
+            .claim_next("claude-code:af31", TTL, &scope(), false)
+            .unwrap();
+        assert_eq!(forced.claim.unwrap().task.seq, overlapping);
+    }
+
+    #[test]
+    fn next_prefers_the_task_that_does_not_collide() {
+        let db = db();
+        let held = seed(&db, "held");
+        let overlapping = db
+            .tasks()
+            .create(PROJECT, "overlapping", "", 9, "cli")
+            .unwrap()
+            .seq;
+        let free = seed(&db, "free");
+        declare(&db, held, &["src/**"]);
+        declare(&db, overlapping, &["src/db.rs"]);
+        declare(&db, free, &["docs/**"]);
+        db.tasks().claim(held, "codex:9f2c", TTL).unwrap();
+
+        let dispatch = db.tasks().claim_next("a:1", TTL, &scope(), true).unwrap();
+        assert_eq!(dispatch.claim.unwrap().task.seq, free);
+        assert_eq!(dispatch.deferred.len(), 1);
+    }
+
+    #[test]
+    fn next_on_an_empty_queue_returns_nothing_and_blames_nobody() {
+        let db = db();
+        let dispatch = db.tasks().claim_next("a:1", TTL, &scope(), true).unwrap();
+        assert_eq!(dispatch, Dispatch::default());
+    }
+
+    #[test]
+    fn readiness_reports_both_kinds_of_obstacle() {
+        let db = db();
+        let gate = seed(&db, "gate");
+        let held = seed(&db, "held");
+        let mine = seed(&db, "mine");
+        db.deps().add(mine, gate, "cli").unwrap();
+        declare(&db, held, &["src/**"]);
+        declare(&db, mine, &["src/db.rs"]);
+        db.tasks().claim(held, "codex:9f2c", TTL).unwrap();
+
+        let (blockers, conflicts) = db.tasks().readiness(mine).unwrap();
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0].seq, gate);
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].other_seq, held);
+    }
+
+    /// The property the whole self-dispatch idea rests on: agents in different
+    /// harnesses all asking for work at the same instant spread out over the
+    /// queue instead of piling onto one task or colliding.
+    #[test]
+    fn concurrent_dispatch_gives_every_agent_a_different_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dispatch.db");
+        const AGENTS: usize = 8;
+        const TASKS: usize = 12;
+        {
+            let db = Db::open(&path).unwrap();
+            for i in 0..TASKS {
+                db.tasks()
+                    .create(PROJECT, &format!("t{i}"), "", 0, "cli")
+                    .unwrap();
+            }
+        }
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(AGENTS));
+        let handles: Vec<_> = (0..AGENTS)
+            .map(|i| {
+                let (path, barrier) = (path.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    let db = Db::open(&path).unwrap();
+                    barrier.wait();
+                    db.tasks()
+                        .claim_next(&format!("harness:{i:02}"), TTL, &scope(), true)
+                        .unwrap()
+                        .claim
+                        .map(|c| c.task.seq)
+                })
+            })
+            .collect();
+
+        let mut handed: Vec<i64> = handles
+            .into_iter()
+            .filter_map(|h| h.join().unwrap())
+            .collect();
+        assert_eq!(handed.len(), AGENTS, "every agent should get work");
+        handed.sort_unstable();
+        handed.dedup();
+        assert_eq!(handed.len(), AGENTS, "two agents were handed the same task");
     }
 
     /// Tasks are numbered by a counter in `meta`, which concurrent creators

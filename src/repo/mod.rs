@@ -3,11 +3,15 @@
 //! The MCP, CLI and TUI layers call these methods and never write SQL of their
 //! own — see the quality bar in DESIGN.md §11.
 
+mod deps;
 mod memory;
+mod scope;
 mod tasks;
 
+pub use deps::{dispatch_waves, Deps};
 pub use memory::{Memory, MemoryQuery, NewAssertion};
-pub use tasks::{SweepOutcome, Tasks};
+pub use scope::{OnConflict, Scopes};
+pub use tasks::{Claim, Dispatch, Subtask, SweepOutcome, Tasks};
 
 use ulid::Ulid;
 

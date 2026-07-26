@@ -6,9 +6,30 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::identity;
+use crate::repo::OnConflict;
 
 /// Default lease TTL when nothing else says otherwise.
 pub const DEFAULT_LEASE_TTL_MINUTES: u64 = 15;
+
+/// What the queue does when a task's declared file scope overlaps live work.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PathConflicts {
+    /// Record the declaration and tell both sides about the overlap.
+    #[default]
+    Report,
+    /// Refuse the claim or declaration outright.
+    Refuse,
+}
+
+impl PathConflicts {
+    fn policy(self) -> OnConflict {
+        match self {
+            PathConflicts::Report => OnConflict::Report,
+            PathConflicts::Refuse => OnConflict::Refuse,
+        }
+    }
+}
 
 /// On-disk configuration. Every field is optional in the file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,6 +40,11 @@ pub struct Config {
     /// Whether list and search default to every project instead of the
     /// current one. Explicit `all_projects` arguments still win.
     pub all_projects_by_default: bool,
+    /// How to treat a declared file scope that overlaps live work.
+    pub path_conflicts: PathConflicts,
+    /// Whether `task_next` passes over tasks whose declared file scope
+    /// overlaps what another agent is already working.
+    pub dispatch_avoids_conflicts: bool,
 }
 
 impl Default for Config {
@@ -26,6 +52,8 @@ impl Default for Config {
         Config {
             lease_ttl_minutes: DEFAULT_LEASE_TTL_MINUTES,
             all_projects_by_default: false,
+            path_conflicts: PathConflicts::Report,
+            dispatch_avoids_conflicts: true,
         }
     }
 }
@@ -56,6 +84,16 @@ impl Config {
     pub fn all_projects(&self, requested: Option<bool>) -> bool {
         requested.unwrap_or(self.all_projects_by_default)
     }
+
+    /// The overlap policy to apply to a claim or a scope declaration.
+    pub fn on_conflict(&self) -> OnConflict {
+        self.path_conflicts.policy()
+    }
+
+    /// Resolve an optional per-call collision-avoidance flag for `task_next`.
+    pub fn avoid_conflicts(&self, requested: Option<bool>) -> bool {
+        requested.unwrap_or(self.dispatch_avoids_conflicts)
+    }
 }
 
 /// Resolve the database path: `--db` beats `HIRD_DB` beats the XDG default.
@@ -82,6 +120,37 @@ mod tests {
         assert_eq!(cfg.lease_ttl_minutes, 15);
         assert!(!cfg.all_projects_by_default);
         assert_eq!(cfg.lease_ttl(), Duration::from_secs(900));
+        // Overlaps are reported rather than refused: the queue's job is to
+        // tell agents about each other, not to decide for them.
+        assert_eq!(cfg.on_conflict(), OnConflict::Report);
+        // Self-dispatch, on the other hand, has a free choice of task, so it
+        // takes the one that cannot collide.
+        assert!(cfg.avoid_conflicts(None));
+    }
+
+    #[test]
+    fn the_conflict_policy_is_named_in_the_file_the_way_it_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "path_conflicts = \"refuse\"\n").unwrap();
+        assert_eq!(
+            Config::load(&path).unwrap().on_conflict(),
+            OnConflict::Refuse
+        );
+
+        std::fs::write(&path, "path_conflicts = \"shout\"\n").unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(err.contains("path_conflicts"), "{err}");
+    }
+
+    #[test]
+    fn collision_avoidance_is_overridable_per_call() {
+        let cfg = Config {
+            dispatch_avoids_conflicts: false,
+            ..Config::default()
+        };
+        assert!(!cfg.avoid_conflicts(None));
+        assert!(cfg.avoid_conflicts(Some(true)));
     }
 
     #[test]

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::Connection;
 
 use crate::error::Result;
-use crate::repo::{Memory, Tasks};
+use crate::repo::{Deps, Memory, Scopes, Tasks};
 
 /// Numbered migrations, applied in order and recorded in `meta.schema_version`.
 const MIGRATIONS: &[&str] = &[
@@ -79,6 +79,30 @@ CREATE INDEX idx_assertions_project_current ON assertions(project, superseded_by
 
 INSERT INTO meta(key, value) VALUES ('next_seq', '1');
 "#,
+    // 2 — dependencies between tasks, and the file scopes tasks declare
+    r#"
+CREATE TABLE task_deps (
+  task_id       TEXT NOT NULL REFERENCES tasks(id),
+  depends_on_id TEXT NOT NULL REFERENCES tasks(id),
+  actor         TEXT NOT NULL,
+  created_at    TEXT NOT NULL,
+  PRIMARY KEY (task_id, depends_on_id),
+  CHECK (task_id <> depends_on_id)
+);
+
+CREATE INDEX idx_task_deps_depends_on ON task_deps(depends_on_id);
+
+CREATE TABLE task_paths (
+  id          TEXT PRIMARY KEY,
+  task_id     TEXT NOT NULL REFERENCES tasks(id),
+  pattern     TEXT NOT NULL,
+  declared_by TEXT NOT NULL,
+  at          TEXT NOT NULL,
+  UNIQUE (task_id, pattern)
+);
+
+CREATE INDEX idx_task_paths_task ON task_paths(task_id);
+"#,
 ];
 
 /// An open connection to the hird database.
@@ -146,6 +170,16 @@ impl Db {
     /// Assertion repository.
     pub fn memory(&self) -> Memory<'_> {
         Memory::new(&self.conn)
+    }
+
+    /// Task dependency graph repository.
+    pub fn deps(&self) -> Deps<'_> {
+        Deps::new(&self.conn)
+    }
+
+    /// Declared file scope repository.
+    pub fn scopes(&self) -> Scopes<'_> {
+        Scopes::new(&self.conn)
     }
 
     /// The schema version currently applied.

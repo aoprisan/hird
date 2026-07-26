@@ -80,6 +80,19 @@ pub fn overdue_style() -> Style {
         .add_modifier(Modifier::SLOW_BLINK)
 }
 
+/// Style for two agents in the same files.
+///
+/// Deliberately not [`overdue_style`]: an overlap is a standing fact the human
+/// should read, not an alarm that blinks at them until it clears.
+pub fn conflict_style() -> Style {
+    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+}
+
+/// Style for a task nobody can claim yet because it is waiting on another.
+pub fn blocked_style() -> Style {
+    Style::default().fg(Color::Yellow)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
