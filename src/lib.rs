@@ -11,6 +11,7 @@
 //! - [`db`] — connection setup and schema migrations
 //! - [`repo`] — the only place SQL is written
 //! - [`witness`] — the only place the working tree is read
+//! - [`plan`] — a dependency graph as a file, which [`repo`] turns into rows
 //! - [`mcp`], [`cli`], [`tui`] — the three front ends, which call [`repo`]
 
 pub mod cli;
@@ -23,6 +24,7 @@ pub mod hash;
 pub mod identity;
 pub mod mcp;
 pub mod model;
+pub mod plan;
 pub mod repo;
 pub mod tui;
 pub mod witness;

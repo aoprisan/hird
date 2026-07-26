@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::Connection;
 
 use crate::error::Result;
-use crate::repo::{Deps, Memory, Recall, Scopes, Tasks, Witnessed};
+use crate::repo::{Deps, Memory, Plans, Recall, Scopes, Tasks, Witnessed};
 
 /// Numbered migrations, applied in order and recorded in `meta.schema_version`.
 const MIGRATIONS: &[&str] = &[
@@ -126,6 +126,17 @@ CREATE TABLE task_changes (
 CREATE INDEX idx_task_changes_path ON task_changes(path);
 CREATE INDEX idx_task_changes_task ON task_changes(task_id);
 "#,
+    // 4 — the name a plan file gave a task, so a plan can be applied twice
+    r#"
+CREATE TABLE task_plan_nodes (
+  task_id    TEXT PRIMARY KEY REFERENCES tasks(id),
+  project    TEXT NOT NULL,
+  plan       TEXT NOT NULL,
+  node       TEXT NOT NULL,
+  at         TEXT NOT NULL,
+  UNIQUE (project, plan, node)
+);
+"#,
 ];
 
 /// An open connection to the hird database.
@@ -203,6 +214,11 @@ impl Db {
     /// Declared file scope repository.
     pub fn scopes(&self) -> Scopes<'_> {
         Scopes::new(&self.conn)
+    }
+
+    /// Plan filing: a whole graph of tasks in one transaction.
+    pub fn plans(&self) -> Plans<'_> {
+        Plans::new(&self.conn)
     }
 
     /// What the working tree was seen to do while tasks were held.

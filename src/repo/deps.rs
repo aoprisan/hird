@@ -186,7 +186,7 @@ fn blockers_for_id(conn: &Connection, task_id: &str) -> Result<Vec<Blocker>> {
 ///
 /// `None` when `to` is unreachable — which, for the edge being added, is the
 /// answer that means "no cycle".
-fn dependency_path(conn: &Connection, from: &str, to: &str) -> Result<Option<Vec<i64>>> {
+pub(crate) fn dependency_path(conn: &Connection, from: &str, to: &str) -> Result<Option<Vec<i64>>> {
     if from == to {
         let seq = seq_for_id(conn, from)?;
         return Ok(Some(vec![seq, seq]));

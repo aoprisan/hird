@@ -17,6 +17,7 @@ use crate::fmt;
 use crate::glob;
 use crate::identity::{self, ACTOR_CLI};
 use crate::model::{Status, TaskSummary};
+use crate::plan;
 use crate::repo::{dispatch_waves, MemoryQuery, NewAssertion, OnConflict, ProjectScope};
 use crate::witness;
 
@@ -59,6 +60,9 @@ pub enum Command {
     /// Add or remove dependencies between tasks.
     #[command(subcommand)]
     Dep(DepCommand),
+    /// File a whole dependency graph from a plan file, or read it first.
+    #[command(subcommand)]
+    Plan(PlanCommand),
     /// Print the queue as dispatch waves: what can be worked now, and what
     /// each later wave is waiting for.
     Graph(ScopeFilterArgs),
@@ -110,6 +114,26 @@ pub struct AddArgs {
     /// the same file.
     #[arg(long = "path", value_name = "GLOB")]
     pub paths: Vec<String>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PlanCommand {
+    /// File every task in a plan file, with its dependencies and file scopes.
+    ///
+    /// The whole plan lands in one transaction, or none of it does. Applying
+    /// the same plan again files only what the file has gained since, so a
+    /// plan is something to edit and re-run rather than a one-shot script.
+    Apply {
+        /// The plan file, as TOML ("-" for stdin).
+        file: PathBuf,
+        /// Work out what would be filed — waves, overlaps and all — and write
+        /// nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Project root to file under. Defaults to the current project.
+        #[arg(long, value_name = "PATH")]
+        project: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -250,6 +274,7 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
         }
         Command::Mem(cmd) => mem(&db, &project, &config, cmd, out),
         Command::Dep(cmd) => dep(&db, cmd, out),
+        Command::Plan(cmd) => plan_cmd(&db, &project, cmd, out),
         Command::Graph(args) => graph(&db, &scope_of(&project, &config, args.all_projects), out),
         Command::Scope(args) => scope_cmd(&db, args, out),
         Command::Agents(args) => {
@@ -279,7 +304,7 @@ fn scope_of(project: &str, config: &Config, all_projects: bool) -> ProjectScope 
 fn add(db: &Db, project: &str, args: &AddArgs, out: &mut impl Write) -> anyhow::Result<()> {
     let body = match (&args.body, &args.body_file) {
         (Some(body), _) => body.clone(),
-        (None, Some(path)) => read_body(path)?,
+        (None, Some(path)) => read_text(path)?,
         (None, None) => String::new(),
     };
     let project = match &args.project {
@@ -324,6 +349,178 @@ fn dep(db: &Db, cmd: &DepCommand, out: &mut impl Write) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// File a plan, or work out what filing it would do.
+fn plan_cmd(db: &Db, project: &str, cmd: &PlanCommand, out: &mut impl Write) -> anyhow::Result<()> {
+    let PlanCommand::Apply {
+        file,
+        dry_run,
+        project: explicit,
+    } = cmd;
+    let source = read_text(file)?;
+    let parsed =
+        plan::parse(&source).with_context(|| format!("reading the plan in {}", file.display()))?;
+    let project = match explicit {
+        Some(root) => identity::canonical_project(root),
+        None => project.to_string(),
+    };
+
+    if *dry_run {
+        return preview(db, &project, &parsed, out);
+    }
+
+    let applied = db.plans().apply(&project, &parsed, ACTOR_CLI)?;
+    if applied.created.is_empty() {
+        writeln!(
+            out,
+            "plan {:?} is already filed in full; nothing to do",
+            parsed.plan
+        )?;
+    } else {
+        writeln!(
+            out,
+            "filed {} from plan {:?}",
+            count(applied.created.len(), "task"),
+            parsed.plan
+        )?;
+        for placed in &applied.created {
+            writeln!(
+                out,
+                "  #{:<4} {:<14} {}",
+                placed.seq,
+                fmt::truncate(&placed.name, 14),
+                fmt::truncate(&placed.title, 44)
+            )?;
+        }
+    }
+    if !applied.reused.is_empty() && !applied.created.is_empty() {
+        // Only worth saying next to what was filed: on a re-apply that files
+        // nothing, the line above has already said the whole plan was there.
+        let numbers: Vec<String> = applied
+            .reused
+            .iter()
+            .map(|p| format!("#{}", p.seq))
+            .collect();
+        writeln!(
+            out,
+            "{} already filed: {}",
+            count(applied.reused.len(), "task"),
+            numbers.join(", ")
+        )?;
+    }
+    if applied.edges_added > 0 {
+        writeln!(out, "{} recorded", count(applied.edges_added, "dependency"))?;
+    }
+    for drift in &applied.drifted {
+        writeln!(out, "note: {}", drift.describe())?;
+    }
+    for conflict in &applied.conflicts {
+        writeln!(out, "warning: {}", conflict.describe())?;
+    }
+    Ok(())
+}
+
+/// What this plan would become, printed and not written.
+///
+/// The waves come from the same function `hird graph` prints, so what a human
+/// reads here is what the board will say once the plan is filed.
+fn preview(
+    db: &Db,
+    project: &str,
+    parsed: &plan::Plan,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
+    let preview = parsed.preview();
+    let filed: BTreeMap<String, i64> = db
+        .plans()
+        .nodes(project, &parsed.plan)?
+        .into_iter()
+        .collect();
+
+    writeln!(
+        out,
+        "plan {:?} — {}, {}, at most {} at once",
+        parsed.plan,
+        count(parsed.tasks.len(), "task"),
+        count(preview.waves.len(), "wave"),
+        preview.widest()
+    )?;
+
+    for (index, wave) in preview.waves.iter().enumerate() {
+        let label = match index {
+            0 => "wave 1  (workable now)".to_string(),
+            n => format!("wave {}  (after wave {n})", n + 1),
+        };
+        writeln!(out, "\n{label}")?;
+        for name in wave {
+            let Some(task) = parsed.task(name) else {
+                continue;
+            };
+            let number = match filed.get(name) {
+                Some(seq) => format!("#{seq}"),
+                None => "new".to_string(),
+            };
+            let mut line = format!(
+                "  {:<5} {:<14} {}",
+                number,
+                fmt::truncate(name, 14),
+                fmt::truncate(&task.title, 40)
+            );
+            if !task.needs.is_empty() {
+                line.push_str(&format!("   waits for {}", task.needs.join(", ")));
+            }
+            writeln!(out, "{line}")?;
+            if !task.paths.is_empty() {
+                writeln!(out, "      files  {}", task.paths.join(", "))?;
+            }
+        }
+    }
+
+    if !preview.collisions.is_empty() {
+        writeln!(
+            out,
+            "\nsame files, nothing ordering them — the queue hands these out one \
+             at a time, so the waves above are wider than the work really is"
+        )?;
+        for collision in &preview.collisions {
+            writeln!(out, "  {}", collision.describe())?;
+        }
+    }
+    if !preview.unscoped.is_empty() {
+        writeln!(
+            out,
+            "\ndeclaring no files: {}\n  the queue cannot keep another agent out \
+             of what these touch, and what earlier work learned reaches them by \
+             title alone",
+            preview.unscoped.join(", ")
+        )?;
+    }
+
+    let already = filed.len();
+    if already == 0 {
+        writeln!(out, "\nnothing was written; drop --dry-run to file it")?;
+    } else {
+        writeln!(
+            out,
+            "\nnothing was written; {} of these already filed, so applying would \
+             file the other {}",
+            already,
+            parsed.tasks.len() - already
+        )?;
+    }
+    Ok(())
+}
+
+/// `1 task` / `3 tasks`, so the sentence around it does not have to agree.
+fn count(n: usize, noun: &str) -> String {
+    if n == 1 {
+        return format!("{n} {noun}");
+    }
+    match noun.strip_suffix('y') {
+        Some(stem) => format!("{n} {stem}ies"),
+        None => format!("{n} {noun}s"),
+    }
 }
 
 fn scope_cmd(db: &Db, args: &ScopeArgs, out: &mut impl Write) -> anyhow::Result<()> {
@@ -474,11 +671,12 @@ fn overlapping(scopes: &BTreeMap<i64, Vec<String>>, a: i64, b: i64) -> Vec<Strin
         .collect()
 }
 
-fn read_body(path: &Path) -> anyhow::Result<String> {
+/// Read a file argument, or standard input when it is "-".
+fn read_text(path: &Path) -> anyhow::Result<String> {
     if path == Path::new("-") {
         let mut buf = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
-            .context("reading task body from stdin")?;
+            .context("reading from stdin")?;
         return Ok(buf);
     }
     std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))
@@ -860,6 +1058,35 @@ mod tests {
             Command::Add(args) => assert_eq!(args.paths, vec!["src/**", "tests/"]),
             other => panic!("parsed as {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_plan_is_applied_from_a_file_and_dry_run_is_opt_in() {
+        let cli = Cli::try_parse_from(["hird", "plan", "apply", "plan.toml"]).unwrap();
+        match cli.command {
+            Command::Plan(PlanCommand::Apply { file, dry_run, .. }) => {
+                assert_eq!(file, PathBuf::from("plan.toml"));
+                assert!(!dry_run);
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+        let dry = Cli::try_parse_from(["hird", "plan", "apply", "-", "--dry-run"]).unwrap();
+        match dry.command {
+            Command::Plan(PlanCommand::Apply { file, dry_run, .. }) => {
+                assert_eq!(file, PathBuf::from("-"));
+                assert!(dry_run);
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+    }
+
+    #[test]
+    fn counted_nouns_agree_with_their_number() {
+        assert_eq!(count(1, "task"), "1 task");
+        assert_eq!(count(0, "task"), "0 tasks");
+        assert_eq!(count(3, "wave"), "3 waves");
+        assert_eq!(count(1, "dependency"), "1 dependency");
+        assert_eq!(count(2, "dependency"), "2 dependencies");
     }
 
     #[test]

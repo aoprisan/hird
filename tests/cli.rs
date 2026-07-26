@@ -473,3 +473,230 @@ fn the_agents_view_outside_git_says_nothing_about_the_tree() {
 
     codex.shutdown();
 }
+
+// ------------------------------------------------------------------- plans
+
+/// The plan used by the tests below: five tasks, three waves, one unordered
+/// pair of tasks that declare the same files.
+const PLAN: &str = r#"
+plan = "serde-migration"
+
+[[task]]
+name = "schema"
+title = "Design the storage schema"
+priority = 3
+paths = ["src/db.rs"]
+
+[[task]]
+name = "repos"
+title = "Port the repository layer"
+body = "Keep the env-var precedence."
+paths = ["src/repo/**"]
+needs = ["schema"]
+
+[[task]]
+name = "renderer"
+title = "Rewrite the renderer"
+paths = ["src/tui/**"]
+
+[[task]]
+name = "audit"
+title = "Audit the renderer tests"
+paths = ["src/tui/view.rs"]
+
+[[task]]
+name = "notes"
+title = "Write the release notes"
+needs = ["repos", "renderer"]
+"#;
+
+#[test]
+fn a_plan_files_its_whole_graph_and_the_board_agrees_with_the_preview() {
+    let sandbox = Sandbox::new();
+    sandbox.write_file("plan.toml", PLAN);
+
+    let preview = sandbox.run(&["plan", "apply", "plan.toml", "--dry-run"]);
+    assert!(preview.contains("5 tasks, 3 waves"), "{preview}");
+    assert!(preview.contains("nothing was written"), "{preview}");
+    // Nothing was filed, so there is nothing to list.
+    assert!(sandbox.run(&["ls"]).contains("no tasks"), "still empty");
+
+    let filed = sandbox.run(&["plan", "apply", "plan.toml"]);
+    assert!(filed.contains("filed 5 tasks"), "{filed}");
+    assert!(filed.contains("3 dependencies recorded"), "{filed}");
+
+    // The waves the preview promised are the waves the queue reports.
+    let graph = sandbox.run(&["graph"]);
+    for (wave, title) in [
+        ("wave 1", "Design the storage schema"),
+        ("wave 2", "Port the repository layer"),
+        ("wave 3", "Write the release notes"),
+    ] {
+        let at = graph.find(wave).unwrap_or_else(|| panic!("{graph}"));
+        let next = graph[at..].find(title);
+        assert!(next.is_some(), "{title} should follow {wave}:\n{graph}");
+    }
+    assert!(sandbox.run(&["show", "2"]).contains("waits for #1"));
+    assert!(sandbox.run(&["scope", "2"]).contains("src/repo/**"));
+}
+
+#[test]
+fn a_plan_applied_twice_files_only_what_the_file_gained() {
+    let sandbox = Sandbox::new();
+    sandbox.write_file("plan.toml", PLAN);
+    sandbox.run(&["plan", "apply", "plan.toml"]);
+
+    let again = sandbox.run(&["plan", "apply", "plan.toml"]);
+    assert!(again.contains("already filed in full"), "{again}");
+    assert_eq!(sandbox.run(&["ls"]).lines().count(), 5);
+
+    sandbox.write_file(
+        "plan.toml",
+        &format!(
+            "{PLAN}
+[[task]]
+name = \"changelog\"
+title = \"Update the changelog\"
+needs = [\"notes\"]
+"
+        ),
+    );
+    let grown = sandbox.run(&["plan", "apply", "plan.toml"]);
+    assert!(grown.contains("filed 1 task"), "{grown}");
+    assert!(grown.contains("#6"), "{grown}");
+    assert!(grown.contains("5 tasks already filed"), "{grown}");
+    assert_eq!(sandbox.run(&["ls"]).lines().count(), 6);
+}
+
+#[test]
+fn the_preview_names_the_pairs_that_cannot_run_at_once() {
+    let sandbox = Sandbox::new();
+    sandbox.write_file("plan.toml", PLAN);
+
+    let preview = sandbox.run(&["plan", "apply", "plan.toml", "--dry-run"]);
+    assert!(
+        preview.contains("renderer and audit — src/tui/** overlaps src/tui/view.rs"),
+        "{preview}"
+    );
+    // And the task that told the queue nothing about its files.
+    assert!(preview.contains("declaring no files: notes"), "{preview}");
+}
+
+#[test]
+fn the_preview_marks_what_is_already_filed() {
+    let sandbox = Sandbox::new();
+    sandbox.write_file("plan.toml", PLAN);
+    sandbox.run(&["plan", "apply", "plan.toml"]);
+
+    let preview = sandbox.run(&["plan", "apply", "plan.toml", "--dry-run"]);
+    assert!(preview.contains("#1    schema"), "{preview}");
+    assert!(!preview.contains("new   schema"), "{preview}");
+    assert!(
+        preview.contains("5 of these already filed, so applying would file the other 0"),
+        "{preview}"
+    );
+}
+
+#[test]
+fn a_plan_that_cannot_be_filed_leaves_the_queue_untouched() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["add", "filed by hand"]);
+
+    // A name nothing defines, with a near-miss to point at.
+    sandbox.write_file(
+        "plan.toml",
+        r#"
+plan = "p"
+[[task]]
+name = "schema"
+title = "Design the schema"
+[[task]]
+name = "repos"
+title = "Port the repositories"
+needs = ["schemas"]
+"#,
+    );
+    let err = sandbox.run_failing(&["plan", "apply", "plan.toml"]);
+    assert!(err.contains("Did you mean \"schema\""), "{err}");
+
+    // A ring, which nothing could ever start.
+    sandbox.write_file(
+        "plan.toml",
+        r#"
+plan = "p"
+[[task]]
+name = "a"
+title = "A"
+needs = ["b"]
+[[task]]
+name = "b"
+title = "B"
+needs = ["a"]
+"#,
+    );
+    let err = sandbox.run_failing(&["plan", "apply", "plan.toml"]);
+    assert!(err.contains("in a circle"), "{err}");
+
+    // Not valid TOML at all: the error points at the line.
+    sandbox.write_file("plan.toml", "plan = \"p\"\n[[task]]\nnaem = \"a\"\n");
+    let err = sandbox.run_failing(&["plan", "apply", "plan.toml"]);
+    assert!(err.contains("unknown field `naem`"), "{err}");
+
+    assert_eq!(sandbox.run(&["ls"]).lines().count(), 1, "nothing was filed");
+}
+
+#[test]
+fn a_plan_can_be_read_from_stdin() {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let sandbox = Sandbox::new();
+    let mut child = sandbox
+        .command()
+        .args(["plan", "apply", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn hird");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(PLAN.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("filed 5 tasks"));
+}
+
+#[test]
+fn agents_work_a_filed_plan_the_way_they_work_anything_else() {
+    let sandbox = Sandbox::new();
+    sandbox.write_file("plan.toml", PLAN);
+    sandbox.run(&["plan", "apply", "plan.toml"]);
+
+    // "work the queue", twice over. The schema wins on priority; the second
+    // agent cannot have the port, which waits for it.
+    let mut codex = McpSession::start(&sandbox, "codex");
+    let first = codex.call("task_next", serde_json::json!({})).unwrap();
+    assert_eq!(first["claimed"]["claimed"].as_i64(), Some(1), "{first}");
+
+    let mut claude = McpSession::start(&sandbox, "claude-code");
+    let second = claude.call("task_next", serde_json::json!({})).unwrap();
+    assert_eq!(
+        second["claimed"]["claimed"].as_i64(),
+        Some(3),
+        "the port is blocked, so this is the renderer: {second}"
+    );
+
+    // And the pair the preview warned about is exactly the one now deferred:
+    // the audit overlaps the renderer another agent is holding.
+    let mut copilot = McpSession::start(&sandbox, "copilot");
+    let third = copilot.call("task_next", serde_json::json!({})).unwrap();
+    assert!(third["claimed"].is_null(), "{third}");
+    assert_eq!(third["deferred"][0]["seq"].as_i64(), Some(4), "{third}");
+
+    codex.shutdown();
+    claude.shutdown();
+    copilot.shutdown();
+}
