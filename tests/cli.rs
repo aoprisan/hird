@@ -434,8 +434,8 @@ fn the_agents_view_shows_what_moved_and_where_two_agents_meet() {
     assert!(board.contains("files  src/config.rs"), "{board}");
     assert!(board.contains("moved  src/config.rs"), "{board}");
     assert!(
-        board.contains("you are both looking at the same content"),
-        "both agents are in a file that moved, and neither is behind yet:\n{board}"
+        !board.contains("!!!"),
+        "both agents are level on the file, so there is nothing to warn about:\n{board}"
     );
 
     // Now claude writes over it and checks in. Codex's copy is the old one.

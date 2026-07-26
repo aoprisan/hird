@@ -138,6 +138,11 @@ impl HirdMcp {
                 .map(|seen| seen.iter().map(Contention::describe).collect())
                 .unwrap_or_default(),
             undeclared: db.witnessed().undeclared(seq).unwrap_or_default(),
+            alone: db
+                .witnessed()
+                .baselines(&self.project)
+                .map(|live| live.len() <= 1)
+                .unwrap_or(true),
         }
     }
 
@@ -731,6 +736,10 @@ struct Evidence {
     /// Files that moved under you that none of your declared patterns covers.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     undeclared: Vec<String>,
+    /// Whether another agent held a task in this project at the same time.
+    /// Not reported — it only decides how confidently the advice can speak.
+    #[serde(skip)]
+    alone: bool,
 }
 
 impl Evidence {
@@ -747,12 +756,25 @@ impl Evidence {
             );
         }
         if !self.undeclared.is_empty() {
-            return Some(format!(
-                "you have changed {} nobody was told about; call task_scope with {} so the \
-                 other agents' collision checks can see it",
-                plural(self.undeclared.len(), "a file", "files"),
-                self.undeclared.join(", "),
-            ));
+            let listed = self.undeclared.join(", ");
+            // Alone in the project, a file that moved moved because of you.
+            // With another agent live, hird watched the file and not the
+            // keyboard, and the advice has to leave room for that.
+            return Some(if self.alone {
+                format!(
+                    "you have changed {} nobody was told about: {listed}. Call task_scope \
+                     with {} so the other agents' collision checks can see it",
+                    plural(self.undeclared.len(), "a file", "files"),
+                    plural(self.undeclared.len(), "it", "them"),
+                )
+            } else {
+                format!(
+                    "{listed} moved while you held this task and nobody has declared {}. If \
+                     the edit was yours, call task_scope so the other agents can see it; if \
+                     it was not, another agent is working outside what it declared",
+                    plural(self.undeclared.len(), "it", "them"),
+                )
+            });
         }
         None
     }

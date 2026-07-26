@@ -19,6 +19,11 @@ actually do, and nothing that collides. Nobody assigns anything.
 What the work teaches gets written down, and the next agent to touch those files
 is handed it without having to know to ask.
 
+And because a board built entirely out of what agents say about themselves has
+one blind spot, `hird` also watches the working tree — so when a file two agents
+both declared moves under both of them, they hear about it while there is still
+time to re-read it, instead of at merge time.
+
 No daemon. No server. No accounts.
 
 - 📖 **Documentation: [aoprisan.github.io/hird](https://aoprisan.github.io/hird/)**
@@ -243,6 +248,110 @@ parallel, and task 1 becomes workable again the moment they are both done.
 
 Pass `sequential: true` when the pieces genuinely have to happen in order.
 
+## What actually happened
+
+Everything above is what an agent *said*. A task's status is its holder's claim
+about itself, its file scope is its holder's prediction, and its result is a
+sentence the holder wrote about its own work. That is fine right up until three
+agents share one checkout, where the failure that costs you work is the one
+nobody reports.
+
+Play the collision out to the end. Two agents declare `src/config.rs`. Both are
+told about the overlap. Both decide their part is small. Both edit. The second
+write lands on the first, both tasks complete, the board goes green — and git
+has nothing to show you, because nothing was committed and there is only ever
+one version of the file on disk. Not one of the three participants is in a
+position to notice.
+
+So `hird` goes and looks. A claim fingerprints the repository, every check-in
+takes another fingerprint and subtracts, and the results say what moved:
+
+```json
+{ "seq": 1, "status": "in_progress", "note_recorded": "loader ported",
+  "changed": ["src/config.rs (modified)", "src/mcp.rs (added)"] }
+```
+
+That list did not come from the agent. It came off the disk.
+
+### The overlap that has stopped being hypothetical
+
+What the working tree cannot tell you is *who* — one filesystem, no keyboards —
+and `hird` does not pretend it can. What it has instead is the other half of the
+picture, which it was already collecting: a declared scope is an agent saying it
+holds a copy of a file and means to write from it.
+
+> A **contention** is a file two live agents both declared, which has since
+> moved under both of them, and which the two of them disagree about.
+
+All three clauses earn their place. Both declaring is the attribution the
+filesystem cannot supply. Having moved is what makes it an event rather than a
+forecast — the plain overlap is already on the board. Disagreeing is what makes
+it worth interrupting an agent over: two agents who have both been shown the
+current file are not in trouble yet, and warning them anyway is how a warning
+stops being read.
+
+When all three hold, both sides hear about it on their next call, by name:
+
+```json
+{ "contended": [
+    "src/config.rs changed under task 2 (Audit the config loader), held by
+     claude-code:af31 at 14:36 UTC, at or after the version hird last confirmed
+     for you — re-read it before you write, or your edit will discard theirs"],
+  "advice": "a file you declared has changed under another agent that declared
+             it too — re-read it before your next write, and tell the human" }
+```
+
+Re-reading the file is the whole fix, and it is the one thing neither agent
+would have thought to do.
+
+### Drift
+
+An agent that wanders outside what it declared is told so, because everyone
+else's collision check is reading the declaration and not the edits:
+
+```json
+{ "undeclared": ["src/mcp.rs"],
+  "advice": "src/mcp.rs moved while you held this task and nobody has declared
+             it. If the edit was yours, call task_scope so the other agents can
+             see it; if it was not, another agent is working outside what it
+             declared" }
+```
+
+The conditional is deliberate. Alone in a project, a file that moved moved
+because of you. With another agent live, `hird` watched the file and not the
+keyboard, and it says so rather than guessing.
+
+### On the board
+
+```
+$ hird agents
+codex:9f2c        #1 in_progress  Port the config loader        11m left
+    files  src/config.rs
+    moved  src/config.rs, src/mcp.rs
+    !!     src/config.rs also claimed by claude-code:af31 on #2
+    !!!    src/config.rs changed under task 2 (Audit the config loader), held by
+           claude-code:af31 at 14:36 UTC … re-read it before you write
+```
+
+`files` is what was announced; `moved` is what happened; the gap between the two
+lines is the point. `hird show` carries the same record, which is the evidence
+behind a finished task's result line and was not written by the agent that wrote
+it. The TUI's Swarm screen shows both, and titles the pane with how many agents
+are standing in a file that is moving under them.
+
+### It is never in the way
+
+Watching needs git, and a project without it is not a degraded project — every
+tool answers exactly as it did before, and agents are not told about a field
+nothing will ever fill. A sweep that fails costs a report nobody asked for,
+never the call that was actually made. `.gitignore` decides what counts as
+noise, so build output is free. And with no task in the project holding a lease
+there is nobody to measure, so git is not run at all.
+
+Measured on this repository: about 8 ms for a claim and 6 ms for a check-in,
+against 0.5 ms for a call that never looks — three git subprocesses, against a
+heartbeat measured in minutes. `witness = false` turns it off.
+
 ## Memory
 
 The queue is for work; memory is for what the work taught you. Agents call
@@ -287,6 +396,12 @@ Nobody searched, and neither task mentions the other. Overlap is decided by the
 same exact pattern intersection the collision detector uses, so a fact recorded
 on `src/config.rs` reaches a task that declared `src/*.rs`. Declaring your paths
 early is what makes this work — which is the second reason to do it.
+
+Territory is not only what was declared, though. The witness knows which files
+actually moved under a task, and those count on both sides, which matters
+because declaring a scope is exactly the step an agent in a hurry skips. An
+agent that said nothing and went ahead and edited `src/config.rs` still leaves
+the file behind it, and what it learned still reaches whoever comes next.
 
 Three things make a fact relevant, strongest first:
 
@@ -338,6 +453,9 @@ hird db-path
 `--body-file -` reads the task body from stdin, which is handy for piping a
 plan straight into the queue.
 
+`hird show` and `hird agents` sweep the working tree as they render, so both
+report what has actually moved alongside what was declared.
+
 ## The TUI
 
 ```sh
@@ -348,9 +466,12 @@ Three screens, `Tab` between them (`Shift-Tab` goes back). The board polls every
 500 ms, so claims from other harnesses appear as they happen.
 
 The **Swarm** screen is the one to watch while several agents are running: every
-live agent, the files it has declared, an overlap line in red wherever two of
-them are in the same territory, and — on the right — what is workable right now
-and how much is queued behind it.
+live agent, the files it has declared, the files that have actually moved under
+it, an overlap line in red wherever two of them are in the same territory, and —
+on the right — what is workable right now and how much is queued behind it. When
+one of those overlaps stops being hypothetical the line goes from `!!` to a
+blinking `⚠`, and the pane title counts the agents standing in a file that is
+moving under them.
 
 | Key | Anywhere |
 |---|---|
@@ -421,6 +542,11 @@ dispatch_avoids_conflicts = true
 # How many recalled assertions a claimed task arrives with. Default 5, and 0
 # turns recall off. Keep it small: this lands in an agent's context unasked.
 recall_limit = 5
+
+# Whether the queue watches the working tree to see what tasks actually change.
+# Needs git, goes quiet by itself where there is none, and costs nothing while
+# no task in the project holds a lease. Default true.
+witness = true
 ```
 
 Agents are told the configured TTL in the MCP handshake and asked to check in at
@@ -454,8 +580,12 @@ Twelve, and no more.
 
 Results are compact JSON. Failures come back as `isError` text rather than
 protocol errors, so a model can relay them to you as-is instead of reporting
-that a tool broke. Recall did not need a thirteenth tool: it rides along with
-the claim, so an agent gets it without knowing to ask.
+that a tool broke.
+
+Neither of the two things an agent is told without asking needed a thirteenth
+tool. Recall rides along with the claim; `changed`, `contended` and `undeclared`
+ride along with every check-in and every finishing call. Something an agent has
+to know to ask for is something it will not ask for.
 
 ## Examples
 
@@ -465,6 +595,7 @@ points `HIRD_DB` at a throwaway file, so running one cannot disturb your board.
 ```sh
 ./examples/manual-dispatch.sh   # file work, hand it out by number
 ./examples/swarm-plan.sh        # file a plan, three agents pull from it
+./examples/witness.sh           # two agents in one file, caught in the act
 ```
 
 They open real `hird mcp` sessions and send the tool calls a harness would,
@@ -498,6 +629,7 @@ Layering, from the bottom up:
 | `model` | Domain types and the status machine |
 | `db` | Connection setup and schema migrations |
 | `repo` | **The only place SQL is written** — tasks, deps, scopes, memory and recall |
+| `witness` | **The only place the working tree is read** — git, hashing, sweeps |
 | `mcp` `cli` `tui` | The three front ends, which call `repo` |
 
 The rules that matter are pinned by tests rather than convention: the claim
@@ -508,6 +640,10 @@ different tasks, and the status machine by a table-driven test asserting no
 transition exists outside the diagram above. Pattern intersection is checked
 against pattern matching over an exhaustive grid: whenever a concrete path
 matches two patterns, those patterns must be reported as overlapping.
+The witness is exercised against real git repositories rather than a mock, down
+to a test that runs two `hird mcp` processes over one checkout, edits a file
+from underneath both of them and asserts that the agent holding the stale copy
+is told before it writes.
 `tests/mcp_stdio.rs` spawns the real binary and speaks JSON-RPC to it, including
 a test that a cold `hird mcp` is usable within the 50 ms budget a harness
 expects — it starts a fresh one for every session.
@@ -521,8 +657,11 @@ here now, along with file-scope collision detection, because a queue that
 several agents work at once needs to know what is workable and what is in the
 way. Recall came out of the same observation applied to the other half: the
 queue already knew which memory was relevant to a task, and was making agents
-guess at it. Still absent: multi-machine sync and vector search. The append-only event
-trail is meant to make sync tractable later.
+guess at it. The witness (§12) came from noticing that every one of those
+answers was still assembled out of things agents had said about themselves, and
+that the one failure worth catching is the one nobody reports. Still absent:
+multi-machine sync and vector search. The append-only event trail is meant to
+make sync tractable later.
 
 ## Licence
 

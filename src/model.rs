@@ -463,11 +463,14 @@ pub struct Contention {
 }
 
 impl Contention {
-    /// Did the file move after the other side last saw it?
+    /// Do the two sides disagree about what the file says?
     ///
-    /// Both sides record the hash the file had when they last looked, so
-    /// disagreement means one of the two is out of date — and the later
-    /// observation is the one that still matches disk.
+    /// Each records the version it was last shown, so disagreement means one of
+    /// them is behind. Agreement means nobody is, which is why a contention
+    /// where this is false is never reported: two agents up to date on the same
+    /// file have nothing to act on, and a warning nobody needs to act on is a
+    /// warning that gets ignored the once it matters. What is left is the
+    /// declared overlap, which the board already shows.
     pub fn is_stale(&self) -> bool {
         self.hash != self.other_hash
     }
@@ -490,13 +493,6 @@ impl Contention {
                 self.other_status
             ),
         };
-        if !self.is_stale() {
-            return format!(
-                "{} has also changed under {who}; you are both looking at the same content \
-                 right now",
-                self.path
-            );
-        }
         // Only a strictly later confirmation on this side lets us say the
         // other agent is the one holding the old copy. Anything else — theirs
         // later, or the two too close together to order — is answered with the

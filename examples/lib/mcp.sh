@@ -79,3 +79,93 @@ say() {
     printf '\n== %s\n%s\n' "$*" \
         '--------------------------------------------------------------------'
 }
+
+# ------------------------------------------------- long-lived MCP sessions
+
+# `mcp` above is a whole session in one go, which is all most examples need.
+# Anything that has to interleave — edit a file, *then* make the call that has
+# to notice, while a second agent does the same thing in between — needs the
+# sessions held open, for two reasons. A lease belongs to the session that took
+# it, so a fresh process is a fresh agent that cannot check in on it. And a
+# script feeding requests down a pipe runs far ahead of the server reading
+# them, so nothing written between two lines of a heredoc lands between them.
+#
+# So: one pair of fifos per session, and every call waits for its own answer
+# before the script moves on. This is what a harness does, minus the model.
+#
+#   session_open codex codex
+#   session_call codex 1 task_claim '{"seq":1}'
+#   edit src/config.rs '// ported'
+#   session_call codex 2 task_update '{"seq":1,"note":"ported"}'
+#   session_close codex
+session_open() {
+    local tag="$1" harness="$2" dir r w
+    dir="$(mktemp -d)"
+    mkfifo "$dir/in" "$dir/out"
+    HIRD_HARNESS="$harness" "$HIRD_BIN" mcp <"$dir/in" >"$dir/out" 2>/dev/null &
+    printf -v "${tag}_pid" '%s' "$!"
+    # In this order: opening the write end releases the server's blocked open
+    # of its stdin, which lets it get as far as opening its stdout for us.
+    exec {w}>"$dir/in"
+    exec {r}<"$dir/out"
+    printf -v "${tag}_w" '%s' "$w"
+    printf -v "${tag}_r" '%s' "$r"
+
+    printf '%s\n' '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"hird-examples","version":"0"}}}' >&"$w"
+    IFS= read -r _ <&"$r"
+    printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}' >&"$w"
+}
+
+# session_call <tag> <id> <tool> <json args>
+session_call() {
+    local w r line
+    w="$1_w"; w="${!w}"
+    r="$1_r"; r="${!r}"
+    call "$2" "$3" "$4" >&"$w"
+    IFS= read -r line <&"$r"
+    printf '%s\n' "$line" | tool_results
+}
+
+session_close() {
+    local w pid
+    w="$1_w"; w="${!w}"
+    pid="$1_pid"; pid="${!pid}"
+    # Closing stdin is how a harness ends a session, and it is enough when
+    # there is only one. With two open at once each server has inherited a
+    # duplicate of the other's request fifo, so nobody sees end-of-file until
+    # both are gone — hence the signal, which `hird mcp` shuts down cleanly on.
+    eval "exec $w>&-"
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+}
+
+# --------------------------------------------------------------- a working tree
+
+# Create a throwaway git repository and work inside it.
+#
+# The witness watches the project's working tree, so an example that wants to
+# show it needs a real one: a real repository, real commits, real edits. This
+# makes one in a temporary directory and points HIRD_PROJECT at it.
+sandbox_repo() {
+    local dir
+    dir="$(mktemp -d)/project"
+    mkdir -p "$dir/src"
+    cd "$dir"
+    git init --quiet --initial-branch=main
+    git config user.email "examples@hird.invalid"
+    git config user.name "hird examples"
+    printf '// the config loader\n' >src/config.rs
+    printf '# sandbox\n' >README.md
+    git add -A
+    git commit --quiet -m "initial"
+    HIRD_PROJECT="$dir"
+    export HIRD_PROJECT
+    echo "project:  $dir"
+}
+
+# Write a file in the sandbox project, the way an agent editing would.
+#
+#   edit src/config.rs '// ported'
+edit() {
+    printf '%s\n' "$2" >"$1"
+}

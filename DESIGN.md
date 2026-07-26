@@ -358,3 +358,117 @@ inside the same `IMMEDIATE` transaction that performs the claim.** Readiness is
 not advice checked beforehand; the collision check is not a race with the write
 that follows it. Whatever the queue told an agent was true, was true at the
 instant it handed the task over.
+
+## 12. (v1.2) The witness — reading the working tree
+
+§11 gave the queue three new things to know, and every one of them is something
+an agent *said*. A task's status is its holder's claim about itself; its file
+scope is its holder's prediction; its result is its holder's summary. The board
+is an accurate record of what a set of cooperating agents reported, which is a
+different thing from a record of what happened, and the difference is where the
+expensive failure lives.
+
+Consider the case the collision detector was built for, played out to the end.
+Two agents declare `src/config.rs`. Both are told about the overlap. Both decide
+their part is small. Both edit. The second write lands on top of the first,
+`task_complete` succeeds for both, the board goes green, and git has nothing to
+show because nothing was committed — there is one working tree and one version
+of the file, and it is the second agent's. Nobody involved is in a position to
+notice: not the first agent, whose session ended believing it had finished; not
+the second, which never saw the version it replaced; not the human, who has two
+completed tasks and a plausible pair of summaries.
+
+So v1.2 adds the one participant that is not taking anybody's word for it.
+
+**Migration 3.** `task_witness` holds one working-tree fingerprint per task —
+`HEAD`, plus a content hash for every path that could plausibly move — taken
+when the task is claimed and never moved afterwards. `task_changes` holds the
+difference between that fingerprint and the tree as it stands, one row per path,
+rewritten on every observation, so a file edited and then put back the way it
+was leaves no row behind.
+
+**Candidate paths come from git.** `git status --porcelain -z
+--untracked-files=all` decides what is worth hashing, which means `.gitignore`
+decides what counts as noise and hird reimplements nothing. A clean checkout
+costs one process and no hashing at all. When a task's recorded `HEAD` has moved
+— an agent that commits its own work — whatever the commits touched is a
+candidate too, so committing does not erase the record of having done it.
+
+### What it can and cannot prove
+
+One checkout has one filesystem and no keyboards. When a file changes while
+three agents hold leases, all three have it in their footprint, and no amount of
+hashing will say which of them typed. hird does not pretend otherwise: the
+footprint is described everywhere as *what moved while the task was held*, never
+as what the task did.
+
+Saying *who* needs the other half — and the other half already exists. A
+declared scope is an agent stating that it holds a copy of a file and intends to
+write from it. So:
+
+> **A contention is a path that two live tasks both declared, that has since
+> moved under both of them, and that the two of them disagree about the content
+> of.**
+
+Each clause carries weight. Both declaring is what supplies attribution the
+filesystem cannot. Having moved is what makes it an event rather than a
+prediction — the plain declared overlap is already reported, and repeating it
+adds nothing. Disagreeing is what makes it *actionable*: two agents who have
+both been shown the current version are not in trouble, and warning them anyway
+is how a warning stops being read.
+
+That is the predicted collision and the observed one at the same time, and what
+it tells the agent holding the stale copy is exactly the thing that saves the
+work: **re-read the file before you write it.**
+
+### Looking is not telling
+
+The `hash` on a change row is not "the content now". It is the last version this
+task's own holder was *shown*. Anybody may look — another agent's check-in, the
+human's TUI polling twice a second — and looking brings footprints up to date
+without touching a single hash. Only `confirm`, called on a holder's own
+check-in *after* it has been handed the report, moves them.
+
+The ordering is load-bearing and easy to get wrong. Confirming first would mark
+an agent's copy current in the same breath as telling it the file had moved,
+which is to say it would never tell it anything. Every MCP tool that witnesses
+therefore does the same three steps: sweep, read, confirm.
+
+### Off the critical path by construction
+
+The witness is a courtesy on top of the real answer, and the failure mode it
+must never have is costing an agent a call it did make in order to deliver a
+report it did not ask for.
+
+- `Witness::discover` returning `None` is an ordinary state, not an error: no
+  git, no repository, no `git` on `PATH`, `witness = false`. Every tool then
+  answers exactly as it did before v1.2, and the handshake omits the paragraph
+  about the witness entirely rather than promising a model a field nothing will
+  ever populate.
+- Every sweep is wrapped and discarded on failure. There is no configuration in
+  which a witness error becomes a tool error.
+- No live task in the project and git is not invoked at all. The cost is only
+  paid while somebody is working.
+- Measured on this repository: ~8 ms for a claim, ~6 ms for a check-in, against
+  0.5 ms for a tool that never looks. Three git subprocesses, against a
+  heartbeat measured in minutes.
+
+### What it feeds
+
+Beyond the contention itself, the footprint answers two questions the queue
+could not:
+
+- **Drift.** Paths that moved under a task that none of its declared patterns
+  covers come back as `undeclared` — worth saying, because every other agent's
+  collision check is reading the declaration and not the edits. The advice is
+  phrased conditionally when another agent is live, because in that case hird
+  genuinely does not know whose edit it was.
+- **Recall.** §11's memory reaches a task through *declared* files, which makes
+  it depend on the previous agent having declared any — exactly the step an
+  agent in a hurry skips. Witnessed paths count too, on both sides. An agent
+  that said nothing and edited `src/config.rs` still leaves the file behind it,
+  and what it learned still reaches whoever comes next.
+
+Still twelve MCP tools. Like recall, the witness needed no new one: it rides
+along on the calls agents already make, which is the only way a fact reaches an
+agent that does not know to ask for it.

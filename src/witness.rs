@@ -910,13 +910,21 @@ mod tests {
         assert_eq!(project.touched(a), vec!["src/config.rs (modified)"]);
         assert_eq!(project.touched(b), vec!["src/config.rs (modified)"]);
 
-        // Neither agent has checked in, so neither is on record as having seen
-        // this content, and both are told to re-read.
+        // Both are in the file and both are equally up to date on it, so
+        // there is nothing yet to warn either of them about.
         for seq in [a, b] {
-            let seen = project.db.witnessed().contention(seq).unwrap();
-            assert_eq!(seen.len(), 1, "{seen:?}");
-            assert!(!seen[0].is_stale(), "nobody has confirmed anything else");
+            assert!(
+                project.db.witnessed().contention(seq).unwrap().is_empty(),
+                "an onlooker's sweep cannot leave anybody behind"
+            );
         }
+
+        // One of them checks in on a newer version, and now the other is.
+        project.repo.write("src/config.rs", "// and again\n");
+        project.check_in(b, "claude-code:af31");
+        let warned = project.db.witnessed().contention(a).unwrap();
+        assert_eq!(warned.len(), 1, "{warned:?}");
+        assert!(warned[0].describe().contains("re-read"), "{warned:?}");
     }
 
     #[test]

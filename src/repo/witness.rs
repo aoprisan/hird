@@ -273,7 +273,11 @@ impl<'a> Witnessed<'a> {
                 .unwrap_or_default();
             let staked =
                 |patterns: &[String]| patterns.iter().any(|p| glob::matches(p, &found.path));
-            if staked(&mine) && staked(theirs) {
+            // Both must have a stake, and the two must actually disagree about
+            // what the file says. Two agents in one file who have both been
+            // shown the same version are not in trouble yet, and saying so on
+            // every heartbeat would drown out the time they are.
+            if found.is_stale() && staked(&mine) && staked(theirs) {
                 out.push(found);
             }
         }
@@ -599,8 +603,11 @@ mod tests {
         assert!(sentence.contains("re-read"), "{sentence}");
     }
 
+    /// Two agents in one file who have both been shown the same version are
+    /// not in trouble, and hearing about it on every heartbeat is how a
+    /// warning stops being read.
     #[test]
-    fn matching_hashes_are_a_contention_without_an_alarm() {
+    fn two_agents_who_agree_on_the_content_are_not_reported() {
         let db = db();
         let mine = seed(&db, "mine", "claude-code:af31");
         let theirs = seed(&db, "theirs", "codex:9f2c");
@@ -615,10 +622,18 @@ mod tests {
             .record(theirs, &[change("src/shared.rs", "same")], "b")
             .unwrap();
 
+        assert!(db.witnessed().contention(mine).unwrap().is_empty());
+
+        // It becomes one the moment one of them is left behind.
+        db.witnessed()
+            .record(theirs, &[change("src/shared.rs", "moved on")], "b")
+            .unwrap();
+        db.witnessed()
+            .confirm(theirs, &[change("src/shared.rs", "moved on")])
+            .unwrap();
         let seen = db.witnessed().contention(mine).unwrap();
-        assert_eq!(seen.len(), 1);
-        assert!(!seen[0].is_stale());
-        assert!(seen[0].describe().contains("same content"), "{seen:?}");
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert!(seen[0].is_stale());
     }
 
     #[test]
