@@ -157,7 +157,12 @@ impl<'a> Witnessed<'a> {
                 &now,
                 actor,
                 EventKind::Witnessed,
-                &format!("changed {}", fresh.join(", ")),
+                // "saw … change", not "changed …": the actor column on an
+                // event is who made the call, and the whole point of this one
+                // is that hird does not know who typed. A sweep triggered by
+                // one agent writes this onto every live task, so the sentence
+                // has to stay true when the two are different people.
+                &format!("saw {} change", fresh.join(", ")),
             )?;
         }
         tx.commit()?;
@@ -543,7 +548,11 @@ mod tests {
             .filter(|e| e.kind == EventKind::Witnessed)
             .collect();
         assert_eq!(witnessed.len(), 1);
-        assert!(witnessed[0].detail.contains("src/a.rs"), "{witnessed:?}");
+        assert_eq!(witnessed[0].detail, "saw src/a.rs change");
+        // The actor is whoever asked for the observation, which on somebody
+        // else's sweep is not whoever made the edit. The wording has to hold
+        // either way.
+        assert_eq!(witnessed[0].actor, "codex:9f2c");
     }
 
     /// Looking is not telling. However many times the tree is observed, an

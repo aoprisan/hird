@@ -106,9 +106,16 @@ impl HirdMcp {
             return Evidence::default();
         };
         let swept = witness::sweep(db, witness, &self.project, &self.actor()).ok();
-        let evidence = self.evidence(db, seq);
+        let mut evidence = self.evidence(db, seq);
         if let Some(swept) = swept {
             let _ = db.witnessed().confirm(seq, swept.changes_for(seq));
+            if swept.tree.truncated {
+                evidence.partial = Some(
+                    "the working tree has more uncommitted files than hird will fingerprint \
+                     in one go, so `changed` is a floor and not the whole story"
+                        .to_string(),
+                );
+            }
         }
         evidence
     }
@@ -138,6 +145,7 @@ impl HirdMcp {
                 .map(|seen| seen.iter().map(Contention::describe).collect())
                 .unwrap_or_default(),
             undeclared: db.witnessed().undeclared(seq).unwrap_or_default(),
+            partial: None,
             alone: db
                 .witnessed()
                 .baselines(&self.project)
@@ -736,6 +744,12 @@ struct Evidence {
     /// Files that moved under you that none of your declared patterns covers.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     undeclared: Vec<String>,
+    /// Set when the working tree was too dirty to fingerprint in full, so
+    /// `changed` is a floor rather than the whole story. Reported rather than
+    /// swallowed: a list that silently stops short reads exactly like a list
+    /// that found everything.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    partial: Option<String>,
     /// Whether another agent held a task in this project at the same time.
     /// Not reported — it only decides how confidently the advice can speak.
     #[serde(skip)]

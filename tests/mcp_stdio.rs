@@ -275,12 +275,17 @@ fn errors_come_back_as_sentences_rather_than_protocol_failures() {
 /// Harnesses spawn a fresh `hird mcp` for every session, so cold start has to
 /// stay cheap. The budget in the design notes is 50 ms from exec to a usable
 /// server; the median of several runs is used so a busy machine cannot flake it.
+///
+/// Measured in a real repository, because that is the expensive case: deciding
+/// whether the working tree can be watched costs a `git` subprocess, and it is
+/// paid before the server answers `initialize`.
 #[test]
 fn mcp_mode_starts_well_inside_the_startup_budget() {
     const BUDGET_MS: u128 = 50;
     const RUNS: usize = 9;
 
     let sandbox = Sandbox::new();
+    sandbox.git_init();
     // Pay the schema-creation cost once, outside the measurement.
     sandbox.run(&["add", "warm the database"]);
 

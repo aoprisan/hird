@@ -117,7 +117,9 @@ pub struct Tree {
     /// empty hash was looked at and found missing.
     pub entries: BTreeMap<String, String>,
     /// Set when the working tree had more dirty paths than the witness will
-    /// look at in one go, so `entries` is not the whole story.
+    /// look at in one go, so `entries` is not the whole story. Carried up to
+    /// the agent rather than swallowed: a list that silently stops short reads
+    /// exactly like a list that found everything.
     pub truncated: bool,
 }
 
@@ -161,11 +163,6 @@ impl Witness {
         Some(Witness {
             root: root.to_path_buf(),
         })
-    }
-
-    /// The tree this witness watches.
-    pub fn root(&self) -> &Path {
-        &self.root
     }
 
     /// Fingerprint the tree now.
