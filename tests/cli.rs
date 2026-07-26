@@ -325,6 +325,55 @@ fn show_reports_what_a_task_waits_for_and_what_it_touches() {
 }
 
 #[test]
+fn recall_answers_with_what_earlier_work_in_the_same_files_learned() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["add", "Port the config loader", "--path", "src/config.rs"]);
+    sandbox.run(&["mem", "add", "env vars beat the config file", "--task", "1"]);
+    sandbox.run(&["add", "Audit the loader", "--path", "src/*.rs"]);
+
+    let recalled = sandbox.run(&["recall", "2"]);
+    assert!(
+        recalled.contains("env vars beat the config file"),
+        "{recalled}"
+    );
+    assert!(recalled.contains("learned on task 1"), "{recalled}");
+    assert!(recalled.contains("src/config.rs"), "{recalled}");
+
+    // `show` carries the same thing, under its own heading.
+    let shown = sandbox.run(&["show", "2"]);
+    assert!(shown.contains("recalled from earlier work"), "{shown}");
+    assert!(shown.contains("env vars beat the config file"), "{shown}");
+}
+
+#[test]
+fn recall_says_so_when_a_task_stands_alone() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["add", "Xyzzy", "--path", "src/xyzzy.rs"]);
+    assert!(sandbox
+        .run(&["recall", "1"])
+        .contains("nothing recorded so far touches task 1"));
+    // And `show` stays quiet rather than printing an empty heading.
+    assert!(!sandbox.run(&["show", "1"]).contains("recalled"));
+}
+
+#[test]
+fn recall_can_be_turned_off_in_the_config_file() {
+    let sandbox = Sandbox::new();
+    sandbox.write_config("recall_limit = 0\n");
+    sandbox.run(&["add", "Port the config loader", "--path", "src/config.rs"]);
+    sandbox.run(&["mem", "add", "env vars beat the config file", "--task", "1"]);
+    sandbox.run(&["add", "Audit the loader", "--path", "src/config.rs"]);
+
+    assert!(sandbox
+        .run(&["recall", "2"])
+        .contains("nothing recorded so far touches task 2"));
+    // The limit is a default, not a ceiling: asking explicitly still answers.
+    assert!(sandbox
+        .run(&["recall", "2", "--limit", "5"])
+        .contains("env vars beat the config file"));
+}
+
+#[test]
 fn a_scope_can_be_set_inspected_and_cleared() {
     let sandbox = Sandbox::new();
     sandbox.run(&["add", "refactor"]);

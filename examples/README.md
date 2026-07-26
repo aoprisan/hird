@@ -10,7 +10,7 @@ installed, but nothing requires it.
 
 | File | What it shows |
 |---|---|
-| [`manual-dispatch.sh`](manual-dispatch.sh) | **Handing work out by number** — "pick up task 42", start to finish. |
+| [`manual-dispatch.sh`](manual-dispatch.sh) | **Handing work out by number** — "pick up task 42", start to finish, ending with the next agent in those files being handed what the first one learned. |
 | [`swarm-plan.sh`](swarm-plan.sh) | **Letting agents pull** — a dependency graph, three agents, no assignment. |
 | [`task-body.md`](task-body.md) | A task body worth writing, for `--body-file`. |
 | [`config.toml`](config.toml) | Every configuration key, annotated, at its default. |

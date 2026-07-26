@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::Connection;
 
 use crate::error::Result;
-use crate::repo::{Deps, Memory, Scopes, Tasks};
+use crate::repo::{Deps, Memory, Recall, Scopes, Tasks};
 
 /// Numbered migrations, applied in order and recorded in `meta.schema_version`.
 const MIGRATIONS: &[&str] = &[
@@ -180,6 +180,11 @@ impl Db {
     /// Declared file scope repository.
     pub fn scopes(&self) -> Scopes<'_> {
         Scopes::new(&self.conn)
+    }
+
+    /// The memory relevant to a task, derived from the other three.
+    pub fn recall(&self) -> Recall<'_> {
+        Recall::new(&self.conn)
     }
 
     /// The schema version currently applied.

@@ -12,6 +12,7 @@ use super::theme;
 use crate::fmt;
 use crate::identity::actor_harness;
 use crate::model::{Assertion, Status, TaskSummary};
+use crate::repo::Recalled;
 
 /// Draw the whole screen.
 pub fn render(frame: &mut Frame, app: &App, now: DateTime<Utc>) {
@@ -38,8 +39,9 @@ pub fn render(frame: &mut Frame, app: &App, now: DateTime<Utc>) {
             task,
             events,
             learned,
+            recalled,
             readiness,
-        } => render_task_detail(frame, task, events, learned, readiness, now),
+        } => render_task_detail(frame, task, events, learned, recalled, readiness, now),
         Mode::AssertionDetail { assertion } => render_assertion_detail(frame, app, assertion, now),
         Mode::Normal | Mode::Filter | Mode::Search => {}
     }
@@ -669,11 +671,13 @@ fn render_supersede(frame: &mut Frame, app: &App, replacement: &str) {
     overlay(frame, " Supersede assertion ", text, 76, 10);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_task_detail(
     frame: &mut Frame,
     task: &crate::model::Task,
     events: &[crate::model::TaskEvent],
     learned: &[Assertion],
+    recalled: &[Recalled],
     readiness: &Readiness,
     now: DateTime<Utc>,
 ) {
@@ -782,6 +786,23 @@ fn render_task_detail(
         )));
         for assertion in learned {
             lines.push(Line::from(format!("  · {}", assertion.content)));
+        }
+    }
+
+    // What the queue would hand an agent that claimed this task: facts from
+    // earlier work in the same files, each with the reason it surfaced.
+    if !recalled.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "recalled from earlier work",
+            theme::focus_style(),
+        )));
+        for item in recalled {
+            lines.push(Line::from(format!("  · {}", item.assertion.content)));
+            lines.push(Line::from(Span::styled(
+                format!("    {}", item.reason.describe()),
+                theme::dim_style(),
+            )));
         }
     }
 
@@ -1095,12 +1116,65 @@ mod tests {
             task: Box::new(db.tasks().get(task.seq).unwrap()),
             events: db.tasks().events(&task.id, 40).unwrap(),
             learned: db.memory().for_task(&task.id).unwrap(),
+            recalled: Vec::new(),
         };
         let out = screen(&app);
         assert!(out.contains("start with the lexer"), "{out}");
         assert!(out.contains("history"), "{out}");
         assert!(out.contains("created"), "{out}");
         assert!(out.contains("the lexer is hand written"), "{out}");
+    }
+
+    /// The human sees what their agents are being told, and why.
+    #[test]
+    fn the_task_detail_overlay_shows_what_earlier_work_learned() {
+        let db = Db::open_in_memory().unwrap();
+        let earlier = db
+            .tasks()
+            .create(PROJECT, "port the config loader", "", 0, "cli")
+            .unwrap();
+        db.scopes()
+            .declare(
+                earlier.seq,
+                &["src/config.rs".to_string()],
+                "cli",
+                crate::repo::OnConflict::Report,
+            )
+            .unwrap();
+        db.memory()
+            .store(NewAssertion {
+                project: PROJECT,
+                content: "env vars beat the config file",
+                tags: "",
+                actor: "codex:9f2c",
+                task_seq: Some(earlier.seq),
+            })
+            .unwrap();
+        let mine = db
+            .tasks()
+            .create(PROJECT, "audit the loader", "", 0, "cli")
+            .unwrap();
+        db.scopes()
+            .declare(
+                mine.seq,
+                &["src/*.rs".to_string()],
+                "cli",
+                crate::repo::OnConflict::Report,
+            )
+            .unwrap();
+
+        let mut app = app_with(&db);
+        app.mode = Mode::TaskDetail {
+            readiness: Box::new(Readiness::default()),
+            task: Box::new(db.tasks().get(mine.seq).unwrap()),
+            events: Vec::new(),
+            learned: Vec::new(),
+            recalled: db.recall().for_task(mine.seq, 5).unwrap(),
+        };
+        let out = screen(&app);
+        assert!(out.contains("recalled from earlier work"), "{out}");
+        assert!(out.contains("env vars beat the config file"), "{out}");
+        assert!(out.contains("src/config.rs"), "{out}");
     }
 
     #[test]

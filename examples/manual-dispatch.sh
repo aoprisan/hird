@@ -65,6 +65,23 @@ mcp codex <<JSON
 $(call 1 task_claim "{\"seq\": $loader}")
 JSON
 
+# ------------------------------------------- what the next agent is handed free
+
+say "the next agent in those files is handed what this one learned"
+
+# Nothing above told hird these two tasks were related, and nobody is going to
+# call mem_search. But task $loader declared tests/config.rs and recorded a fact
+# while it held it, so a task declaring tests/** is working the same territory —
+# and the claim comes back with that fact attached, saying where it came from.
+audit=$(hird add "Audit the loader tests" --path 'tests/**')
+
+mcp codex <<JSON
+$(call 1 task_claim "{\"seq\": $audit}")
+JSON
+
+# You can see exactly what your agents are being told, and spot it going stale.
+hird recall "$audit"
+
 # ------------------------------------------------------------ what you can drive
 
 say "your overrides work regardless of who holds a task"
@@ -85,6 +102,9 @@ say "next"
 cat <<EOF
 Nothing above needed a plan, a dependency or a scope declaration. Task $notes is
 still open and unclaimed: it will stay that way until you name it.
+
+Recall needed no plan either — only that task $loader had said which files it was
+in before it wrote down what it learned there.
 
 Watch the same database live:   HIRD_DB=$HIRD_DB $HIRD_BIN tui
 Let agents pull work instead:   ./examples/swarm-plan.sh

@@ -16,9 +16,16 @@ knows which tasks are blocked by unfinished dependencies and which ones would
 put two agents in the same file, so it hands each agent something it can
 actually do, and nothing that collides. Nobody assigns anything.
 
+What the work teaches gets written down, and the next agent to touch those files
+is handed it without having to know to ask.
+
 No daemon. No server. No accounts.
 
-📖 **[Usage guide](https://aoprisan.github.io/hird/)** · 🧪 **[Examples](examples/)**
+- 📖 **Documentation: [aoprisan.github.io/hird](https://aoprisan.github.io/hird/)**
+  — install, dispatching, file scope,
+  [recall](#recall-the-task-arrives-knowing-things), the TUI, every
+  configuration key and an FAQ.
+- 🧪 **[Examples](examples/)** — runnable versions of everything in the guide.
 
 ```
 ┌────────────┐  ┌────────────┐  ┌────────────┐
@@ -257,6 +264,55 @@ Search is SQLite FTS5. If a query isn't valid FTS syntax — an agent typing
 `handle_event(ctx)` — it degrades to a term-wise substring match instead of
 erroring.
 
+### Recall: the task arrives knowing things
+
+`mem_search` only helps an agent that thinks to search, and an agent that has
+just been handed a task does not yet know what it does not know. The queue does:
+it knows which files this task expects to touch, and it knows what earlier agents
+recorded while working those same files. So a claim comes back with those facts
+already attached.
+
+```
+task_claim { seq: 7, paths: ["src/*.rs"] }
+
+{ "claimed": 7, "title": "Audit the loader",
+  "recalled": [
+    { "content": "the loader reads HIRD_DB before the config file",
+      "why": "learned on task 4 (Port the config loader), working src/config.rs",
+      "actor": "codex:9f2c", "task_seq": 4 } ],
+  "reminder": "read `recalled` first — earlier agents left those notes …" }
+```
+
+Nobody searched, and neither task mentions the other. Overlap is decided by the
+same exact pattern intersection the collision detector uses, so a fact recorded
+on `src/config.rs` reaches a task that declared `src/*.rs`. Declaring your paths
+early is what makes this work — which is the second reason to do it.
+
+Three things make a fact relevant, strongest first:
+
+| Because | The `why` line reads |
+|---|---|
+| it was recorded on this task, on an earlier pass | `recorded while working this task earlier` |
+| it was recorded on a task whose files overlap yours | `learned on task 4 (…), working src/config.rs` |
+| it reads like your title | `mentions "config", "loader"` |
+
+Every recalled fact says where it came from, because an assertion is a claim and
+not gospel: an agent that finds one is wrong calls `mem_store` with the truth,
+which supersedes the old fact and stops it being recalled again. Nothing is
+stored for recall — it is derived at read time from the assertion trail and the
+declared scopes, so there is no index to rebuild and no migration to run.
+
+`task_get` carries the same list without claiming anything, and `hird recall`
+shows a human exactly what their agents are being told:
+
+```
+$ hird recall 7
+the loader reads HIRD_DB before the config file
+    learned on task 4 (Port the config loader), working src/config.rs  (codex:9f2c, 2h ago)
+```
+
+Five facts ride along by default; `recall_limit = 0` switches it off.
+
 ## Command line
 
 ```
@@ -271,6 +327,7 @@ hird dep rm  <seq> --needs <seq>,…
 hird graph [--all-projects]
 hird scope <seq> [--path <glob>]… [--clear]
 hird agents [--all-projects]
+hird recall <seq> [--limit N]
 hird mem add <content> [--tags a,b] [--task <seq>]
 hird mem search [query] [--limit N] [--all-projects] [--include-superseded]
 hird tui
@@ -360,6 +417,10 @@ path_conflicts = "report"
 # Whether task_next passes over tasks whose files overlap live work. Default
 # true: when the queue gets to choose, it should not choose a collision.
 dispatch_avoids_conflicts = true
+
+# How many recalled assertions a claimed task arrives with. Default 5, and 0
+# turns recall off. Keep it small: this lands in an agent's context unasked.
+recall_limit = 5
 ```
 
 Agents are told the configured TTL in the MCP handshake and asked to check in at
@@ -393,7 +454,8 @@ Twelve, and no more.
 
 Results are compact JSON. Failures come back as `isError` text rather than
 protocol errors, so a model can relay them to you as-is instead of reporting
-that a tool broke.
+that a tool broke. Recall did not need a thirteenth tool: it rides along with
+the claim, so an agent gets it without knowing to ask.
 
 ## Examples
 
@@ -435,7 +497,7 @@ Layering, from the bottom up:
 |---|---|
 | `model` | Domain types and the status machine |
 | `db` | Connection setup and schema migrations |
-| `repo` | **The only place SQL is written** |
+| `repo` | **The only place SQL is written** — tasks, deps, scopes, memory and recall |
 | `mcp` `cli` `tui` | The three front ends, which call `repo` |
 
 The rules that matter are pinned by tests rather than convention: the claim
@@ -457,7 +519,9 @@ expects — it starts a fresh one for every session.
 `DESIGN.md` deliberately left out dependencies and automatic dispatch; both are
 here now, along with file-scope collision detection, because a queue that
 several agents work at once needs to know what is workable and what is in the
-way. Still absent: multi-machine sync and vector search. The append-only event
+way. Recall came out of the same observation applied to the other half: the
+queue already knew which memory was relevant to a task, and was making agents
+guess at it. Still absent: multi-machine sync and vector search. The append-only event
 trail is meant to make sync tractable later.
 
 ## Licence

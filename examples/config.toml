@@ -35,3 +35,13 @@ path_conflicts = "report"
 # no reason to choose one that will collide. Turn it off to have agents take
 # work strictly in priority order and sort the overlaps out themselves.
 dispatch_avoids_conflicts = true
+
+# How many recalled assertions a claimed task arrives with.
+#
+# When a task is claimed, hird looks up what earlier agents recorded while
+# working the same files — or, failing that, work that reads like this task —
+# and hands those facts over unasked. Each one says why it surfaced.
+#
+# Keep it small: this lands in an agent's context whether or not it needed it.
+# Zero turns recall off and agents go back to calling `mem_search` themselves.
+recall_limit = 5

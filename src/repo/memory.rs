@@ -6,7 +6,10 @@ use super::{new_id, ProjectScope};
 use crate::error::{Error, Result};
 use crate::model::{normalize_tags, now_ts, Assertion};
 
-const ASSERTION_COLUMNS: &str =
+/// The assertion columns, in the order [`row_to_assertion`] expects them.
+/// Shared with [`super::recall`], which selects them alongside columns of its
+/// own — so anything it adds must come after these eight.
+pub(super) const ASSERTION_COLUMNS: &str =
     "a.id, a.project, a.content, a.tags, a.actor, a.task_id, a.superseded_by, a.created_at";
 
 /// A new assertion, before it is given an id and a timestamp.
@@ -141,13 +144,17 @@ impl<'a> Memory<'a> {
         }
     }
 
+    /// The FTS5 table is named in full rather than aliased: SQLite resolves
+    /// `MATCH` against the table-named hidden column, and an alias hides it
+    /// ("no such column: f"), which would send every well-formed query down
+    /// the fallback path below.
     fn search_fts(&self, q: &MemoryQuery<'_>, query: &str) -> Result<Vec<Assertion>> {
         let (project_clause, project_value) = q.scope.clause("a.project");
         let sql = format!(
-            "SELECT {ASSERTION_COLUMNS} FROM assertions_fts f
-             JOIN assertions a ON a.rowid = f.rowid
-             WHERE f MATCH ? AND {project_clause} {superseded}
-             ORDER BY f.rank, a.created_at DESC, a.rowid DESC
+            "SELECT {ASSERTION_COLUMNS} FROM assertions_fts
+             JOIN assertions a ON a.rowid = assertions_fts.rowid
+             WHERE assertions_fts MATCH ? AND {project_clause} {superseded}
+             ORDER BY assertions_fts.rank, a.created_at DESC, a.rowid DESC
              LIMIT ?",
             superseded = superseded_clause(q.include_superseded),
         );
@@ -329,7 +336,7 @@ fn escape_like(raw: &str) -> String {
         .replace('_', "\\_")
 }
 
-fn row_to_assertion(row: &Row<'_>) -> rusqlite::Result<Assertion> {
+pub(super) fn row_to_assertion(row: &Row<'_>) -> rusqlite::Result<Assertion> {
     Ok(Assertion {
         id: row.get(0)?,
         project: row.get(1)?,
@@ -447,6 +454,24 @@ mod tests {
             contents(&by_tag),
             vec!["the renderer lives in src/render.rs"]
         );
+    }
+
+    /// FTS5 must actually be doing the work. `OR` is the tell: the fallback
+    /// requires every term, so a query the index understands and the fallback
+    /// does not can only be answered by the index.
+    #[test]
+    fn well_formed_queries_are_answered_by_the_index_not_the_fallback() {
+        let db = db();
+        store(&db, "the parser lives in src/parse.rs", "");
+        store(&db, "the renderer lives in src/render.rs", "");
+        let hits = db
+            .memory()
+            .search(&MemoryQuery::new(
+                "parser OR renderer",
+                ProjectScope::Only(PROJECT.into()),
+            ))
+            .unwrap();
+        assert_eq!(hits.len(), 2);
     }
 
     #[test]

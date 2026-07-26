@@ -28,6 +28,7 @@
     <li><a href="#scope">File scope and collisions</a></li>
     <li><a href="#split">Splitting a task</a></li>
     <li><a href="#memory">Memory</a></li>
+    <li class="sub"><a href="#recall">Recall</a></li>
     <li><a href="#cli">Command line</a></li>
     <li><a href="#tui">The TUI</a></li>
     <li><a href="#mcp">MCP tools</a></li>
@@ -414,6 +415,62 @@ claude-code:af31  #7 claimed      Rewrite the loader tests      14m left
   <code>handle_event(ctx)</code> — it degrades to a term-wise substring match
   instead of erroring.
 </p>
+
+<h3 id="recall">Recall: the task arrives knowing things</h3>
+
+<p>
+  <code>mem_search</code> only helps an agent that thinks to search, and an agent
+  that has just been handed a task does not yet know what it does not know. The
+  queue does. It knows which files the task expects to touch, and it knows what
+  earlier agents recorded while working those same files — so a claim comes back
+  with those facts already attached.
+</p>
+
+<pre><code>task_claim { seq: 7, paths: [<span class="s">"src/*.rs"</span>] }
+
+{ <span class="s">"claimed"</span>: 7, <span class="s">"title"</span>: <span class="s">"Audit the loader"</span>,
+  <span class="s">"recalled"</span>: [
+    { <span class="s">"content"</span>: <span class="s">"the loader reads HIRD_DB before the config file"</span>,
+      <span class="s">"why"</span>: <span class="s">"learned on task 4 (Port the config loader), working src/config.rs"</span>,
+      <span class="s">"actor"</span>: <span class="s">"codex:9f2c"</span>, <span class="s">"task_seq"</span>: 4 } ],
+  <span class="s">"reminder"</span>: <span class="s">"read `recalled` first — earlier agents left those notes …"</span> }</code></pre>
+
+<p>
+  Nobody searched, and the two tasks never mention each other: overlap is decided
+  by the same exact pattern intersection the collision detector uses, so an
+  assertion recorded on <code>src/config.rs</code> reaches a task that declared
+  <code>src/*.rs</code>. Declaring your paths early is what makes this work,
+  which is the second reason to do it.
+</p>
+
+<p>Three things make a fact relevant, strongest first:</p>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Because</th><th>The <code>why</code> line reads</th></tr></thead>
+  <tbody>
+    <tr><td>it was recorded on this task, on an earlier pass</td><td><code>recorded while working this task earlier</code></td></tr>
+    <tr><td>it was recorded on a task whose files overlap yours</td><td><code>learned on task 4 (…), working src/config.rs</code></td></tr>
+    <tr><td>it reads like your title</td><td><code>mentions "config", "loader"</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>
+  Every recalled fact says where it came from, because an assertion is a claim
+  and not gospel: an agent that finds one is wrong should
+  <code>mem_store</code> the truth, which supersedes it and stops it being
+  recalled again. Nothing is stored for recall — it is derived at read time from
+  the assertion trail and the declared scopes, so there is no index to rebuild
+  and no migration to run.
+</p>
+
+<p>
+  <code>task_get</code> carries the same list without claiming anything, and
+  <code>hird recall &lt;seq&gt;</code> shows a human exactly what their agents are
+  being told. Five facts ride along by default; set
+  <code>recall_limit = 0</code> to switch it off entirely.
+</p>
 </section>
 
 <section id="cli">
@@ -430,6 +487,7 @@ hird dep rm  &lt;seq&gt; --needs &lt;seq&gt;,…
 hird graph [--all-projects]
 hird scope &lt;seq&gt; [--path &lt;glob&gt;]… [--clear]
 hird agents [--all-projects]
+hird recall &lt;seq&gt; [--limit N]
 hird mem add &lt;content&gt; [--tags a,b] [--task &lt;seq&gt;]
 hird mem search [query] [--limit N] [--all-projects] [--include-superseded]
 hird tui
@@ -448,6 +506,7 @@ hird db-path</code></pre>
     <tr><td><code>graph</code></td><td>The plan as dispatch waves: workable now, and what each later wave waits for.</td></tr>
     <tr><td><code>scope</code></td><td>Show or set the files a task is expected to touch. Warns about overlaps.</td></tr>
     <tr><td><code>agents</code></td><td>Who is working what, with a <code>!!</code> line wherever two agents are in the same files.</td></tr>
+    <tr><td><code>recall</code></td><td>What earlier work already learned about a task, and why it is relevant — the same thing an agent is handed when it claims it.</td></tr>
     <tr><td><code>mem</code></td><td>Record and search assertions.</td></tr>
     <tr><td><code>tui</code></td><td>The live board.</td></tr>
     <tr><td><code>mcp</code></td><td>Serve MCP on stdio. Harnesses run this, you generally do not.</td></tr>
@@ -560,7 +619,8 @@ hird db-path</code></pre>
   rather than protocol errors, so a model can relay them to you as-is instead of
   reporting that a tool broke. There is deliberately no tool for filing
   arbitrary new work: agents split what they hold, and everything else is filed
-  by you.
+  by you. <a href="#recall">Recall</a> did not need a thirteenth tool either — it
+  rides along with the claim, so an agent gets it without knowing to ask.
 </p>
 </section>
 
@@ -591,7 +651,11 @@ path_conflicts = <span class="s">"report"</span>
 
 <span class="c"># Whether task_next passes over tasks whose files overlap live work. Default
 # true: when the queue gets to choose, it should not choose a collision.</span>
-dispatch_avoids_conflicts = <span class="s">true</span></code></pre>
+dispatch_avoids_conflicts = <span class="s">true</span>
+
+<span class="c"># How many recalled assertions a claimed task arrives with. Default 5, and 0
+# turns recall off. Keep it small: this lands in an agent's context unasked.</span>
+recall_limit = 5</code></pre>
 
 <p>
   Unknown keys are an error rather than a shrug, so a typo is reported instead of
