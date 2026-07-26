@@ -214,6 +214,8 @@ pub enum EventKind {
     DepRemoved,
     /// The task's declared file scope changed.
     Scoped,
+    /// The witness saw the working tree change under this task.
+    Witnessed,
 }
 
 impl EventKind {
@@ -233,6 +235,7 @@ impl EventKind {
             EventKind::DepAdded => "dep_added",
             EventKind::DepRemoved => "dep_removed",
             EventKind::Scoped => "scoped",
+            EventKind::Witnessed => "witnessed",
         }
     }
 }
@@ -262,6 +265,7 @@ impl FromStr for EventKind {
             "dep_added" => Ok(EventKind::DepAdded),
             "dep_removed" => Ok(EventKind::DepRemoved),
             "scoped" => Ok(EventKind::Scoped),
+            "witnessed" => Ok(EventKind::Witnessed),
             other => Err(format!("unknown event kind {other:?}")),
         }
     }
@@ -398,6 +402,125 @@ impl Conflict {
 
 fn truncate_title(title: &str) -> String {
     crate::fmt::truncate(title, 40)
+}
+
+/// One file the witness saw change while a task was held.
+///
+/// Deliberately not called "a file the task changed": a shared checkout cannot
+/// tell you who typed. What it *can* tell you, exactly, is that the file is not
+/// the file it was when the task started, and when that stopped being true.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Observed {
+    /// Project-relative path.
+    pub path: String,
+    /// How it differs from the tree as it stood when the task was claimed:
+    /// `added`, `modified` or `deleted`.
+    pub kind: String,
+    /// Content hash as of `last_seen`; empty when the file is gone.
+    pub hash: String,
+    pub first_seen: String,
+    pub last_seen: String,
+}
+
+impl Observed {
+    /// `src/config.rs (modified)`, the way every front end prints it.
+    pub fn describe(&self) -> String {
+        format!("{} ({})", self.path, self.kind)
+    }
+}
+
+/// A task together with what the witness saw happen under it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WitnessedTask {
+    pub seq: i64,
+    pub title: String,
+    pub status: Status,
+    pub holder: Option<String>,
+    pub changes: Vec<Observed>,
+}
+
+/// One file that moved while two tasks were both being worked.
+///
+/// This is the observed counterpart of [`Conflict`], and it is a stronger
+/// statement: a conflict says two agents *might* end up in the same file, while
+/// a contention says the file on disk changed during a window in which two
+/// agents were both live in it. Whoever read it first is holding a copy that no
+/// longer matches, and a write from that copy silently discards the other's
+/// work — which is the failure the whole file-scope apparatus exists to catch,
+/// finally visible rather than predicted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Contention {
+    pub path: String,
+    /// Content hash and time this task's side was last confirmed at.
+    pub hash: String,
+    pub last_seen: String,
+    pub other_seq: i64,
+    pub other_title: String,
+    pub other_status: Status,
+    pub other_holder: Option<String>,
+    pub other_hash: String,
+    pub other_last_seen: String,
+}
+
+impl Contention {
+    /// Do the two sides disagree about what the file says?
+    ///
+    /// Each records the version it was last shown, so disagreement means one of
+    /// them is behind. Agreement means nobody is, which is why a contention
+    /// where this is false is never reported: two agents up to date on the same
+    /// file have nothing to act on, and a warning nobody needs to act on is a
+    /// warning that gets ignored the once it matters. What is left is the
+    /// declared overlap, which the board already shows.
+    pub fn is_stale(&self) -> bool {
+        self.hash != self.other_hash
+    }
+
+    /// One sentence, aimed at a model that has to relay it to a human.
+    ///
+    /// It says what is certainly true and what to do about it, and stops there:
+    /// hird watched a file change, it did not watch anybody type.
+    pub fn describe(&self) -> String {
+        let who = match &self.other_holder {
+            Some(holder) => format!(
+                "task {} ({}), held by {holder}",
+                self.other_seq,
+                truncate_title(&self.other_title)
+            ),
+            None => format!(
+                "task {} ({}, {})",
+                self.other_seq,
+                truncate_title(&self.other_title),
+                self.other_status
+            ),
+        };
+        // Only a strictly later confirmation on this side lets us say the
+        // other agent is the one holding the old copy. Anything else — theirs
+        // later, or the two too close together to order — is answered with the
+        // warning, because being told to re-read a file you already have is
+        // cheap and losing an edit is not.
+        if self.last_seen > self.other_last_seen {
+            format!(
+                "{} changed under {who}, and again on your side afterwards — check you did \
+                 not write over their edit",
+                self.path
+            )
+        } else {
+            format!(
+                "{} changed under {who} at {}, at or after the version hird last confirmed \
+                 for you — re-read it before you write, or your edit will discard theirs",
+                self.path,
+                short_time(&self.other_last_seen),
+            )
+        }
+    }
+}
+
+/// `2026-07-25T14:32:07.001Z` → `14:32`, for a sentence rather than a log line.
+fn short_time(ts: &str) -> String {
+    match parse_ts(ts) {
+        Some(dt) => dt.format("%H:%M UTC").to_string(),
+        None => ts.to_string(),
+    }
 }
 
 /// One durable factual claim recorded by an agent or a human.

@@ -6,118 +6,8 @@
 
 mod support;
 
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-
-use serde_json::{json, Value};
-use support::Sandbox;
-
-/// A live `hird mcp` subprocess.
-struct McpSession {
-    child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
-    next_id: i64,
-}
-
-impl McpSession {
-    fn start(sandbox: &Sandbox, harness: &str) -> McpSession {
-        let mut command: Command = sandbox.command();
-        let mut child = command
-            .arg("mcp")
-            .env("HIRD_HARNESS", harness)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn hird mcp");
-        let stdin = child.stdin.take().expect("stdin");
-        let stdout = BufReader::new(child.stdout.take().expect("stdout"));
-        let mut session = McpSession {
-            child,
-            stdin,
-            stdout,
-            next_id: 0,
-        };
-        session.initialize();
-        session
-    }
-
-    fn send(&mut self, message: &Value) {
-        let line = serde_json::to_string(message).unwrap();
-        writeln!(self.stdin, "{line}").expect("write to hird mcp");
-        self.stdin.flush().expect("flush");
-    }
-
-    /// Read lines until one carries the id we are waiting for.
-    fn read_response(&mut self, id: i64) -> Value {
-        loop {
-            let mut line = String::new();
-            let read = self
-                .stdout
-                .read_line(&mut line)
-                .expect("read from hird mcp");
-            assert!(read > 0, "hird mcp closed stdout while awaiting id {id}");
-            if line.trim().is_empty() {
-                continue;
-            }
-            let value: Value = serde_json::from_str(line.trim())
-                .unwrap_or_else(|e| panic!("not JSON-RPC: {line:?} ({e})"));
-            if value.get("id").and_then(Value::as_i64) == Some(id) {
-                return value;
-            }
-            // Notifications and unrelated traffic are ignored.
-        }
-    }
-
-    fn request(&mut self, method: &str, params: Value) -> Value {
-        self.next_id += 1;
-        let id = self.next_id;
-        self.send(&json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-            "params": params,
-        }));
-        self.read_response(id)
-    }
-
-    fn initialize(&mut self) -> Value {
-        let response = self.request(
-            "initialize",
-            json!({
-                "protocolVersion": "2025-06-18",
-                "capabilities": {},
-                "clientInfo": {"name": "integration-test", "version": "0"},
-            }),
-        );
-        self.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
-        response
-    }
-
-    /// Call a tool and return the parsed JSON of its text content.
-    fn call(&mut self, name: &str, arguments: Value) -> Result<Value, String> {
-        let response = self.request("tools/call", json!({"name": name, "arguments": arguments}));
-        if let Some(error) = response.get("error") {
-            panic!("{name} returned a protocol error: {error}");
-        }
-        let result = &response["result"];
-        let text = result["content"][0]["text"]
-            .as_str()
-            .unwrap_or_else(|| panic!("{name} returned no text content: {result}"))
-            .to_string();
-        if result["isError"].as_bool().unwrap_or(false) {
-            return Err(text);
-        }
-        Ok(serde_json::from_str(&text)
-            .unwrap_or_else(|e| panic!("{name} result is not JSON: {text:?} ({e})")))
-    }
-
-    fn shutdown(mut self) {
-        drop(self.stdin);
-        let _ = self.child.wait();
-    }
-}
+use serde_json::json;
+use support::{McpSession, Sandbox};
 
 #[test]
 fn initialize_advertises_tools_and_the_queue_rules() {
@@ -385,12 +275,17 @@ fn errors_come_back_as_sentences_rather_than_protocol_failures() {
 /// Harnesses spawn a fresh `hird mcp` for every session, so cold start has to
 /// stay cheap. The budget in the design notes is 50 ms from exec to a usable
 /// server; the median of several runs is used so a busy machine cannot flake it.
+///
+/// Measured in a real repository, because that is the expensive case: deciding
+/// whether the working tree can be watched costs a `git` subprocess, and it is
+/// paid before the server answers `initialize`.
 #[test]
 fn mcp_mode_starts_well_inside_the_startup_budget() {
     const BUDGET_MS: u128 = 50;
     const RUNS: usize = 9;
 
     let sandbox = Sandbox::new();
+    sandbox.git_init();
     // Pay the schema-creation cost once, outside the measurement.
     sandbox.run(&["add", "warm the database"]);
 
@@ -419,23 +314,7 @@ fn an_unknown_harness_still_gets_a_usable_identity() {
     let seq: i64 = sandbox.run(&["add", "t"]).trim().parse().unwrap();
 
     // HIRD_HARNESS is removed by Sandbox::command; start without re-adding it.
-    let mut command = sandbox.command();
-    let mut child = command
-        .arg("mcp")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn");
-    let stdin = child.stdin.take().unwrap();
-    let stdout = BufReader::new(child.stdout.take().unwrap());
-    let mut session = McpSession {
-        child,
-        stdin,
-        stdout,
-        next_id: 0,
-    };
-    session.initialize();
+    let mut session = McpSession::start_unnamed(&sandbox);
 
     let claimed = session.call("task_claim", json!({"seq": seq})).unwrap();
     assert!(
@@ -601,5 +480,222 @@ fn a_released_task_goes_straight_back_to_the_next_agent() {
     assert_eq!(taken["claimed"]["claimed"], 1);
 
     claude.shutdown();
+    codex.shutdown();
+}
+
+// ------------------------------------------------------------- the witness
+
+/// The failure the whole thing exists to catch, end to end and through the
+/// real binary: two harnesses, one checkout, one file, no commit between them.
+///
+/// Neither agent can see the other's session, git has nothing to diff because
+/// nothing has been committed, and both `task_complete` calls would otherwise
+/// succeed with one of the two edits silently gone.
+#[test]
+fn two_harnesses_writing_one_declared_file_are_told_about_each_other() {
+    let sandbox = Sandbox::new();
+    sandbox.git_init();
+    sandbox.run(&["add", "port the config loader"]);
+    sandbox.run(&["add", "audit the config loader"]);
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    let mut claude = McpSession::start(&sandbox, "claude-code");
+
+    // Both declare the same file. That much the old collision detector saw.
+    codex
+        .call("task_claim", json!({"seq": 1, "paths": ["src/config.rs"]}))
+        .unwrap();
+    let second = claude
+        .call("task_claim", json!({"seq": 2, "paths": ["src/*.rs"]}))
+        .unwrap();
+    let overlaps = second["overlaps"].as_array().expect("overlaps");
+    assert_eq!(overlaps.len(), 1, "the declared overlap is reported first");
+
+    // Now the file actually moves. This is the part nothing else can see.
+    sandbox.write_file("src/config.rs", "// codex ported it\n");
+    let codex_update = codex
+        .call("task_update", json!({"seq": 1, "note": "loader ported"}))
+        .unwrap();
+    assert_eq!(
+        codex_update["changed"],
+        json!(["src/config.rs (modified)"]),
+        "the witness reports what moved, not what was promised"
+    );
+
+    sandbox.write_file("src/config.rs", "// claude rewrote it\n");
+    let claude_update = claude
+        .call("task_update", json!({"seq": 2, "note": "loader audited"}))
+        .unwrap();
+    assert_eq!(
+        claude_update["changed"],
+        json!(["src/config.rs (modified)"])
+    );
+
+    // And codex, on its next heartbeat, is told its copy is out of date
+    // before it writes from it.
+    let warned = codex
+        .call("task_update", json!({"seq": 1, "note": "carrying on"}))
+        .unwrap();
+    let contended = warned["contended"]
+        .as_array()
+        .unwrap_or_else(|| panic!("codex was not warned: {warned}"));
+    assert_eq!(contended.len(), 1, "{warned}");
+    let sentence = contended[0].as_str().unwrap();
+    assert!(sentence.contains("src/config.rs"), "{sentence}");
+    assert!(sentence.contains("claude-code"), "{sentence}");
+    assert!(sentence.contains("re-read"), "{sentence}");
+    assert!(
+        warned["advice"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("re-read"),
+        "{warned}"
+    );
+
+    // Completing carries the evidence, which was not written by the agent
+    // that wrote the result line next to it.
+    let done = codex
+        .call("task_complete", json!({"seq": 1, "result": "ported"}))
+        .unwrap();
+    assert_eq!(done["changed"], json!(["src/config.rs (modified)"]));
+
+    // And the human's board says the same thing.
+    let shown = sandbox.run(&["show", "1"]);
+    assert!(
+        shown.contains("changed   src/config.rs (modified)"),
+        "{shown}"
+    );
+
+    codex.shutdown();
+    claude.shutdown();
+}
+
+/// Agents that stay in their own lanes must never hear about each other, or
+/// the warning becomes noise and gets ignored the one time it matters.
+#[test]
+fn agents_in_separate_files_are_never_warned() {
+    let sandbox = Sandbox::new();
+    sandbox.git_init();
+    sandbox.run(&["add", "port the loader"]);
+    sandbox.run(&["add", "write the docs"]);
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    let mut claude = McpSession::start(&sandbox, "claude-code");
+    codex
+        .call("task_claim", json!({"seq": 1, "paths": ["src/config.rs"]}))
+        .unwrap();
+    claude
+        .call("task_claim", json!({"seq": 2, "paths": ["README.md"]}))
+        .unwrap();
+
+    sandbox.write_file("src/config.rs", "// ported\n");
+    sandbox.write_file("README.md", "# documented\n");
+    let a = codex
+        .call("task_update", json!({"seq": 1, "note": "done"}))
+        .unwrap();
+    let b = claude
+        .call("task_update", json!({"seq": 2, "note": "done"}))
+        .unwrap();
+    assert!(a.get("contended").is_none(), "{a}");
+    assert!(b.get("contended").is_none(), "{b}");
+
+    codex.shutdown();
+    claude.shutdown();
+}
+
+/// An agent that wanders outside what it declared is told so, because every
+/// other agent's collision check is reading the declaration and not the edits.
+#[test]
+fn editing_outside_the_declared_scope_is_reported_back() {
+    let sandbox = Sandbox::new();
+    sandbox.git_init();
+    sandbox.run(&["add", "port the config loader"]);
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex
+        .call("task_claim", json!({"seq": 1, "paths": ["src/config.rs"]}))
+        .unwrap();
+    sandbox.write_file("src/config.rs", "// ported\n");
+    sandbox.write_file("src/surprise.rs", "// and this too\n");
+
+    let update = codex
+        .call("task_update", json!({"seq": 1, "note": "ported"}))
+        .unwrap();
+    assert_eq!(update["undeclared"], json!(["src/surprise.rs"]));
+    let advice = update["advice"].as_str().unwrap_or_default();
+    assert!(advice.contains("task_scope"), "{advice}");
+
+    // And declaring it makes the complaint go away rather than needing a flag.
+    let scoped = codex
+        .call(
+            "task_scope",
+            json!({"seq": 1, "paths": ["src/surprise.rs"]}),
+        )
+        .unwrap();
+    assert!(scoped.get("undeclared").is_none(), "{scoped}");
+
+    codex.shutdown();
+}
+
+/// A project outside git is not a degraded project. Every tool answers exactly
+/// as it did before the witness existed, and the handshake does not promise
+/// the model a field it will never see.
+#[test]
+fn a_project_without_git_behaves_as_though_the_witness_did_not_exist() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["add", "do the thing"]);
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    let instructions = codex.request(
+        "initialize",
+        json!({
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "integration-test", "version": "0"},
+        }),
+    )["result"]["instructions"]
+        .as_str()
+        .expect("instructions")
+        .to_string();
+    assert!(
+        !instructions.contains("contended"),
+        "a model must not be told about a field nothing will populate"
+    );
+
+    codex
+        .call("task_claim", json!({"seq": 1, "paths": ["src/config.rs"]}))
+        .unwrap();
+    sandbox.write_file("src/config.rs", "// edited anyway\n");
+    let update = codex
+        .call("task_update", json!({"seq": 1, "note": "working"}))
+        .unwrap();
+    assert!(update.get("changed").is_none(), "{update}");
+    let done = codex
+        .call("task_complete", json!({"seq": 1, "result": "done"}))
+        .unwrap();
+    assert_eq!(done["status"], "done");
+
+    codex.shutdown();
+}
+
+/// Turning the witness off in the configuration has to be as complete as not
+/// having git at all — including not shelling out to it.
+#[test]
+fn the_witness_can_be_switched_off_in_the_configuration() {
+    let sandbox = Sandbox::new();
+    sandbox.git_init();
+    sandbox.write_config("witness = false\n");
+    sandbox.run(&["add", "do the thing"]);
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex
+        .call("task_claim", json!({"seq": 1, "paths": ["src/config.rs"]}))
+        .unwrap();
+    sandbox.write_file("src/config.rs", "// edited\n");
+    let update = codex
+        .call("task_update", json!({"seq": 1, "note": "working"}))
+        .unwrap();
+    assert!(update.get("changed").is_none(), "{update}");
+
     codex.shutdown();
 }

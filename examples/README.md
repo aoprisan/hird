@@ -12,6 +12,7 @@ installed, but nothing requires it.
 |---|---|
 | [`manual-dispatch.sh`](manual-dispatch.sh) | **Handing work out by number** — "pick up task 42", start to finish, ending with the next agent in those files being handed what the first one learned. |
 | [`swarm-plan.sh`](swarm-plan.sh) | **Letting agents pull** — a dependency graph, three agents, no assignment. |
+| [`witness.sh`](witness.sh) | **What actually happened** — two agents, one checkout, one file, and the warning that arrives while there is still time to act on it. |
 | [`task-body.md`](task-body.md) | A task body worth writing, for `--body-file`. |
 | [`config.toml`](config.toml) | Every configuration key, annotated, at its default. |
 | [`harness/`](harness) | Drop-in MCP registration for Claude Code, Codex CLI and VS Code. |
@@ -20,6 +21,7 @@ installed, but nothing requires it.
 ```sh
 ./examples/manual-dispatch.sh
 ./examples/swarm-plan.sh
+./examples/witness.sh          # needs git; makes its own throwaway repository
 ```
 
 ## Why the scripts speak JSON-RPC
@@ -33,6 +35,13 @@ wire: one `task_claim`, naming the number you said.
 Each `mcp <harness>` call in a script is one agent session with its own identity
 (`codex:9f2c`), and its lease outlives the process — which is exactly why the
 next session in the script is handed something else.
+
+`witness.sh` needs more than that. To show two agents taking turns in one file
+it has to keep both sessions open and edit the tree *between* their calls, so it
+uses `session_open` / `session_call` instead: a pair of fifos per session, and
+every call waiting for its own answer. A heredoc will not do it — a script
+feeding requests down a pipe runs far ahead of the server reading them, so
+nothing written between two lines lands between them.
 
 ## Manual or automatic
 

@@ -55,6 +55,9 @@ pub struct Config {
     /// How many recalled assertions ride along with a claimed task. Zero
     /// turns recall off.
     pub recall_limit: usize,
+    /// Whether the queue watches the working tree to see what claimed tasks
+    /// actually change. Needs git; goes quiet by itself where there is none.
+    pub witness: bool,
 }
 
 impl Default for Config {
@@ -65,6 +68,7 @@ impl Default for Config {
             path_conflicts: PathConflicts::Report,
             dispatch_avoids_conflicts: true,
             recall_limit: DEFAULT_RECALL_LIMIT,
+            witness: true,
         }
     }
 }
@@ -111,6 +115,18 @@ impl Config {
     pub fn recall_limit(&self) -> usize {
         self.recall_limit.min(50)
     }
+
+    /// A witness for `root`, unless the configuration or the environment says
+    /// there will not be one.
+    ///
+    /// The two reasons are deliberately the same answer: a project outside git
+    /// and a project whose human turned witnessing off both get a queue that
+    /// works exactly as it did before the witness existed.
+    pub fn witness(&self, root: &std::path::Path) -> Option<crate::witness::Witness> {
+        self.witness
+            .then(|| crate::witness::Witness::discover(root))
+            .flatten()
+    }
 }
 
 /// Resolve the database path: `--db` beats `HIRD_DB` beats the XDG default.
@@ -144,6 +160,18 @@ mod tests {
         // takes the one that cannot collide.
         assert!(cfg.avoid_conflicts(None));
         assert_eq!(cfg.recall_limit(), 5);
+        // Watching the tree is on by default: it costs nothing where there is
+        // no live task, and the failure it catches is silent and expensive.
+        assert!(cfg.witness);
+    }
+
+    #[test]
+    fn witnessing_can_be_turned_off_without_touching_git() {
+        let off = Config {
+            witness: false,
+            ..Config::default()
+        };
+        assert!(off.witness(Path::new(".")).is_none());
     }
 
     #[test]

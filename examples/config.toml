@@ -45,3 +45,16 @@ dispatch_avoids_conflicts = true
 # Keep it small: this lands in an agent's context whether or not it needed it.
 # Zero turns recall off and agents go back to calling `mem_search` themselves.
 recall_limit = 5
+
+# Whether the queue watches the working tree.
+#
+# On, a claim records a content fingerprint of the repository and every check-in
+# takes another, so `hird show` can tell you which files a task actually changed
+# rather than which ones it said it would — and so a file that two agents both
+# declared, and that has since moved under both of them, is reported to both as
+# a contention rather than left to be discovered at merge time.
+#
+# Needs git, and goes quiet by itself in a project that has none. Costs nothing
+# while no task in the project holds a lease: with nobody to measure, git is
+# never invoked at all.
+witness = true

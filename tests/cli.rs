@@ -2,7 +2,7 @@
 
 mod support;
 
-use support::{assert_exists, Sandbox};
+use support::{assert_exists, McpSession, Sandbox};
 
 #[test]
 fn add_prints_the_task_number_and_numbers_climb() {
@@ -401,4 +401,75 @@ fn the_agents_view_is_quiet_when_nobody_is_working() {
     assert!(sandbox
         .run(&["agents"])
         .contains("no agent is working anything right now"));
+}
+
+/// The human's view of the witness: what each agent said, what actually moved,
+/// and the file two of them are both standing in.
+///
+/// Driven entirely through the CLI, which is the only front end that can set
+/// this up without an agent session — `hird agents` sweeps the tree itself.
+#[test]
+fn the_agents_view_shows_what_moved_and_where_two_agents_meet() {
+    let sandbox = Sandbox::new();
+    sandbox.git_init();
+    sandbox.run(&["add", "port the loader", "--path", "src/config.rs"]);
+    sandbox.run(&["add", "audit the loader", "--path", "src/*.rs"]);
+
+    // Two live claims, made the way the MCP server makes them.
+    let mut codex = McpSession::start(&sandbox, "codex");
+    let mut claude = McpSession::start(&sandbox, "claude-code");
+    codex.claim(1);
+    claude.claim(2);
+
+    // Codex edits and checks in, so hird has shown it that version.
+    sandbox.write_file("src/config.rs", "// codex ported it\n");
+    codex
+        .call(
+            "task_update",
+            serde_json::json!({"seq": 1, "note": "ported"}),
+        )
+        .unwrap();
+
+    let board = sandbox.run(&["agents"]);
+    assert!(board.contains("files  src/config.rs"), "{board}");
+    assert!(board.contains("moved  src/config.rs"), "{board}");
+    assert!(
+        !board.contains("!!!"),
+        "both agents are level on the file, so there is nothing to warn about:\n{board}"
+    );
+
+    // Now claude writes over it and checks in. Codex's copy is the old one.
+    sandbox.write_file("src/config.rs", "// claude rewrote it\n");
+    claude
+        .call(
+            "task_update",
+            serde_json::json!({"seq": 2, "note": "audited"}),
+        )
+        .unwrap();
+
+    let board = sandbox.run(&["agents"]);
+    assert!(
+        board.contains("!!!") && board.contains("re-read"),
+        "the human's board must name the agent holding the stale copy:\n{board}"
+    );
+
+    codex.shutdown();
+    claude.shutdown();
+}
+
+/// A project that is not a git repository must print exactly what it always
+/// printed. Nothing about the board may depend on the witness being able to
+/// look.
+#[test]
+fn the_agents_view_outside_git_says_nothing_about_the_tree() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["add", "port the loader", "--path", "src/config.rs"]);
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex.claim(1);
+
+    let board = sandbox.run(&["agents"]);
+    assert!(board.contains("files  src/config.rs"), "{board}");
+    assert!(!board.contains("moved"), "{board}");
+
+    codex.shutdown();
 }

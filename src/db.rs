@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::Connection;
 
 use crate::error::Result;
-use crate::repo::{Deps, Memory, Recall, Scopes, Tasks};
+use crate::repo::{Deps, Memory, Recall, Scopes, Tasks, Witnessed};
 
 /// Numbered migrations, applied in order and recorded in `meta.schema_version`.
 const MIGRATIONS: &[&str] = &[
@@ -103,6 +103,29 @@ CREATE TABLE task_paths (
 
 CREATE INDEX idx_task_paths_task ON task_paths(task_id);
 "#,
+    // 3 — the witness: what the working tree says actually happened
+    r#"
+CREATE TABLE task_witness (
+  task_id    TEXT PRIMARY KEY REFERENCES tasks(id),
+  head       TEXT NOT NULL DEFAULT '',
+  tree       TEXT NOT NULL DEFAULT '{}',
+  at         TEXT NOT NULL
+);
+
+CREATE TABLE task_changes (
+  id         TEXT PRIMARY KEY,
+  task_id    TEXT NOT NULL REFERENCES tasks(id),
+  path       TEXT NOT NULL,
+  kind       TEXT NOT NULL CHECK (kind IN ('added','modified','deleted')),
+  hash       TEXT NOT NULL DEFAULT '',
+  first_seen TEXT NOT NULL,
+  last_seen  TEXT NOT NULL,
+  UNIQUE (task_id, path)
+);
+
+CREATE INDEX idx_task_changes_path ON task_changes(path);
+CREATE INDEX idx_task_changes_task ON task_changes(task_id);
+"#,
 ];
 
 /// An open connection to the hird database.
@@ -180,6 +203,11 @@ impl Db {
     /// Declared file scope repository.
     pub fn scopes(&self) -> Scopes<'_> {
         Scopes::new(&self.conn)
+    }
+
+    /// What the working tree was seen to do while tasks were held.
+    pub fn witnessed(&self) -> Witnessed<'_> {
+        Witnessed::new(&self.conn)
     }
 
     /// The memory relevant to a task, derived from the other three.

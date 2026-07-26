@@ -8,12 +8,14 @@ mod memory;
 mod recall;
 mod scope;
 mod tasks;
+mod witness;
 
 pub use deps::{dispatch_waves, Deps};
 pub use memory::{Memory, MemoryQuery, NewAssertion};
 pub use recall::{Recall, RecallReason, Recalled};
 pub use scope::{OnConflict, Scopes};
 pub use tasks::{Claim, Dispatch, Subtask, SweepOutcome, Tasks};
+pub use witness::{Baseline, Witnessed};
 
 use ulid::Ulid;
 
