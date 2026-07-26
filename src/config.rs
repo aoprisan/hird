@@ -11,6 +11,13 @@ use crate::repo::OnConflict;
 /// Default lease TTL when nothing else says otherwise.
 pub const DEFAULT_LEASE_TTL_MINUTES: u64 = 15;
 
+/// How many recalled assertions a claim carries by default.
+///
+/// Small on purpose: this arrives unasked-for in an agent's context, so it has
+/// to be the handful most likely to matter rather than everything that touches
+/// the same files.
+pub const DEFAULT_RECALL_LIMIT: usize = 5;
+
 /// What the queue does when a task's declared file scope overlaps live work.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -45,6 +52,9 @@ pub struct Config {
     /// Whether `task_next` passes over tasks whose declared file scope
     /// overlaps what another agent is already working.
     pub dispatch_avoids_conflicts: bool,
+    /// How many recalled assertions ride along with a claimed task. Zero
+    /// turns recall off.
+    pub recall_limit: usize,
 }
 
 impl Default for Config {
@@ -54,6 +64,7 @@ impl Default for Config {
             all_projects_by_default: false,
             path_conflicts: PathConflicts::Report,
             dispatch_avoids_conflicts: true,
+            recall_limit: DEFAULT_RECALL_LIMIT,
         }
     }
 }
@@ -94,6 +105,12 @@ impl Config {
     pub fn avoid_conflicts(&self, requested: Option<bool>) -> bool {
         requested.unwrap_or(self.dispatch_avoids_conflicts)
     }
+
+    /// How many recalled assertions to attach to a task, clamped to a size a
+    /// model can actually read.
+    pub fn recall_limit(&self) -> usize {
+        self.recall_limit.min(50)
+    }
 }
 
 /// Resolve the database path: `--db` beats `HIRD_DB` beats the XDG default.
@@ -126,6 +143,21 @@ mod tests {
         // Self-dispatch, on the other hand, has a free choice of task, so it
         // takes the one that cannot collide.
         assert!(cfg.avoid_conflicts(None));
+        assert_eq!(cfg.recall_limit(), 5);
+    }
+
+    #[test]
+    fn recall_can_be_turned_off_and_cannot_be_turned_up_absurdly() {
+        let off = Config {
+            recall_limit: 0,
+            ..Config::default()
+        };
+        assert_eq!(off.recall_limit(), 0);
+        let greedy = Config {
+            recall_limit: 5_000,
+            ..Config::default()
+        };
+        assert_eq!(greedy.recall_limit(), 50);
     }
 
     #[test]

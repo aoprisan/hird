@@ -18,7 +18,7 @@ use crate::db::Db;
 use crate::error::Error;
 use crate::identity::{self, AgentId};
 use crate::model::{Assertion, Blocker, Conflict, Status, Task, TaskEvent, TaskSummary};
-use crate::repo::{Claim, Dispatch, MemoryQuery, NewAssertion, ProjectScope, Subtask};
+use crate::repo::{Claim, Dispatch, MemoryQuery, NewAssertion, ProjectScope, Recalled, Subtask};
 
 /// Number of trailing events `task_get` returns.
 const EVENT_WINDOW: usize = 20;
@@ -133,6 +133,12 @@ impl HirdMcp {
              that will still make sense to a different agent next week. Pass `task_seq` when \
              you learned it working a task. `mem_search` before exploring from scratch; \
              another agent may already have found the answer.\n\
+             \n\
+             Recall: a claimed task comes back with `recalled` — facts earlier agents \
+             recorded while working the same files, each with a `why` saying where it came \
+             from. Read those before you start; they are the reason to declare your paths \
+             early, because file scope is how the queue knows what to hand you. They are \
+             assertions, not gospel: if one turns out to be wrong, `mem_store` the truth.\n\
              \n\
              Everything is scoped to the current project ({project}) unless you pass \
              `all_projects: true`.",
@@ -354,6 +360,9 @@ struct TaskDetail {
     /// Overlaps between those files and work other agents hold right now.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     overlaps: Vec<String>,
+    /// What earlier work in the same territory learned. Read before exploring.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    recalled: Vec<RecallRow>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     events: Vec<EventRow>,
 }
@@ -382,6 +391,7 @@ struct TaskContext {
     blocks: Vec<i64>,
     paths: Vec<String>,
     conflicts: Vec<Conflict>,
+    recalled: Vec<Recalled>,
     events: Vec<TaskEvent>,
 }
 
@@ -408,6 +418,7 @@ impl TaskDetail {
             blocks: context.blocks,
             paths: context.paths,
             overlaps: describe_all(&context.conflicts),
+            recalled: context.recalled.into_iter().map(RecallRow::from).collect(),
             events: context.events.into_iter().map(EventRow::from).collect(),
         }
     }
@@ -438,6 +449,41 @@ impl From<TaskEvent> for EventRow {
     }
 }
 
+/// One assertion the queue volunteered, and why.
+///
+/// `why` is a sentence rather than a code: the agent that reads this is a
+/// language model, and "learned on task 4 (Port the config loader), working
+/// src/config.rs" tells it how much to trust the fact and who to ask.
+#[derive(Debug, Serialize)]
+struct RecallRow {
+    content: String,
+    why: String,
+    actor: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    task_seq: Option<i64>,
+    created_at: String,
+    /// Pass to `mem_search` results or quote to the human; assertions are
+    /// never edited, so an id stays valid.
+    id: String,
+}
+
+impl From<Recalled> for RecallRow {
+    fn from(r: Recalled) -> RecallRow {
+        RecallRow {
+            why: r.reason.describe(),
+            content: r.assertion.content,
+            actor: r.assertion.actor,
+            task_seq: r.task_seq,
+            created_at: r.assertion.created_at,
+            id: r.assertion.id,
+        }
+    }
+}
+
+fn recall_rows(recalled: Vec<Recalled>) -> Vec<RecallRow> {
+    recalled.into_iter().map(RecallRow::from).collect()
+}
+
 #[derive(Debug, Serialize)]
 struct ClaimResult {
     claimed: i64,
@@ -454,25 +500,35 @@ struct ClaimResult {
     /// already in these files.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     overlaps: Vec<String>,
+    /// What earlier agents recorded about this task or these files. Nobody
+    /// asked for it; the queue knew it was relevant and sent it along.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    recalled: Vec<RecallRow>,
     /// Restated so the model does not have to remember the initialize text.
     reminder: String,
 }
 
 impl ClaimResult {
-    fn new(claim: Claim, holder: String, heartbeat: u64) -> ClaimResult {
+    fn new(claim: Claim, holder: String, heartbeat: u64, recalled: Vec<Recalled>) -> ClaimResult {
         let overlaps = describe_all(&claim.conflicts);
-        let reminder = if overlaps.is_empty() {
-            format!(
-                "call task_update at least every {heartbeat} minutes to keep this lease, \
-                 then task_complete or task_fail when you are done"
-            )
+        let heartbeat_rule = format!(
+            "call task_update at least every {heartbeat} minutes to keep this lease, \
+             then task_complete or task_fail when you are done"
+        );
+        let mut reminder = if overlaps.is_empty() {
+            heartbeat_rule
         } else {
             format!(
                 "another agent is already in some of these files — say so before you edit \
-                 them. Otherwise: task_update at least every {heartbeat} minutes to keep \
-                 this lease, then task_complete or task_fail when you are done"
+                 them. Otherwise: {heartbeat_rule}"
             )
         };
+        if !recalled.is_empty() {
+            reminder = format!(
+                "read `recalled` first — earlier agents left those notes about this work, \
+                 and each says where it came from. Then: {reminder}"
+            );
+        }
         ClaimResult {
             claimed: claim.task.seq,
             holder,
@@ -483,6 +539,7 @@ impl ClaimResult {
             project: claim.task.project,
             paths: claim.paths,
             overlaps,
+            recalled: recall_rows(recalled),
             reminder,
         }
     }
@@ -511,12 +568,17 @@ struct DeferredRow {
 }
 
 impl NextResult {
-    fn new(dispatch: Dispatch, holder: String, heartbeat: u64) -> NextResult {
+    fn new(
+        dispatch: Dispatch,
+        holder: String,
+        heartbeat: u64,
+        recalled: Vec<Recalled>,
+    ) -> NextResult {
         let idle = dispatch.claim.is_none().then(|| idle_reason(&dispatch));
         NextResult {
             claimed: dispatch
                 .claim
-                .map(|claim| ClaimResult::new(claim, holder, heartbeat)),
+                .map(|claim| ClaimResult::new(claim, holder, heartbeat, recalled)),
             idle,
             blocked: dispatch.blocked,
             deferred: dispatch
@@ -707,6 +769,7 @@ impl HirdMcp {
     /// Read one task in full: instructions, dependencies, file scope and history.
     #[tool(name = "task_get")]
     async fn task_get(&self, Parameters(args): Parameters<SeqArgs>) -> Result<String, String> {
+        let recall_limit = self.config.recall_limit();
         let detail = self.with_db(|db| {
             let task = db.tasks().get(args.seq)?;
             let (waiting_for, conflicts) = db.tasks().readiness(args.seq)?;
@@ -722,6 +785,7 @@ impl HirdMcp {
                         .collect(),
                     paths: db.scopes().for_task(args.seq)?,
                     conflicts,
+                    recalled: recall(db, args.seq, recall_limit),
                     events: db.tasks().events(&task.id, EVENT_WINDOW)?,
                 },
             ))
@@ -740,14 +804,25 @@ impl HirdMcp {
         let ttl = self.config.lease_ttl();
         let paths = args.paths.unwrap_or_default();
         let policy = self.config.on_conflict();
-        let claim = self
+        let recall_limit = self.config.recall_limit();
+        // Recall runs after the claim, so it sees the paths this call just
+        // declared — claiming with `paths` is what makes the file-scope half
+        // of recall work on the very first call.
+        let (claim, recalled) = self
             .with_db(|db| {
-                db.tasks()
-                    .claim_scoped(args.seq, &actor, ttl, &paths, policy)
+                let claim = db
+                    .tasks()
+                    .claim_scoped(args.seq, &actor, ttl, &paths, policy)?;
+                Ok::<_, Error>((claim, recall(db, args.seq, recall_limit)))
             })
             .map_err(stringify)?;
 
-        json(&ClaimResult::new(claim, actor, self.heartbeat_minutes()))
+        json(&ClaimResult::new(
+            claim,
+            actor,
+            self.heartbeat_minutes(),
+            recalled,
+        ))
     }
 
     /// Be handed the next task worth doing, already claimed. Use this when the
@@ -761,11 +836,24 @@ impl HirdMcp {
         let ttl = self.config.lease_ttl();
         let scope = self.scope(args.all_projects);
         let avoid = self.config.avoid_conflicts(args.avoid_conflicts);
-        let dispatch = self
-            .with_db(|db| db.tasks().claim_next(&actor, ttl, &scope, avoid))
+        let recall_limit = self.config.recall_limit();
+        let (dispatch, recalled) = self
+            .with_db(|db| {
+                let dispatch = db.tasks().claim_next(&actor, ttl, &scope, avoid)?;
+                let recalled = match &dispatch.claim {
+                    Some(claim) => recall(db, claim.task.seq, recall_limit),
+                    None => Vec::new(),
+                };
+                Ok::<_, Error>((dispatch, recalled))
+            })
             .map_err(stringify)?;
 
-        json(&NextResult::new(dispatch, actor, self.heartbeat_minutes()))
+        json(&NextResult::new(
+            dispatch,
+            actor,
+            self.heartbeat_minutes(),
+            recalled,
+        ))
     }
 
     /// Say which files a task you hold is going to change, and find out
@@ -1028,6 +1116,15 @@ impl ServerHandler for HirdMcp {
             )
             .with_instructions(self.instructions())
     }
+}
+
+/// The memory relevant to a task, or nothing.
+///
+/// Recall is a courtesy on top of the real answer, so it never turns a
+/// successful claim into an error: a failure here costs the agent some context,
+/// while propagating it would cost it the task it just took.
+fn recall(db: &Db, seq: i64, limit: usize) -> Vec<Recalled> {
+    db.recall().for_task(seq, limit).unwrap_or_default()
 }
 
 /// Render a payload as compact JSON.
@@ -1539,6 +1636,151 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("already in some of these files"));
+    }
+
+    /// Seed a finished piece of work in `paths` that left a fact behind.
+    fn earlier_work(s: &HirdMcp, title: &str, paths: &[&str], learned: &str) -> i64 {
+        let seq = seed(s, title, "");
+        s.with_db(|db| {
+            let owned: Vec<String> = paths.iter().map(|p| p.to_string()).collect();
+            db.scopes()
+                .declare(seq, &owned, "cli", crate::repo::OnConflict::Report)?;
+            db.memory().store(NewAssertion {
+                project: PROJECT,
+                content: learned,
+                tags: "",
+                actor: "codex:9f2c",
+                task_seq: Some(seq),
+            })?;
+            // Done and gone: recall reaches back through finished work, which
+            // is the only kind that has anything to teach.
+            db.tasks()
+                .claim(seq, "codex:9f2c", Config::default().lease_ttl())?;
+            db.tasks().complete(seq, "codex:9f2c", "done")
+        })
+        .unwrap();
+        seq
+    }
+
+    /// Claiming with a file scope is enough to be told what the last agent in
+    /// those files learned — without anyone calling `mem_search`.
+    #[tokio::test]
+    async fn a_claim_arrives_with_what_earlier_work_in_those_files_learned() {
+        let s = server();
+        let earlier = earlier_work(
+            &s,
+            "Port the config loader",
+            &["src/config.rs"],
+            "env vars beat the config file",
+        );
+        let mine = seed(&s, "Audit the loader", "");
+
+        let out = parse(
+            s.task_claim(Parameters(claim_with(mine, &["src/*.rs"])))
+                .await,
+        );
+        let recalled = &out["recalled"][0];
+        assert_eq!(recalled["content"], "env vars beat the config file");
+        assert_eq!(recalled["task_seq"], earlier);
+        assert_eq!(recalled["actor"], "codex:9f2c");
+        let why = recalled["why"].as_str().unwrap();
+        assert!(why.contains(&format!("task {earlier}")), "{why}");
+        assert!(why.contains("src/config.rs"), "{why}");
+        // And the model is told to read it before anything else.
+        assert!(out["reminder"]
+            .as_str()
+            .unwrap()
+            .starts_with("read `recalled` first"));
+    }
+
+    #[tokio::test]
+    async fn self_dispatch_carries_the_same_recall_as_a_named_claim() {
+        let s = server();
+        earlier_work(
+            &s,
+            "Rewrite the renderer",
+            &["src/tui/**"],
+            "the renderer redraws on every poll",
+        );
+        let mine = seed(&s, "Speed up the renderer", "");
+        s.with_db(|db| {
+            db.scopes().declare(
+                mine,
+                &["src/tui/view.rs".into()],
+                "cli",
+                crate::repo::OnConflict::Report,
+            )
+        })
+        .unwrap();
+
+        let out = parse(s.task_next(Parameters(next_args())).await);
+        assert_eq!(out["claimed"]["claimed"], mine);
+        assert_eq!(
+            out["claimed"]["recalled"][0]["content"],
+            "the renderer redraws on every poll"
+        );
+    }
+
+    /// Recall is a courtesy, not a promise: a task nothing relates to simply
+    /// leaves the field out rather than sending an empty list.
+    #[tokio::test]
+    async fn a_claim_with_nothing_to_recall_says_nothing() {
+        let s = server();
+        let seq = seed(&s, "Xyzzy", "");
+        let out = parse(s.task_claim(Parameters(just(seq))).await);
+        assert!(out.get("recalled").is_none(), "{out}");
+        assert!(out["reminder"]
+            .as_str()
+            .unwrap()
+            .starts_with("call task_update"));
+    }
+
+    #[tokio::test]
+    async fn task_get_shows_the_same_recall_without_claiming_anything() {
+        let s = server();
+        earlier_work(
+            &s,
+            "Port the config loader",
+            &["src/config.rs"],
+            "env vars beat the config file",
+        );
+        let mine = seed(&s, "Audit the loader", "");
+        s.with_db(|db| {
+            db.scopes().declare(
+                mine,
+                &["src/config.rs".into()],
+                "cli",
+                crate::repo::OnConflict::Report,
+            )
+        })
+        .unwrap();
+
+        let out = parse(s.task_get(Parameters(SeqArgs { seq: mine })).await);
+        assert_eq!(
+            out["recalled"][0]["content"],
+            "env vars beat the config file"
+        );
+        assert_eq!(out["status"], "open");
+    }
+
+    #[tokio::test]
+    async fn recall_can_be_switched_off_in_the_configuration() {
+        let s = HirdMcp::new(
+            Db::open_in_memory().unwrap(),
+            AgentId::new("claude-code", "af31"),
+            PROJECT.to_string(),
+            Config {
+                recall_limit: 0,
+                ..Config::default()
+            },
+        );
+        earlier_work(&s, "Port the loader", &["src/config.rs"], "a fact");
+        let mine = seed(&s, "Audit the loader", "");
+        let out = parse(
+            s.task_claim(Parameters(claim_with(mine, &["src/config.rs"])))
+                .await,
+        );
+        assert!(out.get("recalled").is_none(), "{out}");
     }
 
     #[tokio::test]

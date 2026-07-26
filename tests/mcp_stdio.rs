@@ -313,6 +313,58 @@ fn memory_written_by_one_harness_is_searchable_by_another() {
     codex.shutdown();
 }
 
+/// The whole point of recall, end to end and across two harnesses: what Codex
+/// learns while working a file is handed to Claude Code when it claims a
+/// different task in the same file, without anyone searching for it.
+#[test]
+fn what_one_harness_learned_is_handed_to_the_next_agent_in_those_files() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["add", "Port the config loader", "--path", "src/config.rs"]);
+    sandbox.run(&["add", "Rewrite the loader tests", "--path", "tests/**"]);
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex.call("task_claim", json!({"seq": 1})).unwrap();
+    codex
+        .call(
+            "mem_store",
+            json!({
+                "content": "the loader reads HIRD_DB before the config file",
+                "task_seq": 1,
+            }),
+        )
+        .unwrap();
+    codex
+        .call("task_complete", json!({"seq": 1, "result": "ported"}))
+        .unwrap();
+    codex.shutdown();
+
+    // A different harness, a different task, and nobody called mem_search.
+    let mut claude = McpSession::start(&sandbox, "claude-code");
+    let claimed = claude
+        .call("task_claim", json!({"seq": 2, "paths": ["src/*.rs"]}))
+        .unwrap();
+    let recalled = &claimed["recalled"][0];
+    assert_eq!(
+        recalled["content"],
+        "the loader reads HIRD_DB before the config file"
+    );
+    assert_eq!(recalled["task_seq"], 1);
+    assert!(recalled["actor"].as_str().unwrap().starts_with("codex:"));
+    assert!(
+        recalled["why"].as_str().unwrap().contains("src/config.rs"),
+        "{recalled}"
+    );
+    claude.shutdown();
+
+    // And the human can see exactly what their agents are being told.
+    let brief = sandbox.run(&["recall", "2"]);
+    assert!(
+        brief.contains("the loader reads HIRD_DB before the config file"),
+        "{brief}"
+    );
+    assert!(brief.contains("learned on task 1"), "{brief}");
+}
+
 #[test]
 fn errors_come_back_as_sentences_rather_than_protocol_failures() {
     let sandbox = Sandbox::new();

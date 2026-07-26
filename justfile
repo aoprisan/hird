@@ -77,8 +77,10 @@ demo:
     # Someone is already in the config loader, so the board has a live overlap
     # and one blocked task to show off.
     "$bin" add "Audit the config tests" --path "tests/**" >/dev/null
+    # Linked to task 1, which declares tests/config.rs — so opening task 4
+    # (tests/**) shows recall carrying this fact across, with its provenance.
     "$bin" mem add "Integration tests need HIRD_DB set or they touch the real database" \
-        --tags testing >/dev/null
+        --tags testing --task 1 >/dev/null
     echo "demo database: $db"
     "$bin" tui
 

@@ -12,7 +12,7 @@ use crate::db::Db;
 use crate::glob;
 use crate::identity::ACTOR_TUI;
 use crate::model::{Assertion, Blocker, Conflict, Status, Task, TaskEvent, TaskSummary};
-use crate::repo::{dispatch_waves, MemoryQuery, ProjectScope};
+use crate::repo::{dispatch_waves, MemoryQuery, ProjectScope, Recalled};
 
 /// How often the database is re-read.
 pub const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
@@ -139,6 +139,8 @@ pub enum Mode {
         task: Box<Task>,
         events: Vec<TaskEvent>,
         learned: Vec<Assertion>,
+        /// What earlier work elsewhere already knows about this task.
+        recalled: Vec<Recalled>,
         readiness: Box<Readiness>,
     },
     /// One assertion with its provenance.
@@ -673,10 +675,19 @@ impl App {
             paths: db.scopes().for_task(seq)?,
             conflicts,
         };
+        // Only what came from elsewhere: `learned` already holds this task's
+        // own assertions, listed under their own heading.
+        let recalled = db
+            .recall()
+            .for_task(seq, self.config.recall_limit())?
+            .into_iter()
+            .filter(|r| r.reason != crate::repo::RecallReason::SameTask)
+            .collect();
         self.mode = Mode::TaskDetail {
             task: Box::new(task),
             events,
             learned,
+            recalled,
             readiness: Box::new(readiness),
         };
         Ok(())

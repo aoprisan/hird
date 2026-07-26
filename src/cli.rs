@@ -65,6 +65,15 @@ pub enum Command {
     Scope(ScopeArgs),
     /// Show which agent is working what, and where they overlap.
     Agents(ScopeFilterArgs),
+    /// Show what earlier work already learned about a task, and why it is
+    /// relevant. This is what an agent is handed when it claims the task.
+    Recall {
+        seq: i64,
+        /// How many assertions at most. Defaults to the configured
+        /// `recall_limit`.
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
+    },
     /// Store and search assertions.
     #[command(subcommand)]
     Mem(MemCommand),
@@ -218,7 +227,13 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
         }
         Command::Add(args) => add(&db, &project, args, out),
         Command::Ls(args) => ls(&db, &project, &config, args, out),
-        Command::Show { seq } => show(&db, *seq, out),
+        Command::Show { seq } => show(&db, *seq, &config, out),
+        Command::Recall { seq, limit } => recall(
+            &db,
+            *seq,
+            limit.map(|n| n.min(200)).unwrap_or(config.recall_limit()),
+            out,
+        ),
         Command::Cancel { seq, reason } => {
             let task = db.tasks().cancel(*seq, ACTOR_CLI, reason)?;
             writeln!(out, "task {} cancelled", task.seq)?;
@@ -518,7 +533,31 @@ fn ls_line(
     line
 }
 
-fn show(db: &Db, seq: i64, out: &mut impl Write) -> anyhow::Result<()> {
+/// What the queue would tell an agent about this task before it starts.
+///
+/// The same view an agent gets on `task_claim`, so a human can see what their
+/// swarm is being told — and notice when it is telling them something stale.
+fn recall(db: &Db, seq: i64, limit: usize, out: &mut impl Write) -> anyhow::Result<()> {
+    let recalled = db.recall().for_task(seq, limit)?;
+    if recalled.is_empty() {
+        writeln!(out, "nothing recorded so far touches task {seq}")?;
+        return Ok(());
+    }
+    let now = Utc::now();
+    for item in recalled {
+        writeln!(out, "{}", item.assertion.content)?;
+        writeln!(
+            out,
+            "    {}  ({}, {})",
+            item.reason.describe(),
+            item.assertion.actor,
+            fmt::age_phrase(&item.assertion.created_at, now)
+        )?;
+    }
+    Ok(())
+}
+
+fn show(db: &Db, seq: i64, config: &Config, out: &mut impl Write) -> anyhow::Result<()> {
     let task = db.tasks().get(seq)?;
     let now = Utc::now();
 
@@ -596,6 +635,22 @@ fn show(db: &Db, seq: i64, out: &mut impl Write) -> anyhow::Result<()> {
         writeln!(out, "\nassertions recorded on this task")?;
         for assertion in learned {
             writeln!(out, "  - {}", fmt::truncate(&assertion.content, 88))?;
+        }
+    }
+
+    // Only what came from elsewhere: this task's own assertions are listed
+    // above, and printing them twice would say nothing new.
+    let elsewhere: Vec<_> = db
+        .recall()
+        .for_task(seq, config.recall_limit())?
+        .into_iter()
+        .filter(|r| r.reason != crate::repo::RecallReason::SameTask)
+        .collect();
+    if !elsewhere.is_empty() {
+        writeln!(out, "\nrecalled from earlier work")?;
+        for item in elsewhere {
+            writeln!(out, "  - {}", fmt::truncate(&item.assertion.content, 88))?;
+            writeln!(out, "    {}", item.reason.describe())?;
         }
     }
     Ok(())
