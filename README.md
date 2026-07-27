@@ -30,6 +30,11 @@ arrives marked *unverified* rather than arriving looking exactly like one
 learned this morning. Confirm it and it goes back to standing; the way to
 confirm it is to say it again.
 
+And because the point of running three different models is that they are not
+the same model, work can be marked for review: finishing it files a review of
+exactly what changed, and the queue refuses that review to the harness that did
+the changing. No agent gets to be the last word on its own work.
+
 No daemon. No server. No accounts.
 
 - 📖 **Documentation: [aoprisan.github.io/hird](https://aoprisan.github.io/hird/)**
@@ -437,6 +442,84 @@ Measured on this repository: about 8 ms for a claim and 6 ms for a check-in,
 against 0.5 ms for a call that never looks — three git subprocesses, against a
 heartbeat measured in minutes. `witness = false` turns it off.
 
+## No agent reviews its own work
+
+Every result line in the queue was written by the agent that did the work. It is
+the last word, and nobody else ever looks. With one agent that is not a choice.
+With three it is a waste of the only thing that makes running three worth doing.
+
+Every harness can review code already. None of them can tell *whose* code it is
+looking at — a harness cannot see another harness's session, and an agent handed
+"review this" has no way to know it wrote it an hour ago. hird can: it is the
+process all of them talk to, and it wrote down who held the lease.
+
+```sh
+hird add "Port the config loader" --review --path src/config.rs
+```
+
+That is the whole opt-in, and it says nothing about who or when. Codex claims
+it, works it, and finishes the way it always does:
+
+```
+task_complete { seq: 1, result: "ported; env still wins over the file" }
+
+{ "seq": 1, "status": "done", "changed": ["src/config.rs (modified)"],
+  "review_filed": 2,
+  "advice": "this work was marked for review, so task 2 is now open for an agent
+             in another harness — you cannot take it yourself. Tell the human." }
+```
+
+Task 2 was filed by the completion. It is titled after the work, scoped to the
+file the **witness saw move** rather than the one anybody declared, and its body
+carries codex's own summary marked as the thing under review rather than as the
+brief. Then:
+
+```
+task_next {}                       # asked by codex
+
+{ "idle": "1 task is ready, but every one of them is a review of work this
+           harness did — they need an agent in another harness. Tell the human;
+           waiting will not change it",
+  "recused": [{ "seq": 2, "why": "not whoever worked task 1 (Port the config
+                loader): that was codex:43em, so this needs another harness" }] }
+```
+
+Not "nothing to do". The queue is not idle — it is waiting for a different tool,
+and an agent told the queue was empty would send you away from the one thing
+that needs you. Claiming it by name is refused too, in the same transaction as
+the compare-and-set, so there is no race to win.
+
+**The bar is the harness, not the session.** Two Claude Code windows are one
+model reading its own homework; a bar you could get around by opening a tab
+would be no bar at all.
+
+**It is a constraint, not a scheduler.** A recusal says who may *not* take a
+task and never who must. Run one harness and the review simply sits there
+unclaimable — which the board says plainly, because that is a fact about your
+setup rather than something to paper over.
+
+You can set the bar by hand, and lift it:
+
+```sh
+hird recuse 7 --from 4 --reason "wrote the thing being checked"
+hird recuse 7 --clear
+```
+
+And a plan file is where the judgement belongs, since which work deserves a
+second pair of eyes is a property of the job:
+
+```toml
+[[task]]
+name = "renderer"
+title = "Rewrite the renderer"
+paths = ["src/tui/**"]
+review = true
+```
+
+Nothing is filed for work the witness saw no trace of, for work that `failed` —
+there is nothing to check, and whether the attempt is worth reading is your
+call — or while an earlier review of the same work is still open.
+
 ## Memory
 
 The queue is for work; memory is for what the work taught you. Agents call
@@ -607,7 +690,7 @@ did before any of this existed — no anchors, no `standing` field, and the
 
 ```
 hird add <title> [--body <md>|--body-file <path>] [--priority N] [--project <path>]
-                 [--needs <seq>,…] [--path <glob>]…
+                 [--needs <seq>,…] [--path <glob>]… [--review]
 hird ls [--status <status>] [--all-projects]
 hird show <seq>
 hird cancel <seq> [--reason <text>]
@@ -618,6 +701,7 @@ hird plan apply <file> [--dry-run] [--project <path>]
 hird graph [--all-projects]
 hird scope <seq> [--path <glob>]… [--clear]
 hird agents [--all-projects]
+hird recuse <seq> --from <seq>,… [--reason <text>] | --clear
 hird recall <seq> [--limit N]
 hird mem add <content> [--tags a,b] [--task <seq>] [--path <file>]…
 hird mem search [query] [--limit N] [--all-projects] [--include-superseded]
@@ -681,7 +765,9 @@ moving under them.
 | `Enter` | open the task that agent is holding |
 
 Cards on the queue board carry a yellow `waits #1 #3` badge when a task looks
-open but nobody can actually claim it yet.
+open but nobody can actually claim it yet, and a magenta `reviews #4` badge when
+a task is somebody's review — which decides who can take it, and is exactly the
+thing you cannot tell from the title.
 
 ## Projects
 
@@ -782,6 +868,7 @@ points `HIRD_DB` at a throwaway file, so running one cannot disturb your board.
 ./examples/plan-file.sh         # the same plan as a file: read it, file it, edit it
 ./examples/witness.sh           # two agents in one file, caught in the act
 ./examples/footing.sh           # a fact, the file it came from, and that file rewritten
+./examples/review.sh            # work that files its own review, barred to whoever did it
 ```
 
 They open real `hird mcp` sessions and send the tool calls a harness would,
@@ -848,7 +935,9 @@ answers was still assembled out of things agents had said about themselves, and
 that the one failure worth catching is the one nobody reports. Footing (§14) is
 that same look at the working tree turned on the memory: an assertion is a
 statement about code, code changes, and until now nothing anywhere noticed.
-Still absent: multi-machine sync and vector search. The append-only event trail
+Recusal (§15) is the third application of the same idea: the one thing an agent
+cannot honestly report is whether its own work is any good, and hird is the only
+process in the room that knows whose work it is. Still absent: multi-machine sync and vector search. The append-only event trail
 is meant to make sync tractable later.
 
 ## Licence

@@ -29,6 +29,7 @@
     <li><a href="#scope">File scope and collisions</a></li>
     <li><a href="#witness">What actually happened</a></li>
     <li><a href="#split">Splitting a task</a></li>
+    <li><a href="#review">No agent reviews its own work</a></li>
     <li><a href="#memory">Memory</a></li>
     <li class="sub"><a href="#recall">Recall</a></li>
     <li class="sub"><a href="#footing">Footing: when a fact went stale</a></li>
@@ -606,6 +607,97 @@ codex:9f2c        #1 in_progress  Port the config loader        11m left
 </p>
 </section>
 
+<section id="review">
+<h2>No agent reviews its own work</h2>
+
+<p>
+  Every result line in the queue was written by the agent that did the work. It
+  is the last word, and nobody else ever looks. With one agent that is not a
+  choice. With three it is a waste of the only thing that makes running three
+  worth doing.
+</p>
+
+<p>
+  Every harness can review code already. None of them can tell <em>whose</em>
+  code it is looking at — a harness cannot see another harness's session, and an
+  agent handed "review this" has no way to know it wrote the thing an hour ago.
+  hird can: it is the process all of them talk to, and it wrote down who held
+  the lease.
+</p>
+
+<pre><code><span class="k">hird</span> add <span class="s">"Port the config loader"</span> --review --path src/config.rs</code></pre>
+
+<p>
+  That is the whole opt-in, and it says nothing about who or when. Codex claims
+  it, works it, and finishes the way it always does:
+</p>
+
+<pre><code>task_complete { seq: 1, result: <span class="s">"ported; env still wins over the file"</span> }
+
+{ <span class="s">"seq"</span>: 1, <span class="s">"status"</span>: <span class="s">"done"</span>, <span class="s">"changed"</span>: [<span class="s">"src/config.rs (modified)"</span>],
+  <span class="s">"review_filed"</span>: 2,
+  <span class="s">"advice"</span>: <span class="s">"this work was marked for review, so task 2 is now open for an agent
+             in another harness — you cannot take it yourself. Tell the human."</span> }</code></pre>
+
+<p>
+  Task 2 was filed by the completion. It is titled after the work, scoped to the
+  file the <a href="#witness">witness</a> saw move rather than the one anybody
+  declared, and its body carries codex's own summary marked as the thing under
+  review rather than as the brief. Then:
+</p>
+
+<pre><code>task_next {}                       <span class="c"># asked by codex</span>
+
+{ <span class="s">"idle"</span>: <span class="s">"1 task is ready, but every one of them is a review of work this
+           harness did — they need an agent in another harness. Tell the human;
+           waiting will not change it"</span>,
+  <span class="s">"recused"</span>: [{ <span class="s">"seq"</span>: 2, <span class="s">"why"</span>: <span class="s">"not whoever worked task 1 (Port the config
+                loader): that was codex:43em, so this needs another harness"</span> }] }</code></pre>
+
+<p>
+  Not "nothing to do". The queue is not idle — it is waiting for a different
+  tool, and an agent told the queue was empty would send you away from the one
+  thing that needs you. Claiming it by name is refused too, in the same
+  transaction as the compare-and-set, so there is no race to win.
+</p>
+
+<p>
+  <strong>The bar is the harness, not the session.</strong> Two Claude Code
+  windows are one model reading its own homework; a bar you could get around by
+  opening a tab would be no bar at all.
+</p>
+
+<p>
+  <strong>It is a constraint, not a scheduler.</strong> A recusal says who may
+  <em>not</em> take a task and never who must. Run one harness and the review
+  simply sits there unclaimable — which the board says plainly, because that is
+  a fact about your setup rather than something to paper over.
+</p>
+
+<p>You can set the bar by hand, and lift it:</p>
+
+<pre><code><span class="k">hird</span> recuse 7 --from 4 --reason <span class="s">"wrote the thing being checked"</span>
+<span class="k">hird</span> recuse 7 --clear</code></pre>
+
+<p>
+  And a <a href="#plan-files">plan file</a> is where the judgement belongs,
+  since which work deserves a second pair of eyes is a property of the job:
+</p>
+
+<pre><code>[[task]]
+name = <span class="s">"renderer"</span>
+title = <span class="s">"Rewrite the renderer"</span>
+paths = [<span class="s">"src/tui/**"</span>]
+review = <span class="s">true</span></code></pre>
+
+<p>
+  Nothing is filed for work the witness saw no trace of, for work that
+  <code>failed</code> — there is nothing to check, and whether the attempt is
+  worth reading is your call — or while an earlier review of the same work is
+  still open.
+</p>
+</section>
+
 <section id="memory">
 <h2>Memory</h2>
 
@@ -810,7 +902,7 @@ shaky     the renderer redraws on every poll
 <h2>Command line</h2>
 
 <pre><code>hird add &lt;title&gt; [--body &lt;md&gt;|--body-file &lt;path&gt;] [--priority N] [--project &lt;path&gt;]
-                 [--needs &lt;seq&gt;,…] [--path &lt;glob&gt;]…
+                 [--needs &lt;seq&gt;,…] [--path &lt;glob&gt;]… [--review]
 hird ls [--status &lt;status&gt;] [--all-projects]
 hird show &lt;seq&gt;
 hird cancel &lt;seq&gt; [--reason &lt;text&gt;]
@@ -821,6 +913,7 @@ hird plan apply &lt;file&gt; [--dry-run] [--project &lt;path&gt;]
 hird graph [--all-projects]
 hird scope &lt;seq&gt; [--path &lt;glob&gt;]… [--clear]
 hird agents [--all-projects]
+hird recuse &lt;seq&gt; --from &lt;seq&gt;,… [--reason &lt;text&gt;] | --clear
 hird recall &lt;seq&gt; [--limit N]
 hird mem add &lt;content&gt; [--tags a,b] [--task &lt;seq&gt;] [--path &lt;file&gt;]…
 hird mem search [query] [--limit N] [--all-projects] [--include-superseded]
@@ -923,7 +1016,10 @@ hird db-path</code></pre>
 
 <p>
   Cards on the queue board carry a yellow <code>waits #1 #3</code> badge when a
-  task looks open but nobody can actually claim it yet.
+  task looks open but nobody can actually claim it yet, and a magenta
+  <code>reviews #4</code> badge when a task is somebody's
+  <a href="#review">review</a> — which decides who can take it, and is exactly
+  the thing the title cannot tell you.
 </p>
 </section>
 
@@ -939,7 +1035,7 @@ hird db-path</code></pre>
     <tr><td><code>task_list</code></td><td>What work exists, optionally filtered by status.</td></tr>
     <tr><td><code>task_get</code></td><td>One task in full: dependencies, file scope, recent history.</td></tr>
     <tr><td><code>task_next</code></td><td><strong>Be handed the next workable task, already claimed.</strong></td></tr>
-    <tr><td><code>task_claim</code></td><td><strong>Take a named task.</strong> Atomic; fails if someone else has it.</td></tr>
+    <tr><td><code>task_claim</code></td><td><strong>Take a named task.</strong> Atomic; fails if someone else has it, or if it reviews your own harness's work.</td></tr>
     <tr><td><code>task_scope</code></td><td>Say which files you will change; find out who else is in them.</td></tr>
     <tr><td><code>task_update</code></td><td>Record progress and renew the lease. Holder only.</td></tr>
     <tr><td><code>task_split</code></td><td>Break a task into pieces the other agents can work. Holder only.</td></tr>
@@ -1077,6 +1173,10 @@ memory_footing = true</code></pre>
       <td>A fact recorded against a file, that file rewritten, and every later reader told so — plus the way back to <a href="#footing">firm</a>. Makes its own throwaway git repository.</td>
     </tr>
     <tr>
+      <td><a href="https://github.com/aoprisan/hird/blob/main/examples/review.sh"><code>review.sh</code></a></td>
+      <td>Work that files its own <a href="#review">review</a> when it finishes, scoped to what actually moved and barred to the harness that moved it. Makes its own throwaway git repository.</td>
+    </tr>
+    <tr>
       <td><a href="https://github.com/aoprisan/hird/blob/main/examples/task-body.md"><code>task-body.md</code></a></td>
       <td>A task body worth writing, for <code>--body-file</code>.</td>
     </tr>
@@ -1132,6 +1232,16 @@ memory_footing = true</code></pre>
   <a href="#contention">working tree confirms</a> — the file has moved, and the
   two of them disagree about what it now says — is reported to both by name,
   with the one instruction that saves the work: re-read it before you write.
+</p>
+
+<h3>Can I have one agent check another's work?</h3>
+<p>
+  That is what <a href="#review">recusal</a> is for, and hird is the only thing
+  positioned to enforce it: a harness cannot see another harness's session, so
+  an agent handed "review this" cannot tell whether it wrote it. hird recorded
+  who held the lease. Mark work <code>--review</code> and finishing files the
+  review itself, scoped to what actually moved — and the queue refuses it to the
+  harness that did the moving, in the same transaction as the claim.
 </p>
 
 <h3>Does the memory go stale?</h3>

@@ -757,3 +757,99 @@ no `standing` field in any payload, and the `initialize` instructions do not
 mention it — a model told to read a field nothing will ever populate has been
 handed a rule it cannot use and a reason to doubt the ones it can. That is the
 same rule §12 lives by, for the same reason.
+
+## 15. (v1.5) Recusal — no agent reviews its own work
+
+Every result line in the queue was written by the agent that produced the work
+it describes. `task_complete` takes a summary; the summary is the last word;
+nobody else ever looks. §12 exists because that same asymmetry was intolerable
+for *what an agent did*, and went and read the disk instead. It was left in
+place for *whether the work was any good*.
+
+For one agent that is not a choice — there is nobody else to ask. For a swarm
+it is, and a strange one, because the single most valuable property of running
+three different models on one codebase is precisely that they are not the same
+model, and the cheapest way to spend that is to have them read each other.
+
+Every harness can review code. What none of them can do is know *whose* code it
+is looking at: a harness cannot see another harness's session, and an agent
+asked "review this" has no way to tell whether it is being handed its own work
+from an hour ago. hird can. It is the process all of them talk to, and it wrote
+down who held the lease.
+
+### Migration 6
+
+```sql
+CREATE TABLE task_recusals (
+  task_id      TEXT NOT NULL REFERENCES tasks(id),
+  from_task_id TEXT NOT NULL REFERENCES tasks(id),
+  reason       TEXT NOT NULL DEFAULT '',
+  actor        TEXT NOT NULL,
+  at           TEXT NOT NULL,
+  PRIMARY KEY (task_id, from_task_id),
+  CHECK (task_id <> from_task_id)
+);
+
+ALTER TABLE tasks ADD COLUMN review INTEGER NOT NULL DEFAULT 0;
+```
+
+A **recusal** is one edge: *whoever worked task N must not work this one*. It is
+the second kind of edge in the graph and the mirror of the first — `task_deps`
+constrains *when* a task may be claimed, `task_recusals` constrains *who* may
+claim it — and like dependencies it is enforced rather than annotated.
+
+### Three decisions
+
+**The bar is the harness, not the session.** Two Claude Code windows are one
+model reading its own homework. A recusal that excluded only the exact session
+would be satisfied by opening a new tab, which is to say satisfied by nothing.
+`actor_harness` already exists for the badge colours; here it decides an
+outcome.
+
+**It is enforced where the claim is decided.** `claim_in_tx` checks it in the
+same `IMMEDIATE` transaction as the compare-and-set, between the dependency
+check and the `UPDATE`, so there is no race to win and a refused claim leaves no
+trace. `claim_next` checks it too, but as a *filter* — dispatch routes around a
+recused task rather than handing out something it would then refuse, because an
+agent that asked for "whatever is workable" and got an error would reasonably
+conclude the queue was empty.
+
+**Who worked a task is read from the trail, not the row.** Completing clears
+`claimed_by`, so `worker_of` takes the latest of the `claimed`, `completed` and
+`failed` events. That gets the awkward cases right for free: work released and
+picked up by somebody else is credited to whoever finished it, and a recusal
+filed before anybody has worked the task bars nobody rather than locking the
+queue.
+
+### Why the review files itself
+
+A review a human has to remember to file is a review that does not happen. This
+is the same observation recall and the witness are built on — *something an
+agent has to know to ask for is something it will not ask for* — pointed at the
+human for once.
+
+So `tasks.review` is a flag set when the work is filed (`hird add --review`,
+`review = true` in a plan), and completing a task that carries it files the
+review as an ordinary task: titled after the work, at the same priority,
+**scoped to the files the witness actually saw move** rather than the ones
+anybody declared, carrying the author's own summary marked as the thing under
+review rather than as the brief, and recused from the task it reviews.
+
+It declines to file in three cases, and each of them is a case where filing
+would put noise on a human's board: work the witness saw no trace of, work that
+`failed` — there is nothing to check, and whether the attempt is worth reading
+is the human's call — and work whose previous review is still unfinished, so
+reopening and re-completing cannot stack them up.
+
+### It is a constraint, not a scheduler
+
+A recusal says who may **not** take a task. It never says who must, nothing here
+pushes work at anybody, and §13's rule holds unchanged: a plan file may carry
+`review = true` because `tasks.review` is a column, and may not carry anything
+that would decide *when* work runs.
+
+The consequence is that a queue with one harness on it and a recusal in it has
+one task nobody can claim. That is reported rather than papered over — a
+`task_next` whose only remaining candidates are recused says so in as many
+words, because "nothing is open" would send the human away from the one thing
+that needs them, and the fix is to open a different tool rather than to wait.

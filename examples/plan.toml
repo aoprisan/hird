@@ -41,11 +41,18 @@ needs = ["schema"]
 
 # `paths` is what lets the queue keep two agents out of one file — globs, not
 # files, because nothing has been written yet.
+#
+# `review = true` says this work should not be the last word of whoever does
+# it: finishing files a review of exactly what moved, and the queue refuses
+# that review to the harness that moved it. Which work deserves a second pair
+# of eyes is a property of the job, decided once, here — not something anybody
+# has to remember at the moment they finish.
 [[task]]
 name = "renderer"
 title = "Rewrite the renderer"
 priority = 2
 paths = ["src/tui/**"]
+review = true
 
 # This one overlaps `renderer` and waits for nothing, which `--dry-run` will
 # point out: the two look parallel here and will be handed out one at a time.

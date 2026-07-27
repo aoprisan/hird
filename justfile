@@ -59,6 +59,7 @@ examples: build
     ./examples/plan-file.sh
     ./examples/witness.sh
     ./examples/footing.sh
+    ./examples/review.sh
 
 # Where this machine's database lives.
 db-path:
