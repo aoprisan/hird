@@ -828,3 +828,122 @@ fn the_standing_audit_outside_git_says_there_is_nothing_to_stand_on() {
     assert!(out.contains("no footing here"), "{out}");
     assert!(out.contains("git checkout"), "{out}");
 }
+
+// ------------------------------------------------- no agent reviews its own work
+
+/// The human's side of it: mark work for review when you file it, and see the
+/// bar on the board afterwards without having arranged anything.
+#[test]
+fn a_reviewed_task_shows_who_cannot_take_the_review() {
+    let sandbox = Sandbox::new();
+    sandbox.write_file("src/config.rs", "fn load() {}\n");
+    sandbox.git_init();
+    sandbox.run(&[
+        "add",
+        "Port the loader",
+        "--review",
+        "--path",
+        "src/config.rs",
+    ]);
+
+    let before = sandbox.run(&["show", "1"]);
+    assert!(before.contains("review    on finishing"), "{before}");
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex.claim(1);
+    sandbox.write_file("src/config.rs", "fn load() { ported() }\n");
+    codex
+        .call(
+            "task_complete",
+            serde_json::json!({"seq": 1, "result": "ported"}),
+        )
+        .unwrap();
+    codex.shutdown();
+
+    let listed = sandbox.run(&["ls"]);
+    assert!(listed.contains("Review: Port the loader"), "{listed}");
+
+    let review = sandbox.run(&["show", "2"]);
+    assert!(review.contains("recused"), "{review}");
+    assert!(review.contains("codex:"), "{review}");
+    assert!(review.contains("files     src/config.rs"), "{review}");
+}
+
+/// The bar is a first-class thing a human can set and lift, not something only
+/// the review machinery can produce.
+#[test]
+fn recusals_can_be_set_and_lifted_by_hand() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["add", "Port the loader"]);
+    sandbox.run(&["add", "Check the loader port"]);
+
+    assert!(sandbox
+        .run(&["recuse", "2"])
+        .contains("recused from nothing"));
+
+    let set = sandbox.run(&["recuse", "2", "--from", "1", "--reason", "wrote it"]);
+    assert!(set.contains("task 1"), "{set}");
+    assert!(
+        set.contains("nobody has yet"),
+        "nothing is worked yet:\n{set}"
+    );
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex.claim(1);
+    codex.shutdown();
+    let now = sandbox.run(&["recuse", "2"]);
+    assert!(now.contains("codex:"), "{now}");
+    assert!(now.contains("another harness"), "{now}");
+    assert!(now.contains("wrote it"), "{now}");
+
+    assert!(sandbox
+        .run(&["recuse", "2", "--clear"])
+        .contains("lifted 1 recusal"));
+    assert!(sandbox
+        .run(&["recuse", "2"])
+        .contains("recused from nothing"));
+}
+
+/// A plan is where the judgement belongs: which work deserves a second pair of
+/// eyes is a property of the job, decided once, in the file next to the code.
+#[test]
+fn a_plan_can_mark_work_for_review() {
+    let sandbox = Sandbox::new();
+    sandbox.git_init();
+    let plan = sandbox.dir.path().join("plan.toml");
+    std::fs::write(
+        &plan,
+        r#"
+plan = "migration"
+
+[[task]]
+name = "schema"
+title = "Design the storage schema"
+paths = ["src/db.rs"]
+review = true
+
+[[task]]
+name = "docs"
+title = "Write it up"
+needs = ["schema"]
+"#,
+    )
+    .unwrap();
+    sandbox.run(&["plan", "apply", plan.to_str().unwrap()]);
+
+    assert!(sandbox
+        .run(&["show", "1"])
+        .contains("review    on finishing"));
+    assert!(!sandbox
+        .run(&["show", "2"])
+        .contains("review    on finishing"));
+
+    // Applying it again must not write a second event saying the same thing.
+    sandbox.run(&["plan", "apply", plan.to_str().unwrap()]);
+    let shown = sandbox.run(&["show", "1"]);
+    assert_eq!(
+        shown.matches("marked for review").count(),
+        1,
+        "re-applying should be quiet:\n{shown}"
+    );
+}

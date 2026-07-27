@@ -71,6 +71,11 @@ pub enum Command {
     Scope(ScopeArgs),
     /// Show which agent is working what, and where they overlap.
     Agents(ScopeFilterArgs),
+    /// Bar whoever worked one task from working another, or lift the bar.
+    ///
+    /// This is what makes a review a review: the queue refuses the claim from
+    /// the harness that did the work, and dispatch routes around it.
+    Recuse(RecuseArgs),
     /// Show what earlier work already learned about a task, and why it is
     /// relevant. This is what an agent is handed when it claims the task.
     Recall {
@@ -115,6 +120,11 @@ pub struct AddArgs {
     /// the same file.
     #[arg(long = "path", value_name = "GLOB")]
     pub paths: Vec<String>,
+    /// When this task finishes, file a review of what it changed — scoped to
+    /// the files that actually moved, and barred to the harness that moved
+    /// them.
+    #[arg(long)]
+    pub review: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -174,6 +184,22 @@ pub struct ScopeArgs {
     pub paths: Vec<String>,
     /// Forget everything the task had declared.
     #[arg(long, conflicts_with = "paths")]
+    pub clear: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct RecuseArgs {
+    /// The task to put under the bar.
+    pub seq: i64,
+    /// Task numbers whose worker must not take it. Repeatable, or
+    /// comma-separated.
+    #[arg(long = "from", value_name = "SEQ", value_delimiter = ',')]
+    pub from: Vec<i64>,
+    /// Why, for the record and for the refusal message.
+    #[arg(long, default_value = "")]
+    pub reason: String,
+    /// Lift every bar on the task instead.
+    #[arg(long, conflicts_with = "from")]
     pub clear: bool,
 }
 
@@ -305,6 +331,7 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
             look(&db, &config, &project);
             agents(&db, &scope_of(&project, &config, args.all_projects), out)
         }
+        Command::Recuse(args) => recuse(&db, args, out),
     }
 }
 
@@ -346,6 +373,9 @@ fn add(db: &Db, project: &str, args: &AddArgs, out: &mut impl Write) -> anyhow::
     if !args.paths.is_empty() {
         db.scopes()
             .declare(task.seq, &args.paths, ACTOR_CLI, OnConflict::Report)?;
+    }
+    if args.review {
+        db.tasks().set_review(task.seq, true, ACTOR_CLI)?;
     }
     writeln!(out, "{}", task.seq)?;
     Ok(())
@@ -545,6 +575,28 @@ fn count(n: usize, noun: &str) -> String {
         Some(stem) => format!("{n} {stem}ies"),
         None => format!("{n} {noun}s"),
     }
+}
+
+/// `hird recuse`: who must not work a task, and why.
+fn recuse(db: &Db, args: &RecuseArgs, out: &mut impl Write) -> anyhow::Result<()> {
+    if args.clear {
+        let removed = db.recusals().clear(args.seq, ACTOR_CLI)?;
+        writeln!(out, "lifted {removed} recusal(s) from task {}", args.seq)?;
+        return Ok(());
+    }
+    for from in &args.from {
+        db.recusals()
+            .add(args.seq, *from, &args.reason, ACTOR_CLI)?;
+    }
+    let recusals = db.recusals().for_task(args.seq)?;
+    if recusals.is_empty() {
+        writeln!(out, "task {} is recused from nothing", args.seq)?;
+        return Ok(());
+    }
+    for recusal in &recusals {
+        writeln!(out, "{}", recusal.describe())?;
+    }
+    Ok(())
 }
 
 fn scope_cmd(db: &Db, args: &ScopeArgs, out: &mut impl Write) -> anyhow::Result<()> {
@@ -875,6 +927,12 @@ fn show(db: &Db, seq: i64, config: &Config, out: &mut impl Write) -> anyhow::Res
     let patterns = db.scopes().for_task(seq)?;
     if !patterns.is_empty() {
         writeln!(out, "files     {}", patterns.join(", "))?;
+    }
+    if task.review {
+        writeln!(out, "review    on finishing, by another harness")?;
+    }
+    for recusal in db.recusals().for_task(seq)? {
+        writeln!(out, "recused   {}", recusal.describe())?;
     }
     for conflict in &conflicts {
         writeln!(out, "overlap   {}", conflict.describe())?;

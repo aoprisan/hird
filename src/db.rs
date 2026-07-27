@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::Connection;
 
 use crate::error::Result;
-use crate::repo::{Deps, Footings, Memory, Plans, Recall, Scopes, Tasks, Witnessed};
+use crate::repo::{Deps, Footings, Memory, Plans, Recall, Recusals, Scopes, Tasks, Witnessed};
 
 /// Numbered migrations, applied in order and recorded in `meta.schema_version`.
 const MIGRATIONS: &[&str] = &[
@@ -160,6 +160,24 @@ CREATE TABLE assertion_affirmations (
   PRIMARY KEY (assertion_id, actor)
 );
 "#,
+    // 6 — recusal: work one harness must not be the one to check
+    r#"
+CREATE TABLE task_recusals (
+  task_id      TEXT NOT NULL REFERENCES tasks(id),
+  -- Whoever worked this task is barred from working task_id.
+  from_task_id TEXT NOT NULL REFERENCES tasks(id),
+  reason       TEXT NOT NULL DEFAULT '',
+  actor        TEXT NOT NULL,
+  at           TEXT NOT NULL,
+  PRIMARY KEY (task_id, from_task_id),
+  CHECK (task_id <> from_task_id)
+);
+
+CREATE INDEX idx_task_recusals_from ON task_recusals(from_task_id);
+
+-- 1 when finishing this task should put its work in front of somebody else.
+ALTER TABLE tasks ADD COLUMN review INTEGER NOT NULL DEFAULT 0;
+"#,
 ];
 
 /// An open connection to the hird database.
@@ -252,6 +270,11 @@ impl Db {
     /// What assertions were learned against, and who else has said them.
     pub fn footings(&self) -> Footings<'_> {
         Footings::new(&self.conn)
+    }
+
+    /// Who must not work a task, because of what they already worked.
+    pub fn recusals(&self) -> Recusals<'_> {
+        Recusals::new(&self.conn)
     }
 
     /// The memory relevant to a task, derived from the other three.

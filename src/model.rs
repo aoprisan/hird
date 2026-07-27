@@ -214,6 +214,10 @@ pub enum EventKind {
     DepRemoved,
     /// The task's declared file scope changed.
     Scoped,
+    /// The task was recused from another one's worker, or the bar was lifted.
+    Recused,
+    /// A review of this task's work was filed, or this task is that review.
+    Reviewed,
     /// The witness saw the working tree change under this task.
     Witnessed,
 }
@@ -235,6 +239,8 @@ impl EventKind {
             EventKind::DepAdded => "dep_added",
             EventKind::DepRemoved => "dep_removed",
             EventKind::Scoped => "scoped",
+            EventKind::Recused => "recused",
+            EventKind::Reviewed => "reviewed",
             EventKind::Witnessed => "witnessed",
         }
     }
@@ -265,6 +271,8 @@ impl FromStr for EventKind {
             "dep_added" => Ok(EventKind::DepAdded),
             "dep_removed" => Ok(EventKind::DepRemoved),
             "scoped" => Ok(EventKind::Scoped),
+            "recused" => Ok(EventKind::Recused),
+            "reviewed" => Ok(EventKind::Reviewed),
             "witnessed" => Ok(EventKind::Witnessed),
             other => Err(format!("unknown event kind {other:?}")),
         }
@@ -284,6 +292,9 @@ pub struct Task {
     pub claimed_by: Option<String>,
     pub lease_expires_at: Option<String>,
     pub result: Option<String>,
+    /// Whether finishing this task should put its work in front of another
+    /// harness. See [`Recusal`] and DESIGN.md §15.
+    pub review: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -520,6 +531,44 @@ fn short_time(ts: &str) -> String {
     match parse_ts(ts) {
         Some(dt) => dt.format("%H:%M UTC").to_string(),
         None => ts.to_string(),
+    }
+}
+
+/// A task whose worker is barred from working another one.
+///
+/// Carries who that is, so a refusal can name them without a second lookup —
+/// the same reason [`Blocker`] carries a title.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Recusal {
+    pub from_seq: i64,
+    pub from_title: String,
+    /// Why the bar exists, in the words of whoever filed it.
+    pub reason: String,
+    /// Whoever last held the task being recused from, if anybody has. `None`
+    /// means the work has not been done yet, so the recusal bars nobody — a
+    /// constraint waiting for something to constrain.
+    pub worker: Option<String>,
+}
+
+impl Recusal {
+    /// One sentence, aimed at a model that has to relay it to a human.
+    pub fn describe(&self) -> String {
+        let what = format!(
+            "task {} ({})",
+            self.from_seq,
+            crate::fmt::truncate(&self.from_title, 40)
+        );
+        let why = if self.reason.is_empty() {
+            String::new()
+        } else {
+            format!(" — {}", self.reason)
+        };
+        match &self.worker {
+            Some(worker) => format!(
+                "not whoever worked {what}: that was {worker}, so this needs another harness{why}"
+            ),
+            None => format!("not whoever works {what}; nobody has yet{why}"),
+        }
     }
 }
 

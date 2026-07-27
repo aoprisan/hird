@@ -90,6 +90,8 @@ pub struct Readiness {
     pub blocks: Vec<i64>,
     pub paths: Vec<String>,
     pub conflicts: Vec<Conflict>,
+    /// Harnesses this task is barred from, already written out.
+    pub recusals: Vec<crate::model::Recusal>,
 }
 
 /// A column of the kanban board.
@@ -199,6 +201,9 @@ pub struct App {
 
     /// Task number to the unfinished tasks it waits for.
     pub unmet: BTreeMap<i64, Vec<i64>>,
+    /// Task numbers that are somebody's review, so the board can say so
+    /// without opening each card.
+    pub reviews: BTreeMap<i64, i64>,
 
     // Swarm screen.
     pub agents: Vec<AgentRow>,
@@ -255,6 +260,7 @@ impl App {
             column: Column::Open,
             selected: [0; 4],
             unmet: BTreeMap::new(),
+            reviews: BTreeMap::new(),
             agents: Vec::new(),
             waves: Vec::new(),
             swarm_selected: 0,
@@ -346,6 +352,7 @@ impl App {
         self.tasks = db.tasks().list(&scope, None)?;
         self.counts = db.tasks().counts(&scope)?;
         self.unmet = db.deps().unmet_map(&scope)?;
+        self.reviews = db.recusals().reviews(&scope)?;
         self.waves = dispatch_waves(&self.tasks, &db.deps().edges(&scope)?);
         self.look(db);
         self.agents = agent_rows(
@@ -814,6 +821,7 @@ impl App {
                 .collect(),
             paths: db.scopes().for_task(seq)?,
             conflicts,
+            recusals: db.recusals().for_task(seq)?,
         };
         // Only what came from elsewhere: `learned` already holds this task's
         // own assertions, listed under their own heading.

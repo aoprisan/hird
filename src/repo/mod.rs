@@ -8,6 +8,7 @@ pub(crate) mod footing;
 mod memory;
 mod plan;
 mod recall;
+mod recusal;
 mod scope;
 mod tasks;
 mod witness;
@@ -17,8 +18,9 @@ pub use footing::Footings;
 pub use memory::{Memory, MemoryQuery, NewAssertion, Recorded};
 pub use plan::{Applied, Drift, Placed, Plans};
 pub use recall::{Recall, RecallReason, Recalled};
+pub use recusal::Recusals;
 pub use scope::{OnConflict, Scopes};
-pub use tasks::{Claim, Dispatch, Subtask, SweepOutcome, Tasks};
+pub use tasks::{Claim, Dispatch, Finished, Subtask, SweepOutcome, Tasks};
 pub use witness::{Baseline, Witnessed};
 
 /// Pattern validation, shared with the plan format so a plan file is refused

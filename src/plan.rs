@@ -90,6 +90,14 @@ pub struct PlanTask {
     /// Names of the tasks in this plan that must finish first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub needs: Vec<String>,
+    /// When this task finishes, file a review of what it changed, barred to
+    /// the harness that changed it.
+    ///
+    /// A plan is where this belongs: which work is worth a second pair of eyes
+    /// is a judgement about the shape of the job, made once, in the file you
+    /// commit next to the code.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub review: bool,
 }
 
 fn is_default_priority(priority: &i64) -> bool {

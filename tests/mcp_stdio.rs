@@ -929,3 +929,128 @@ fn memory_without_a_footing_says_nothing_about_standing() {
         codex.shutdown();
     }
 }
+
+// ------------------------------------------------- no agent reviews its own work
+
+/// The whole point of running three models on one codebase, made to happen by
+/// itself: work marked for review finishes, files its own review scoped to
+/// exactly what moved, and the agent that wrote it is refused — not by
+/// convention, by the queue, in the same transaction as the claim.
+#[test]
+fn work_marked_for_review_is_handed_to_a_different_harness() {
+    let sandbox = Sandbox::new();
+    sandbox.write_file("src/config.rs", "fn load() {}\n");
+    sandbox.git_init();
+    sandbox.run(&[
+        "add",
+        "Port the config loader",
+        "--review",
+        "--path",
+        "src/config.rs",
+    ]);
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex
+        .call("task_claim", json!({"seq": 1, "paths": ["src/config.rs"]}))
+        .unwrap();
+    sandbox.write_file("src/config.rs", "fn load() { ported() }\n");
+    let done = codex
+        .call(
+            "task_complete",
+            json!({"seq": 1, "result": "ported it; env still wins"}),
+        )
+        .unwrap();
+    let review = done["review_filed"].as_i64().expect("a review was filed");
+    assert!(
+        done["advice"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("another harness"),
+        "{done}"
+    );
+
+    // Codex cannot take it, and is told why in a sentence it can relay.
+    let refused = codex
+        .call("task_claim", json!({"seq": review}))
+        .unwrap_err();
+    assert!(refused.contains("codex"), "{refused}");
+    assert!(refused.contains("a different harness"), "{refused}");
+
+    // Nor by asking for "whatever is workable" — dispatch routes around it
+    // rather than handing out something it will then refuse.
+    let next = codex.call("task_next", json!({})).unwrap();
+    assert!(next.get("claimed").is_none(), "{next}");
+    assert_eq!(next["recused"][0]["seq"], review);
+    assert!(
+        next["idle"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("another harness"),
+        "{next}"
+    );
+
+    // Claude Code can, and arrives knowing what to read and what not to trust.
+    let mut claude = McpSession::start(&sandbox, "claude-code");
+    let claimed = claude.call("task_claim", json!({"seq": review})).unwrap();
+    assert_eq!(claimed["title"], "Review: Port the config loader");
+    assert_eq!(claimed["paths"], json!(["src/config.rs"]));
+    let body = claimed["body"].as_str().unwrap_or_default();
+    assert!(body.contains("ported it; env still wins"), "{body}");
+    assert!(body.contains("src/config.rs (modified)"), "{body}");
+    assert!(body.contains("not the summary"), "{body}");
+
+    codex.shutdown();
+    claude.shutdown();
+}
+
+/// A queue whose only remaining work is a review of your own code is not an
+/// idle queue. Saying "nothing to do" would send the human away from the one
+/// thing that needs them.
+#[test]
+fn a_recused_queue_says_it_needs_another_harness_rather_than_nothing() {
+    let sandbox = Sandbox::new();
+    sandbox.write_file("src/config.rs", "fn load() {}\n");
+    sandbox.git_init();
+    sandbox.run(&[
+        "add",
+        "Port the loader",
+        "--review",
+        "--path",
+        "src/config.rs",
+    ]);
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex.call("task_next", json!({})).unwrap();
+    sandbox.write_file("src/config.rs", "fn load() { ported() }\n");
+    codex
+        .call("task_complete", json!({"seq": 1, "result": "ported"}))
+        .unwrap();
+
+    let next = codex.call("task_next", json!({})).unwrap();
+    let idle = next["idle"].as_str().unwrap_or_default();
+    assert!(idle.contains("review of work this harness did"), "{idle}");
+    assert!(idle.contains("waiting will not change it"), "{idle}");
+
+    codex.shutdown();
+}
+
+/// Nothing is filed for work nobody asked to have reviewed, so a queue that
+/// never uses the flag behaves exactly as it did before any of this existed.
+#[test]
+fn unreviewed_work_finishes_the_way_it_always_did() {
+    let sandbox = Sandbox::new();
+    sandbox.write_file("src/config.rs", "fn load() {}\n");
+    sandbox.git_init();
+    sandbox.run(&["add", "Port the loader", "--path", "src/config.rs"]);
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex.call("task_claim", json!({"seq": 1})).unwrap();
+    sandbox.write_file("src/config.rs", "fn load() { ported() }\n");
+    let done = codex
+        .call("task_complete", json!({"seq": 1, "result": "ported"}))
+        .unwrap();
+    assert!(done.get("review_filed").is_none(), "{done}");
+    assert_eq!(sandbox.run(&["ls"]).lines().count(), 1);
+
+    codex.shutdown();
+}

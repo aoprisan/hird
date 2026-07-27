@@ -121,7 +121,15 @@ fn render_column(frame: &mut Frame, area: Rect, app: &App, column: Column, now: 
     let width = area.width.saturating_sub(4) as usize;
     let items: Vec<ListItem> = tasks
         .iter()
-        .map(|task| ListItem::new(task_card(task, width, now, app.blocked_by(task.seq))))
+        .map(|task| {
+            ListItem::new(task_card(
+                task,
+                width,
+                now,
+                app.blocked_by(task.seq),
+                app.reviews.get(&task.seq).copied(),
+            ))
+        })
         .collect();
 
     let mut state = ListState::default();
@@ -143,6 +151,7 @@ fn task_card(
     width: usize,
     now: DateTime<Utc>,
     blocked_by: &[i64],
+    reviews: Option<i64>,
 ) -> Text<'static> {
     let marker = match task.priority {
         p if p > 0 => Span::styled(format!("▲{p} "), Style::default().yellow()),
@@ -198,6 +207,18 @@ fn task_card(
                     .join(" ")
             ),
             theme::blocked_style(),
+        ));
+    }
+    // A review looks like any other open task until you know what it is, and
+    // what it is decides who can take it — which is exactly the thing a human
+    // scanning the board needs to see without opening the card.
+    if let Some(reviewed) = reviews {
+        if !badges.is_empty() {
+            badges.push(Span::raw("  "));
+        }
+        badges.push(Span::styled(
+            format!("reviews #{reviewed}"),
+            Style::default().magenta(),
         ));
     }
     if !badges.is_empty() {
@@ -774,6 +795,18 @@ fn render_task_detail(
         lines.push(Line::from(vec![
             Span::styled("files      ", theme::focus_style()),
             Span::raw(readiness.paths.join(", ")),
+        ]));
+    }
+    if task.review {
+        lines.push(Line::from(vec![
+            Span::styled("review     ", theme::focus_style()),
+            Span::raw("on finishing, by another harness".to_string()),
+        ]));
+    }
+    for recusal in &readiness.recusals {
+        lines.push(Line::from(vec![
+            Span::styled("recused    ", Style::default().magenta()),
+            Span::styled(recusal.describe(), Style::default().magenta()),
         ]));
     }
     for conflict in &readiness.conflicts {

@@ -19,7 +19,7 @@ use crate::error::Error;
 use crate::footing;
 use crate::identity::{self, AgentId};
 use crate::model::{
-    Assertion, Blocker, Conflict, Contention, Observed, Standing, Status, Task, TaskEvent,
+    Assertion, Blocker, Conflict, Contention, Observed, Recusal, Standing, Status, Task, TaskEvent,
     TaskSummary,
 };
 use crate::repo::{Claim, Dispatch, MemoryQuery, NewAssertion, ProjectScope, Recalled, Subtask};
@@ -220,6 +220,14 @@ impl HirdMcp {
              \n\
              Tasks can depend on other tasks. A task whose dependencies are unfinished \
              cannot be claimed, and the refusal names what it is waiting for.\n\
+             \n\
+             Some tasks are reviews, and a review is barred to the harness whose work it \
+             reviews — including this one. If a claim comes back saying the task is recused, \
+             that is not a race you can retry: relay it to the human, who needs to point a \
+             different tool at it. When a task you finish was marked for review, the answer \
+             names the review it filed; say that number out loud too. You are not being \
+             distrusted, you are being read by somebody who was not in the room, which is \
+             the whole reason the human is running more than one of us.\n\
              \n\
              Memory: `mem_store` durable facts you learn — where something lives, why a \
              decision was made, what a command is — one assertion per call, in plain prose \
@@ -506,6 +514,12 @@ struct TaskDetail {
     /// Overlaps between those files and work other agents hold right now.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     overlaps: Vec<String>,
+    /// Who cannot claim this task, and why. Present on reviews.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    recused_from: Vec<String>,
+    /// True when finishing this task will file a review of what it changed.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    review_on_finish: bool,
     /// What earlier work in the same territory learned. Read before exploring.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     recalled: Vec<RecallRow>,
@@ -541,6 +555,7 @@ struct TaskContext {
     blocks: Vec<i64>,
     paths: Vec<String>,
     conflicts: Vec<Conflict>,
+    recusals: Vec<Recusal>,
     recalled: Vec<Recalled>,
     witness: Evidence,
     events: Vec<TaskEvent>,
@@ -569,6 +584,8 @@ impl TaskDetail {
             blocks: context.blocks,
             paths: context.paths,
             overlaps: describe_all(&context.conflicts),
+            recused_from: context.recusals.iter().map(Recusal::describe).collect(),
+            review_on_finish: task.review,
             recalled: recall_rows(context.recalled),
             witness: context.witness,
             events: context.events.into_iter().map(EventRow::from).collect(),
@@ -731,12 +748,23 @@ struct NextResult {
     /// Ready tasks passed over because another agent is in their files.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     deferred: Vec<DeferredRow>,
+    /// Ready tasks this harness is barred from, and why. Usually a review of
+    /// work this harness did: say so to the human, because the task is waiting
+    /// for a different tool and not for time to pass.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    recused: Vec<RecusedRow>,
 }
 
 #[derive(Debug, Serialize)]
 struct DeferredRow {
     seq: i64,
     overlaps: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct RecusedRow {
+    seq: i64,
+    why: String,
 }
 
 impl NextResult {
@@ -761,26 +789,51 @@ impl NextResult {
                     overlaps: describe_all(&conflicts),
                 })
                 .collect(),
+            recused: dispatch
+                .recused
+                .into_iter()
+                .map(|(seq, recusal)| RecusedRow {
+                    seq,
+                    why: recusal.describe(),
+                })
+                .collect(),
         }
     }
 }
 
 /// Why the queue had nothing to hand out, in the terms the agent can act on.
 fn idle_reason(dispatch: &Dispatch) -> String {
+    // Named first when it is the only thing left, because it is the only one of
+    // the three that waiting will not fix: a review of this harness's own work
+    // stays unclaimable until somebody opens a different tool.
+    let recused = dispatch.recused.len();
+    if recused > 0 && dispatch.blocked.is_empty() && dispatch.deferred.is_empty() {
+        return format!(
+            "{recused} task{} ready, but every one of them is a review of work this harness \
+             did — they need an agent in another harness. Tell the human; waiting will not \
+             change it",
+            plural(recused, " is", "s are")
+        );
+    }
+    let tail = if recused > 0 {
+        format!(", and {recused} that this harness is recused from (they need another harness)")
+    } else {
+        String::new()
+    };
     match (dispatch.blocked.len(), dispatch.deferred.len()) {
-        (0, 0) => "nothing is open in this project; the queue is empty".to_string(),
+        (0, 0) => format!("nothing is open in this project; the queue is empty{tail}"),
         (0, n) => format!(
             "{n} task{} ready, but every one of them touches files another agent is \
-             working right now; try again once they finish",
+             working right now; try again once they finish{tail}",
             plural(n, " is", "s are")
         ),
         (n, 0) => format!(
-            "{n} task{} open, but all of them are waiting on unfinished dependencies",
+            "{n} task{} open, but all of them are waiting on unfinished dependencies{tail}",
             plural(n, " is", "s are")
         ),
         (blocked, deferred) => format!(
             "nothing is workable: {blocked} task{} waiting on dependencies and \
-             {deferred} overlapping files another agent is in",
+             {deferred} overlapping files another agent is in{tail}",
             plural(blocked, " is", "s are")
         ),
     }
@@ -913,18 +966,40 @@ struct FinishResult {
     /// as `result` — that is the agent's own account of itself.
     #[serde(flatten)]
     witness: Evidence,
+    /// The review task this completion filed, if the work was marked for one.
+    /// It is scoped to the files that moved and recused from your harness, so
+    /// another agent will pick it up. Tell the human its number.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review_filed: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     advice: Option<String>,
 }
 
 impl FinishResult {
-    fn new(seq: i64, status: Status, result: String, witness: Evidence) -> FinishResult {
+    fn new(
+        seq: i64,
+        status: Status,
+        result: String,
+        witness: Evidence,
+        review_filed: Option<i64>,
+    ) -> FinishResult {
+        // A filed review outranks the witness's advice: it is the thing the
+        // agent has to say out loud, and it is about to stop being this
+        // agent's business entirely.
+        let advice = match review_filed {
+            Some(review) => Some(format!(
+                "this work was marked for review, so task {review} is now open for an agent in \
+                 another harness — you cannot take it yourself. Tell the human."
+            )),
+            None => witness.advice(),
+        };
         FinishResult {
             seq,
             status,
             result,
-            advice: witness.advice(),
+            advice,
             witness,
+            review_filed,
         }
     }
 }
@@ -1073,6 +1148,7 @@ impl HirdMcp {
                         .collect(),
                     paths: db.scopes().for_task(args.seq)?,
                     conflicts,
+                    recusals: db.recusals().for_task(args.seq)?,
                     recalled: self.recall(db, args.seq, recall_limit),
                     witness: self.evidence(db, args.seq),
                     events: db.tasks().events(&task.id, EVENT_WINDOW)?,
@@ -1279,6 +1355,8 @@ impl HirdMcp {
             task.status,
             args.reason.trim().to_string(),
             evidence,
+            // Releasing is not finishing, so nothing is filed to review.
+            None,
         ))
     }
 
@@ -1350,10 +1428,11 @@ impl HirdMcp {
             })
             .map_err(stringify)?;
         json(&FinishResult::new(
-            task.seq,
-            task.status,
-            task.result.unwrap_or_default(),
+            task.task.seq,
+            task.task.status,
+            task.task.result.unwrap_or_default(),
             evidence,
+            task.review,
         ))
     }
 
@@ -1373,10 +1452,11 @@ impl HirdMcp {
             })
             .map_err(stringify)?;
         json(&FinishResult::new(
-            task.seq,
-            task.status,
-            task.result.unwrap_or_default(),
+            task.task.seq,
+            task.task.status,
+            task.task.result.unwrap_or_default(),
             evidence,
+            task.review,
         ))
     }
 
