@@ -11,7 +11,7 @@ use crate::config::Config;
 use crate::db::Db;
 use crate::glob;
 use crate::identity::ACTOR_TUI;
-use crate::model::{Assertion, Blocker, Conflict, Status, Task, TaskEvent, TaskSummary};
+use crate::model::{Assertion, Blocker, Conflict, Standing, Status, Task, TaskEvent, TaskSummary};
 use crate::repo::{dispatch_waves, MemoryQuery, ProjectScope, Recalled};
 
 /// How often the database is re-read.
@@ -212,6 +212,15 @@ pub struct App {
     pub memory_total: i64,
     pub query: String,
     pub include_superseded: bool,
+    /// Show only the assertions whose footing has moved — the ones a re-read
+    /// would actually pay for.
+    pub shaky_only: bool,
+    /// Assertion id to how its footing compares with the tree right now.
+    /// Empty wherever there is no witness, which is why every reader treats a
+    /// missing entry as "nothing to say" rather than as "firm".
+    pub standings: BTreeMap<String, Standing>,
+    /// Assertion id to who has stated it, when more than one agent has.
+    pub voices: BTreeMap<String, String>,
     pub memory_selected: usize,
     /// Task id to human-facing number, for the "learned on #7" badge.
     pub task_seqs: BTreeMap<String, i64>,
@@ -248,6 +257,9 @@ impl App {
             memory_total: 0,
             query: String::new(),
             include_superseded: false,
+            shaky_only: false,
+            standings: BTreeMap::new(),
+            voices: BTreeMap::new(),
             memory_selected: 0,
             task_seqs: BTreeMap::new(),
             last_poll: DateTime::from_timestamp(0, 0).unwrap_or_default(),
@@ -271,6 +283,17 @@ impl App {
         }
         self.last_look = now;
         let _ = crate::witness::sweep(db, witness, &self.project, ACTOR_TUI);
+    }
+
+    /// The witness memory may read the tree through, if the configuration
+    /// lets it.
+    pub fn footing(&self) -> Option<&crate::witness::Witness> {
+        self.config.footing(self.witness.as_ref())
+    }
+
+    /// How the assertion's footing compares with the tree, if hird knows.
+    pub fn standing(&self, assertion: &Assertion) -> Option<&Standing> {
+        self.standings.get(&assertion.id)
     }
 
     pub fn scope(&self) -> ProjectScope {
@@ -307,6 +330,23 @@ impl App {
                 .limit(MEMORY_PAGE)
                 .include_superseded(self.include_superseded),
         )?;
+        // Reading the footing costs one hash per distinct anchored file, and
+        // the poll runs twice a second — so it is deliberately kept to the page
+        // on screen rather than the whole memory.
+        let ids: Vec<String> = self.assertions.iter().map(|a| a.id.clone()).collect();
+        self.standings = crate::footing::standings(db, self.footing(), &ids);
+        if self.shaky_only {
+            let standings = &self.standings;
+            self.assertions
+                .retain(|a| standings.get(&a.id).is_some_and(Standing::needs_checking));
+        }
+        self.voices = self
+            .assertions
+            .iter()
+            .filter_map(|a| {
+                crate::footing::corroboration(db, a).map(|sentence| (a.id.clone(), sentence))
+            })
+            .collect();
         self.memory_total = db.memory().count_current(&scope)?;
         self.task_seqs = db.tasks().seq_index()?;
         self.last_poll = Utc::now();
@@ -527,6 +567,23 @@ impl App {
                     "including superseded assertions".to_string()
                 } else {
                     "showing current assertions only".to_string()
+                });
+            }
+            KeyCode::Char('f') if self.footing().is_none() => {
+                self.warn(
+                    "no footing in this project — assertions are only anchored to files in a \
+                     git checkout with `memory_footing` on"
+                        .to_string(),
+                );
+            }
+            KeyCode::Char('f') => {
+                self.shaky_only = !self.shaky_only;
+                self.memory_selected = 0;
+                self.refresh(db)?;
+                self.note(if self.shaky_only {
+                    "showing only assertions whose files have moved".to_string()
+                } else {
+                    "showing every assertion".to_string()
                 });
             }
             KeyCode::Enter => {

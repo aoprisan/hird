@@ -699,3 +699,230 @@ fn the_witness_can_be_switched_off_in_the_configuration() {
 
     codex.shutdown();
 }
+
+// ------------------------------------------------- the footing under a fact
+
+/// The failure this feature exists for, end to end and over the wire.
+///
+/// One agent learns something about a file and writes it down. Somebody else
+/// rewrites that file. A third agent picks up work in the same territory and is
+/// handed the fact — and, because hird recorded what the fact was read off, is
+/// told in the same breath that the ground under it has moved. Without this the
+/// third agent gets a confident sentence about code that no longer exists, with
+/// nothing in the payload to suggest it should look.
+#[test]
+fn a_fact_arrives_marked_shaky_once_its_file_has_been_rewritten() {
+    let sandbox = Sandbox::new();
+    sandbox.write_file("src/config.rs", "fn load() { env_first() }\n");
+    sandbox.git_init();
+    sandbox.run(&["add", "port the config loader", "--path", "src/config.rs"]);
+    sandbox.run(&["add", "audit the config loader", "--path", "src/config.rs"]);
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex
+        .call("task_claim", json!({"seq": 1, "paths": ["src/config.rs"]}))
+        .unwrap();
+    let stored = codex
+        .call(
+            "mem_store",
+            json!({
+                "content": "the loader reads the env var before the file",
+                "task_seq": 1,
+            }),
+        )
+        .unwrap();
+    assert_eq!(stored["anchored_to"], json!(["src/config.rs"]));
+    codex
+        .call("task_complete", json!({"seq": 1, "result": "ported"}))
+        .unwrap();
+
+    // While the fact is on file, the file it describes still says what it said.
+    let firm = codex
+        .call("mem_search", json!({"query": "loader"}))
+        .unwrap();
+    assert_eq!(firm["assertions"][0]["standing"], "firm");
+
+    // Somebody rewrites it.
+    sandbox.write_file("src/config.rs", "fn load() { file_first() }\n");
+
+    let shaky = codex
+        .call("mem_search", json!({"query": "loader"}))
+        .unwrap();
+    assert_eq!(shaky["assertions"][0]["standing"], "shaky");
+    let footing = shaky["assertions"][0]["footing"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(footing.contains("src/config.rs"), "{footing}");
+    assert!(footing.contains("re-read"), "{footing}");
+
+    // And the next agent to work those files is told without having to ask.
+    let mut claude = McpSession::start(&sandbox, "claude-code");
+    let claim = claude
+        .call("task_claim", json!({"seq": 2, "paths": ["src/config.rs"]}))
+        .unwrap();
+    let recalled = &claim["recalled"][0];
+    assert_eq!(
+        recalled["content"],
+        "the loader reads the env var before the file"
+    );
+    assert_eq!(recalled["standing"], "shaky");
+    assert!(
+        recalled["caution"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("re-read"),
+        "{recalled}"
+    );
+
+    codex.shutdown();
+    claude.shutdown();
+}
+
+/// The way back. An agent that checks a shaky fact and finds it still true has
+/// only one way to say so — say it again — and saying it again must not fork
+/// the memory. It re-anchors the original and records a second voice, and
+/// because the two agents are in different harnesses hird can say that.
+#[test]
+fn restating_a_shaky_fact_makes_it_firm_again_and_records_a_second_voice() {
+    let sandbox = Sandbox::new();
+    sandbox.write_file("src/config.rs", "fn load() { env_first() }\n");
+    sandbox.git_init();
+    sandbox.run(&["add", "port the loader", "--path", "src/config.rs"]);
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex
+        .call("task_claim", json!({"seq": 1, "paths": ["src/config.rs"]}))
+        .unwrap();
+    let first = codex
+        .call(
+            "mem_store",
+            json!({"content": "env beats the config file", "task_seq": 1}),
+        )
+        .unwrap();
+    let id = first["id"].as_str().unwrap().to_string();
+    assert_eq!(first["affirmed"], json!(null), "nothing to affirm yet");
+    codex
+        .call("task_complete", json!({"seq": 1, "result": "ported"}))
+        .unwrap();
+
+    sandbox.write_file("src/config.rs", "fn load() { env_first(); /* tidied */ }\n");
+    let shaky = codex.call("mem_search", json!({"query": "env"})).unwrap();
+    assert_eq!(shaky["assertions"][0]["standing"], "shaky");
+
+    // A different harness reads the file, finds the fact still holds, says so.
+    let mut claude = McpSession::start(&sandbox, "claude-code");
+    let again = claude
+        .call(
+            "mem_store",
+            json!({"content": "env beats the config file", "paths": ["src/config.rs"]}),
+        )
+        .unwrap();
+    assert_eq!(again["affirmed"], true);
+    assert_eq!(again["id"], id, "one fact, not two");
+    let voices = again["corroboration"].as_str().unwrap_or_default();
+    assert!(voices.contains("2 harnesses"), "{voices}");
+
+    let firm = claude.call("mem_search", json!({"query": "env"})).unwrap();
+    assert_eq!(firm["count"], 1);
+    assert_eq!(firm["assertions"][0]["standing"], "firm");
+
+    codex.shutdown();
+    claude.shutdown();
+}
+
+/// A task that records a fact and then keeps editing the same file would, left
+/// alone, mark its own fact shaky by its own hand. Finishing settles it against
+/// the tree the task is leaving behind, so `shaky` keeps meaning "somebody else
+/// moved this" — which is the only reading worth a warning.
+#[test]
+fn a_task_settles_its_own_facts_when_it_finishes() {
+    let sandbox = Sandbox::new();
+    sandbox.write_file("src/config.rs", "fn load() {}\n");
+    sandbox.git_init();
+    sandbox.run(&["add", "port the loader", "--path", "src/config.rs"]);
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex
+        .call("task_claim", json!({"seq": 1, "paths": ["src/config.rs"]}))
+        .unwrap();
+    codex
+        .call(
+            "mem_store",
+            json!({"content": "the loader has one entry point", "task_seq": 1}),
+        )
+        .unwrap();
+    // The agent carries on working, as agents do.
+    sandbox.write_file("src/config.rs", "fn load() { /* now with a body */ }\n");
+    let midway = codex
+        .call("mem_search", json!({"query": "loader"}))
+        .unwrap();
+    assert_eq!(midway["assertions"][0]["standing"], "shaky");
+
+    codex
+        .call("task_complete", json!({"seq": 1, "result": "ported"}))
+        .unwrap();
+    let after = codex
+        .call("mem_search", json!({"query": "loader"}))
+        .unwrap();
+    assert_eq!(
+        after["assertions"][0]["standing"], "firm",
+        "the task's own edits are not somebody else's drift"
+    );
+
+    codex.shutdown();
+}
+
+/// Outside git, and with the footing switched off, memory answers exactly as it
+/// did before any of this existed — and the handshake does not promise a model
+/// a `standing` field that nothing will ever set.
+#[test]
+fn memory_without_a_footing_says_nothing_about_standing() {
+    for (label, setup) in [("no git", false), ("switched off", true)] {
+        let sandbox = Sandbox::new();
+        if setup {
+            sandbox.git_init();
+            sandbox.write_config("memory_footing = false\n");
+        }
+        sandbox.write_file("src/config.rs", "fn load() {}\n");
+        sandbox.run(&["add", "port the loader", "--path", "src/config.rs"]);
+
+        let mut codex = McpSession::start(&sandbox, "codex");
+        let instructions = codex.request(
+            "initialize",
+            json!({
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "integration-test", "version": "0"},
+            }),
+        )["result"]["instructions"]
+            .as_str()
+            .expect("instructions")
+            .to_string();
+        assert!(
+            !instructions.contains("standing"),
+            "{label}: a model must not be told about a field nothing will populate"
+        );
+
+        codex
+            .call("task_claim", json!({"seq": 1, "paths": ["src/config.rs"]}))
+            .unwrap();
+        let stored = codex
+            .call(
+                "mem_store",
+                json!({"content": "the loader has one entry point", "task_seq": 1}),
+            )
+            .unwrap();
+        assert!(stored.get("anchored_to").is_none(), "{label}: {stored}");
+        sandbox.write_file("src/config.rs", "fn load() { changed() }\n");
+        let found = codex
+            .call("mem_search", json!({"query": "loader"}))
+            .unwrap();
+        assert_eq!(found["count"], 1, "{label}");
+        assert!(
+            found["assertions"][0].get("standing").is_none(),
+            "{label}: {found}"
+        );
+
+        codex.shutdown();
+    }
+}

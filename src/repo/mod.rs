@@ -4,6 +4,7 @@
 //! own — see the quality bar in DESIGN.md §11.
 
 mod deps;
+pub(crate) mod footing;
 mod memory;
 mod plan;
 mod recall;
@@ -12,7 +13,8 @@ mod tasks;
 mod witness;
 
 pub use deps::{dispatch_waves, Deps};
-pub use memory::{Memory, MemoryQuery, NewAssertion};
+pub use footing::Footings;
+pub use memory::{Memory, MemoryQuery, NewAssertion, Recorded};
 pub use plan::{Applied, Drift, Placed, Plans};
 pub use recall::{Recall, RecallReason, Recalled};
 pub use scope::{OnConflict, Scopes};

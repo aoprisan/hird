@@ -700,3 +700,131 @@ fn agents_work_a_filed_plan_the_way_they_work_anything_else() {
     claude.shutdown();
     copilot.shutdown();
 }
+
+// ------------------------------------------------- the footing under a fact
+
+/// The human's audit of what the memory still stands on.
+///
+/// Three facts, three fates: one whose file is untouched, one whose file was
+/// rewritten, one whose file was deleted. The board has to sort them without
+/// anybody having curated anything, and `--shaky` has to leave only the ones
+/// worth a re-read.
+#[test]
+fn the_standing_audit_sorts_the_memory_by_whether_its_ground_has_moved() {
+    let sandbox = Sandbox::new();
+    sandbox.write_file("src/config.rs", "fn load() {}\n");
+    sandbox.write_file("src/db.rs", "fn open() {}\n");
+    sandbox.write_file("src/gone.rs", "fn doomed() {}\n");
+    sandbox.git_init();
+
+    sandbox.run(&[
+        "mem",
+        "add",
+        "the loader has one entry point",
+        "--path",
+        "src/config.rs",
+    ]);
+    sandbox.run(&["mem", "add", "the db opens lazily", "--path", "src/db.rs"]);
+    sandbox.run(&["mem", "add", "doomed does nothing", "--path", "src/gone.rs"]);
+
+    let all_firm = sandbox.run(&["mem", "standing"]);
+    assert!(all_firm.contains("3 anchored: 3 firm"), "{all_firm}");
+    assert!(
+        sandbox
+            .run(&["mem", "standing", "--shaky"])
+            .contains("nothing shaky"),
+        "nothing has moved yet"
+    );
+
+    sandbox.write_file("src/db.rs", "fn open() { eagerly() }\n");
+    std::fs::remove_file(sandbox.project().join("src/gone.rs")).unwrap();
+
+    let audit = sandbox.run(&["mem", "standing"]);
+    assert!(audit.contains("3 anchored:"), "{audit}");
+    assert!(audit.contains("1 firm"), "{audit}");
+    assert!(audit.contains("1 shaky"), "{audit}");
+    assert!(audit.contains("1 orphaned"), "{audit}");
+
+    let shaky = sandbox.run(&["mem", "standing", "--shaky"]);
+    assert!(shaky.contains("the db opens lazily"), "{shaky}");
+    assert!(shaky.contains("doomed does nothing"), "{shaky}");
+    assert!(
+        !shaky.contains("the loader has one entry point"),
+        "an unmoved fact is not worth a re-read:\n{shaky}"
+    );
+    assert!(shaky.contains("no longer exists"), "{shaky}");
+}
+
+/// Searching says the same thing the audit does, in one word, so a human
+/// scanning results sees which line to distrust without opening anything.
+#[test]
+fn search_marks_the_results_whose_files_have_moved() {
+    let sandbox = Sandbox::new();
+    sandbox.write_file("src/config.rs", "fn load() {}\n");
+    sandbox.git_init();
+    sandbox.run(&[
+        "mem",
+        "add",
+        "the loader is lazy",
+        "--path",
+        "src/config.rs",
+    ]);
+
+    assert!(sandbox.run(&["mem", "search", "loader"]).contains("firm"));
+    sandbox.write_file("src/config.rs", "fn load() { eager() }\n");
+    let moved = sandbox.run(&["mem", "search", "loader"]);
+    assert!(moved.contains("shaky"), "{moved}");
+    assert!(moved.contains("re-read before relying on it"), "{moved}");
+}
+
+/// Saying a fact again is how anyone — agent or human — says "I checked".
+#[test]
+fn restating_a_fact_from_the_command_line_affirms_it_rather_than_duplicating() {
+    let sandbox = Sandbox::new();
+    sandbox.write_file("src/config.rs", "fn load() {}\n");
+    sandbox.git_init();
+    let first = sandbox.run(&[
+        "mem",
+        "add",
+        "the loader is lazy",
+        "--path",
+        "src/config.rs",
+    ]);
+    let id = first.lines().next().unwrap().to_string();
+
+    sandbox.write_file("src/config.rs", "fn load() { /* tidied */ }\n");
+    assert!(sandbox
+        .run(&["mem", "standing", "--shaky"])
+        .contains("the loader is lazy"));
+
+    let again = sandbox.run(&[
+        "mem",
+        "add",
+        "the loader is lazy",
+        "--path",
+        "src/config.rs",
+    ]);
+    assert!(again.starts_with(&id), "one fact, not two:\n{again}");
+    assert!(again.contains("affirmed, not duplicated"), "{again}");
+    assert!(again.contains("re-anchored"), "{again}");
+    assert!(
+        sandbox
+            .run(&["mem", "standing", "--shaky"])
+            .contains("nothing shaky"),
+        "checking a fact is what puts it back on solid ground"
+    );
+    assert!(sandbox
+        .run(&["mem", "standing"])
+        .contains("1 anchored: 1 firm"));
+}
+
+/// Outside git there is no footing, and the audit says so plainly rather than
+/// printing an empty list that reads like "your memory is fine".
+#[test]
+fn the_standing_audit_outside_git_says_there_is_nothing_to_stand_on() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["mem", "add", "the loader is lazy"]);
+    let out = sandbox.run(&["mem", "standing"]);
+    assert!(out.contains("no footing here"), "{out}");
+    assert!(out.contains("git checkout"), "{out}");
+}

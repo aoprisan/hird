@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::Connection;
 
 use crate::error::Result;
-use crate::repo::{Deps, Memory, Plans, Recall, Scopes, Tasks, Witnessed};
+use crate::repo::{Deps, Footings, Memory, Plans, Recall, Scopes, Tasks, Witnessed};
 
 /// Numbered migrations, applied in order and recorded in `meta.schema_version`.
 const MIGRATIONS: &[&str] = &[
@@ -137,6 +137,26 @@ CREATE TABLE task_plan_nodes (
   UNIQUE (project, plan, node)
 );
 "#,
+    // 5 — the footing under an assertion: the files it was read off, the
+    //     versions they were in, and everyone who has said it since
+    r#"
+CREATE TABLE assertion_footing (
+  assertion_id TEXT NOT NULL REFERENCES assertions(id),
+  path         TEXT NOT NULL,
+  hash         TEXT NOT NULL DEFAULT '',
+  at           TEXT NOT NULL,
+  PRIMARY KEY (assertion_id, path)
+);
+
+CREATE INDEX idx_assertion_footing_path ON assertion_footing(path);
+
+CREATE TABLE assertion_affirmations (
+  assertion_id TEXT NOT NULL REFERENCES assertions(id),
+  actor        TEXT NOT NULL,
+  at           TEXT NOT NULL,
+  PRIMARY KEY (assertion_id, actor)
+);
+"#,
 ];
 
 /// An open connection to the hird database.
@@ -224,6 +244,11 @@ impl Db {
     /// What the working tree was seen to do while tasks were held.
     pub fn witnessed(&self) -> Witnessed<'_> {
         Witnessed::new(&self.conn)
+    }
+
+    /// What assertions were learned against, and who else has said them.
+    pub fn footings(&self) -> Footings<'_> {
+        Footings::new(&self.conn)
     }
 
     /// The memory relevant to a task, derived from the other three.

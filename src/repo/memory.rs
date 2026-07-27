@@ -54,6 +54,34 @@ impl<'a> MemoryQuery<'a> {
     }
 }
 
+/// What [`Memory::record`] did with an assertion it was handed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Recorded {
+    /// Nothing like it was on file, so it is now.
+    Fresh(Assertion),
+    /// It was already on file, word for word, and this actor has now said it
+    /// too. The returned assertion is the original, id and provenance intact.
+    Affirmed(Assertion),
+}
+
+impl Recorded {
+    pub fn assertion(&self) -> &Assertion {
+        match self {
+            Recorded::Fresh(a) | Recorded::Affirmed(a) => a,
+        }
+    }
+
+    pub fn into_assertion(self) -> Assertion {
+        match self {
+            Recorded::Fresh(a) | Recorded::Affirmed(a) => a,
+        }
+    }
+
+    pub fn was_affirmed(&self) -> bool {
+        matches!(self, Recorded::Affirmed(_))
+    }
+}
+
 /// Repository over `assertions` and its FTS5 index.
 pub struct Memory<'a> {
     conn: &'a Connection,
@@ -113,6 +141,52 @@ impl<'a> Memory<'a> {
         )?;
         tx.commit()?;
         Ok(assertion)
+    }
+
+    /// Store an assertion, or affirm the one that already says it.
+    ///
+    /// This is what every front end calls, and [`Memory::store`] is the half of
+    /// it that only ever inserts. The difference is the whole re-grounding
+    /// loop: an agent that checks a fact and finds it still true has no way to
+    /// say so except by saying the fact again, and it should not have to know
+    /// that. So restating an existing assertion word for word does not
+    /// duplicate it — it records this actor as another voice for it, and the
+    /// caller re-anchors it to the tree as it stands now. A fact that keeps
+    /// being rediscovered keeps being current, without anybody curating
+    /// anything.
+    ///
+    /// Word for word is the deliberate bar. Two sentences that mean the same
+    /// thing are a judgement call, and a memory store that quietly merges
+    /// things a model thought were similar is a memory store that loses facts.
+    pub fn record(&self, new: NewAssertion<'_>) -> Result<Recorded> {
+        let content = new.content.trim();
+        if let Some(existing) = self.identical(new.project, content)? {
+            super::footing::Footings::new(self.conn).affirm(&existing.id, new.actor)?;
+            return Ok(Recorded::Affirmed(existing));
+        }
+        self.store(new).map(Recorded::Fresh)
+    }
+
+    /// The current assertion in `project` whose content is exactly `content`.
+    ///
+    /// Oldest wins, so repeated restatement converges on one row rather than
+    /// splitting the affirmations across near-duplicates.
+    fn identical(&self, project: &str, content: &str) -> Result<Option<Assertion>> {
+        if content.is_empty() {
+            return Ok(None);
+        }
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {ASSERTION_COLUMNS} FROM assertions a
+                     WHERE a.project = ?1 AND a.content = ?2 AND a.superseded_by IS NULL
+                     ORDER BY a.created_at ASC, a.rowid ASC LIMIT 1"
+                ),
+                params![project, content],
+                row_to_assertion,
+            )
+            .optional()?)
     }
 
     /// Fetch one assertion by id.
@@ -602,6 +676,134 @@ mod tests {
             .search(&MemoryQuery::new("widgets", ProjectScope::Only(PROJECT.into())).limit(3))
             .unwrap();
         assert_eq!(hits.len(), 3);
+    }
+
+    /// Restating a fact is how an agent says "I checked, it still holds", and
+    /// it has no other way to say it. So it must not cost the fact its
+    /// provenance, and it must not leave two rows behind.
+    #[test]
+    fn restating_a_fact_word_for_word_affirms_it_rather_than_duplicating_it() {
+        let db = db();
+        let first = db
+            .memory()
+            .record(NewAssertion {
+                project: PROJECT,
+                content: "the loader reads env before the file",
+                tags: "config",
+                actor: "codex:9f2c",
+                task_seq: None,
+            })
+            .unwrap();
+        assert!(!first.was_affirmed());
+
+        let again = db
+            .memory()
+            .record(NewAssertion {
+                project: PROJECT,
+                // Surrounding whitespace is not a different sentence; storing
+                // trims it, so matching has to trim it too.
+                content: "  the loader reads env before the file  ",
+                tags: "",
+                actor: "claude-code:af31",
+                task_seq: None,
+            })
+            .unwrap();
+        assert!(again.was_affirmed());
+        assert_eq!(again.assertion().id, first.assertion().id);
+        assert_eq!(again.assertion().actor, "codex:9f2c", "authorship is kept");
+        assert_eq!(again.assertion().tags, "config", "and so are its tags");
+        assert_eq!(
+            db.memory()
+                .count_current(&ProjectScope::Only(PROJECT.into()))
+                .unwrap(),
+            1
+        );
+
+        let voices = db.footings().voices(again.assertion()).unwrap();
+        assert_eq!(voices.actors, vec!["codex:9f2c", "claude-code:af31"]);
+    }
+
+    /// Two sentences that mean the same thing are a judgement call, and a
+    /// memory that merges on judgement is a memory that loses facts.
+    #[test]
+    fn a_reworded_fact_is_a_new_fact() {
+        let db = db();
+        db.memory()
+            .record(NewAssertion {
+                project: PROJECT,
+                content: "the loader reads env before the file",
+                tags: "",
+                actor: "a:1",
+                task_seq: None,
+            })
+            .unwrap();
+        let reworded = db
+            .memory()
+            .record(NewAssertion {
+                project: PROJECT,
+                content: "env wins over the config file in the loader",
+                tags: "",
+                actor: "b:1",
+                task_seq: None,
+            })
+            .unwrap();
+        assert!(!reworded.was_affirmed());
+        assert_eq!(
+            db.memory()
+                .count_current(&ProjectScope::Only(PROJECT.into()))
+                .unwrap(),
+            2
+        );
+    }
+
+    /// A retracted assertion is not a match: saying it again is asserting it
+    /// afresh, which is a claim somebody may want to argue with, and it should
+    /// not quietly resurrect the row a human struck out.
+    #[test]
+    fn restating_something_superseded_records_it_anew() {
+        let db = db();
+        let original = store(&db, "the api listens on port 8080", "");
+        db.memory()
+            .supersede(&original.id, "the api listens on 9090", "tui")
+            .unwrap();
+
+        let again = db
+            .memory()
+            .record(NewAssertion {
+                project: PROJECT,
+                content: "the api listens on port 8080",
+                tags: "",
+                actor: "codex:9f2c",
+                task_seq: None,
+            })
+            .unwrap();
+        assert!(!again.was_affirmed());
+        assert_ne!(again.assertion().id, original.id);
+    }
+
+    #[test]
+    fn the_same_sentence_in_another_project_is_another_fact() {
+        let db = db();
+        db.memory()
+            .record(NewAssertion {
+                project: PROJECT,
+                content: "the build uses just",
+                tags: "",
+                actor: "a:1",
+                task_seq: None,
+            })
+            .unwrap();
+        let elsewhere = db
+            .memory()
+            .record(NewAssertion {
+                project: "/other",
+                content: "the build uses just",
+                tags: "",
+                actor: "a:1",
+                task_seq: None,
+            })
+            .unwrap();
+        assert!(!elsewhere.was_affirmed());
     }
 
     #[test]

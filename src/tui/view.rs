@@ -11,7 +11,7 @@ use super::app::{AgentRow, App, Column, Mode, Readiness, Screen};
 use super::theme;
 use crate::fmt;
 use crate::identity::actor_harness;
-use crate::model::{Assertion, Status, TaskSummary};
+use crate::model::{Assertion, Standing, Status, TaskSummary};
 use crate::repo::Recalled;
 
 /// Draw the whole screen.
@@ -403,10 +403,11 @@ fn render_memory(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>) {
     let [input, list] = Layout::vertical([Constraint::Length(1), Constraint::Min(3)]).areas(area);
     render_text_input(frame, input, "search", &app.query, app.mode == Mode::Search);
 
-    let title = if app.include_superseded {
-        " Assertions (including superseded) "
-    } else {
-        " Assertions "
+    let title = match (app.include_superseded, app.shaky_only) {
+        (true, true) => " Assertions (shaky, including superseded) ",
+        (true, false) => " Assertions (including superseded) ",
+        (false, true) => " Assertions (shaky only) ",
+        (false, false) => " Assertions ",
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -418,7 +419,9 @@ fn render_memory(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>) {
         .title(Span::styled(title, theme::focus_style()));
 
     if app.assertions.is_empty() {
-        let hint = if app.query.trim().is_empty() {
+        let hint = if app.shaky_only {
+            "nothing shaky — every anchored assertion still matches the code it came from"
+        } else if app.query.trim().is_empty() {
             "nothing recorded yet — agents write here with mem_store"
         } else {
             "no match"
@@ -472,6 +475,15 @@ fn assertion_row(a: &Assertion, app: &App, width: usize, now: DateTime<Utc>) -> 
     }
     if a.superseded_by.is_some() {
         meta.push(Span::styled("  superseded", Style::default().red()));
+    }
+    // The badge is the whole point of the footing on a list this dense: a
+    // reader scanning twenty rows should be able to see which ones the code has
+    // moved out from under without opening any of them.
+    if let Some(standing) = app.standing(a).filter(|s| **s != Standing::Unanchored) {
+        meta.push(Span::styled(
+            format!("  {}", standing.as_str()),
+            theme::standing_style(standing),
+        ));
     }
     if app.all_projects {
         meta.push(Span::styled(format!("  {}", a.project), theme::dim_style()));
@@ -602,6 +614,7 @@ fn render_help(frame: &mut Frame, app: &App) {
         ("Enter", "show the assertion and its provenance"),
         ("d", "supersede it with something truer"),
         ("s", "show or hide superseded assertions"),
+        ("f", "only the ones whose files have moved since"),
     ];
     let swarm: &[(&str, &str)] = &[
         ("j / k", "move between agents"),
@@ -876,6 +889,36 @@ fn render_assertion_detail(
     }
     row("id", assertion.id.clone(), &mut lines);
 
+    if let Some(standing) = app
+        .standing(assertion)
+        .filter(|s| **s != Standing::Unanchored)
+    {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("footing   ", theme::dim_style()),
+            Span::styled(
+                standing.as_str().to_string(),
+                theme::standing_style(standing),
+            ),
+            Span::styled(
+                format!("  {}", standing.paths().join(", ")),
+                theme::dim_style(),
+            ),
+        ]));
+        if let Some(why) = standing.describe() {
+            lines.push(Line::from(vec![
+                Span::raw("          "),
+                Span::styled(why, theme::dim_style()),
+            ]));
+        }
+    }
+    if let Some(voices) = app.voices.get(&assertion.id) {
+        lines.push(Line::from(vec![
+            Span::styled("voices    ", theme::dim_style()),
+            Span::raw(voices.clone()),
+        ]));
+    }
+
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "any key closes this",
@@ -1070,6 +1113,51 @@ mod tests {
         assert!(out.contains("learned on #1"), "{out}");
         assert!(out.contains("#parser"), "{out}");
         assert!(out.contains("search"), "search box missing:\n{out}");
+    }
+
+    /// A reader scanning twenty rows has to see which ones the code has moved
+    /// out from under, without opening any of them.
+    #[test]
+    fn the_memory_browser_badges_an_assertion_whose_files_have_moved() {
+        let db = Db::open_in_memory().unwrap();
+        let a = db
+            .memory()
+            .store(NewAssertion {
+                project: PROJECT,
+                content: "the lexer lives in src/lex.rs",
+                tags: "",
+                actor: "claude-code:af31",
+                task_seq: None,
+            })
+            .unwrap();
+
+        let mut app = app_with(&db);
+        app.screen = Screen::Memory;
+        // This project is not a git checkout, so nothing computes a standing —
+        // which is what makes it the right place to test the rendering alone.
+        assert!(!screen(&app).contains("shaky"));
+
+        app.standings.insert(
+            a.id.clone(),
+            crate::model::Standing::Shaky {
+                moved: vec![crate::model::Shift {
+                    path: "src/lex.rs".into(),
+                    gone: false,
+                }],
+                firm: vec![],
+            },
+        );
+        let out = screen(&app);
+        assert!(out.contains("shaky"), "{out}");
+
+        // And opening it says what moved and what to do about it.
+        app.mode = Mode::AssertionDetail {
+            assertion: Box::new(a),
+        };
+        let detail = screen(&app);
+        assert!(detail.contains("footing"), "{detail}");
+        assert!(detail.contains("src/lex.rs"), "{detail}");
+        assert!(detail.contains("re-read"), "{detail}");
     }
 
     #[test]

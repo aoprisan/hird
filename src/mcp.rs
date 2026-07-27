@@ -16,9 +16,11 @@ use serde::{Deserialize, Serialize};
 use crate::config::Config;
 use crate::db::Db;
 use crate::error::Error;
+use crate::footing;
 use crate::identity::{self, AgentId};
 use crate::model::{
-    Assertion, Blocker, Conflict, Contention, Observed, Status, Task, TaskEvent, TaskSummary,
+    Assertion, Blocker, Conflict, Contention, Observed, Standing, Status, Task, TaskEvent,
+    TaskSummary,
 };
 use crate::repo::{Claim, Dispatch, MemoryQuery, NewAssertion, ProjectScope, Recalled, Subtask};
 use crate::witness::{self, Witness};
@@ -120,6 +122,23 @@ impl HirdMcp {
         evidence
     }
 
+    /// The witness memory may read the tree through, if the configuration
+    /// lets it. Narrower than `self.witness` by one flag.
+    fn footing(&self) -> Option<&Witness> {
+        self.config.footing(self.witness.as_ref())
+    }
+
+    /// The memory relevant to a task, each fact carrying whether the code it
+    /// was learned from still says what it said.
+    ///
+    /// Recall is a courtesy on top of the real answer, so it never turns a
+    /// successful claim into an error: a failure here costs the agent some
+    /// context, while propagating it would cost it the task it just took.
+    fn recall(&self, db: &Db, seq: i64, limit: usize) -> Vec<Recalled> {
+        let recalled = db.recall().for_task(seq, limit).unwrap_or_default();
+        footing::decorate(db, self.footing(), recalled)
+    }
+
     /// Start watching the tree on behalf of a task this session just claimed.
     fn begin_witnessing(&self, db: &Db, seq: i64) {
         let Some(witness) = &self.witness else {
@@ -213,14 +232,37 @@ impl HirdMcp {
              from. Read those before you start; they are the reason to declare your paths \
              early, because file scope is how the queue knows what to hand you. They are \
              assertions, not gospel: if one turns out to be wrong, `mem_store` the truth.\n\
+             {footing}\
              {witness}\n\
              Everything is scoped to the current project ({project}) unless you pass \
              `all_projects: true`.",
             ttl = self.config.lease_ttl_minutes,
             heartbeat = self.heartbeat_minutes(),
             project = self.project,
+            footing = self.footing_instructions(),
             witness = self.witness_instructions(),
         )
+    }
+
+    /// The paragraph about memory's footing, or nothing where there is none.
+    ///
+    /// Left out for the same reason as the witness paragraph: a model told to
+    /// read a `standing` field that nothing will ever populate has been handed
+    /// a rule it cannot use and a reason to doubt the ones it can.
+    fn footing_instructions(&self) -> &'static str {
+        if self.footing().is_none() {
+            return "";
+        }
+        "\nHow much to trust a fact: assertions carry a `standing`, because hird records \
+         which files each one was read off and what those files said at the time. `firm` \
+         means the code has not moved since; `shaky` means it has, so the fact is \
+         unverified rather than wrong — re-read the file before you act on it; `orphaned` \
+         means the file is gone. Nothing marks a fact false; that is your call after \
+         looking. When you check a shaky fact and it still holds, `mem_store` it again \
+         word for word: that does not duplicate it, it re-anchors it to today's code and \
+         records you as another voice for it, and the next agent gets it marked firm. When \
+         it does not hold, `mem_store` the truth instead. Pass `paths` (or `task_seq`) so \
+         what you record gets a footing of its own.\n"
     }
 
     /// The paragraph about the witness, or nothing at all where there is none.
@@ -367,6 +409,13 @@ pub struct MemStoreArgs {
     /// The task you learned this while working, if any.
     #[serde(default)]
     pub task_seq: Option<i64>,
+    /// The files this fact is about, as literal paths relative to the project
+    /// root, e.g. ["src/config.rs"]. hird records what they say right now, so
+    /// a later reader can be told if the code has moved under this fact.
+    /// Leave it off when you passed `task_seq` — the files that task is in are
+    /// used instead.
+    #[serde(default)]
+    pub paths: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -520,7 +569,7 @@ impl TaskDetail {
             blocks: context.blocks,
             paths: context.paths,
             overlaps: describe_all(&context.conflicts),
-            recalled: context.recalled.into_iter().map(RecallRow::from).collect(),
+            recalled: recall_rows(context.recalled),
             witness: context.witness,
             events: context.events.into_iter().map(EventRow::from).collect(),
         }
@@ -568,10 +617,21 @@ struct RecallRow {
     /// Pass to `mem_search` results or quote to the human; assertions are
     /// never edited, so an id stays valid.
     id: String,
+    /// `firm`, `shaky` or `orphaned`: whether the code this was learned from is
+    /// still the code on disk. Absent means hird has no footing for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    standing: Option<&'static str>,
+    /// Present only when there is something to do about it — the files have
+    /// moved, or the agent that wrote this is not the only one who has said it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    caution: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    corroboration: Option<String>,
 }
 
-impl From<Recalled> for RecallRow {
-    fn from(r: Recalled) -> RecallRow {
+impl RecallRow {
+    fn new(r: Recalled) -> RecallRow {
+        let standing = r.standing.filter(|s| *s != Standing::Unanchored);
         RecallRow {
             why: r.reason.describe(),
             content: r.assertion.content,
@@ -579,12 +639,21 @@ impl From<Recalled> for RecallRow {
             task_seq: r.task_seq,
             created_at: r.assertion.created_at,
             id: r.assertion.id,
+            standing: standing.as_ref().map(|s| s.as_str()),
+            // Only the standings worth acting on carry their sentence here. A
+            // claim's recall is the smallest budget in hird and it lands in an
+            // agent's context unasked; "this file is unchanged" spent on all
+            // five rows would crowd out the one row that says otherwise.
+            caution: standing
+                .filter(Standing::needs_checking)
+                .and_then(|s| s.describe()),
+            corroboration: r.corroboration,
         }
     }
 }
 
 fn recall_rows(recalled: Vec<Recalled>) -> Vec<RecallRow> {
-    recalled.into_iter().map(RecallRow::from).collect()
+    recalled.into_iter().map(RecallRow::new).collect()
 }
 
 #[derive(Debug, Serialize)]
@@ -871,6 +940,18 @@ struct MemStoreResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     task_seq: Option<i64>,
     created_at: String,
+    /// True when this exact sentence was already on file. Nothing was
+    /// duplicated: the original assertion keeps its id and its author, you have
+    /// been recorded as another voice for it, and its footing has been re-taken
+    /// against the code as it stands now.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    affirmed: bool,
+    /// The files this fact is now on record as having been read off.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    anchored_to: Vec<String>,
+    /// Who has stated it, if more than one agent has.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    corroboration: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -894,11 +975,20 @@ struct AssertionRow {
     project: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     superseded: bool,
+    /// `firm`, `shaky` or `orphaned` — how the files this was learned against
+    /// compare with the ones on disk right now. Absent means hird has no
+    /// footing for it and is not guessing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    standing: Option<&'static str>,
+    /// The same, as a sentence you can relay.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    footing: Option<String>,
 }
 
 impl AssertionRow {
-    fn new(a: Assertion, show_project: bool) -> AssertionRow {
+    fn new(a: Assertion, show_project: bool, standing: Option<&Standing>) -> AssertionRow {
         let tags = a.tag_list().into_iter().map(str::to_string).collect();
+        let standing = standing.filter(|s| **s != Standing::Unanchored);
         AssertionRow {
             id: a.id,
             tags,
@@ -907,6 +997,8 @@ impl AssertionRow {
             created_at: a.created_at,
             project: show_project.then_some(a.project),
             superseded: a.superseded_by.is_some(),
+            standing: standing.map(Standing::as_str),
+            footing: standing.and_then(Standing::describe),
         }
     }
 }
@@ -981,7 +1073,7 @@ impl HirdMcp {
                         .collect(),
                     paths: db.scopes().for_task(args.seq)?,
                     conflicts,
-                    recalled: recall(db, args.seq, recall_limit),
+                    recalled: self.recall(db, args.seq, recall_limit),
                     witness: self.evidence(db, args.seq),
                     events: db.tasks().events(&task.id, EVENT_WINDOW)?,
                 },
@@ -1014,7 +1106,7 @@ impl HirdMcp {
                 // that moves from here is inside its window and everything
                 // already dirty is not.
                 self.begin_witnessing(db, args.seq);
-                Ok::<_, Error>((claim, recall(db, args.seq, recall_limit)))
+                Ok::<_, Error>((claim, self.recall(db, args.seq, recall_limit)))
             })
             .map_err(stringify)?;
 
@@ -1044,7 +1136,7 @@ impl HirdMcp {
                 let recalled = match &dispatch.claim {
                     Some(claim) => {
                         self.begin_witnessing(db, claim.task.seq);
-                        recall(db, claim.task.seq, recall_limit)
+                        self.recall(db, claim.task.seq, recall_limit)
                     }
                     None => Vec::new(),
                 };
@@ -1249,6 +1341,10 @@ impl HirdMcp {
                 // Last look, taken while the task is still live so its
                 // footprint is complete and any contention is still true.
                 let evidence = self.witnessed(db, args.seq);
+                // And the last word on what this task learned: its facts are
+                // statements about the tree it is leaving behind, not the one
+                // it found halfway through its own edits.
+                footing::settle(db, self.footing(), args.seq);
                 let task = db.tasks().complete(args.seq, &actor, &args.result)?;
                 Ok::<_, Error>((task, evidence))
             })
@@ -1271,6 +1367,7 @@ impl HirdMcp {
         let (task, evidence) = self
             .with_db(|db| {
                 let evidence = self.witnessed(db, args.seq);
+                footing::settle(db, self.footing(), args.seq);
                 let task = db.tasks().fail(args.seq, &actor, &args.reason)?;
                 Ok::<_, Error>((task, evidence))
             })
@@ -1290,18 +1387,30 @@ impl HirdMcp {
         Parameters(args): Parameters<MemStoreArgs>,
     ) -> Result<String, String> {
         let actor = self.actor();
-        let assertion = self
+        let (recorded, anchored, corroboration) = self
             .with_db(|db| {
-                db.memory().store(NewAssertion {
+                let recorded = db.memory().record(NewAssertion {
                     project: &self.project,
                     content: &args.content,
                     tags: args.tags.as_deref().unwrap_or(""),
                     actor: &actor,
                     task_seq: args.task_seq,
-                })
+                })?;
+                // Anchoring runs on both paths, and that is the whole
+                // re-grounding loop: an agent that rediscovers a fact says it
+                // again, and saying it again is what re-takes its footing
+                // against the code as it stands today.
+                let ground = footing::ground(db, args.task_seq, args.paths.as_deref());
+                let anchored =
+                    footing::anchor(db, self.footing(), &recorded.assertion().id, &ground)
+                        .unwrap_or_default();
+                let corroboration = footing::corroboration(db, recorded.assertion());
+                Ok::<_, Error>((recorded, anchored, corroboration))
             })
             .map_err(stringify)?;
 
+        let affirmed = recorded.was_affirmed();
+        let assertion = recorded.into_assertion();
         let tags = assertion
             .tag_list()
             .into_iter()
@@ -1315,6 +1424,9 @@ impl HirdMcp {
             actor: assertion.actor,
             task_seq: args.task_seq,
             created_at: assertion.created_at,
+            affirmed,
+            anchored_to: anchored.into_iter().map(|a| a.path).collect(),
+            corroboration,
         })
     }
 
@@ -1330,8 +1442,13 @@ impl HirdMcp {
             .limit(args.limit.unwrap_or(20).clamp(1, 200))
             .include_superseded(args.include_superseded.unwrap_or(false));
 
-        let hits = self
-            .with_db(|db| db.memory().search(&query))
+        let (hits, standings) = self
+            .with_db(|db| {
+                let hits = db.memory().search(&query)?;
+                let ids: Vec<String> = hits.iter().map(|a| a.id.clone()).collect();
+                let standings = footing::standings(db, self.footing(), &ids);
+                Ok::<_, Error>((hits, standings))
+            })
             .map_err(stringify)?;
 
         json(&MemSearchResult {
@@ -1341,7 +1458,10 @@ impl HirdMcp {
             count: hits.len(),
             assertions: hits
                 .into_iter()
-                .map(|a| AssertionRow::new(a, show_project))
+                .map(|a| {
+                    let standing = standings.get(&a.id).cloned();
+                    AssertionRow::new(a, show_project, standing.as_ref())
+                })
                 .collect(),
         })
     }
@@ -1357,15 +1477,6 @@ impl ServerHandler for HirdMcp {
             )
             .with_instructions(self.instructions())
     }
-}
-
-/// The memory relevant to a task, or nothing.
-///
-/// Recall is a courtesy on top of the real answer, so it never turns a
-/// successful claim into an error: a failure here costs the agent some context,
-/// while propagating it would cost it the task it just took.
-fn recall(db: &Db, seq: i64, limit: usize) -> Vec<Recalled> {
-    db.recall().for_task(seq, limit).unwrap_or_default()
 }
 
 /// Render a payload as compact JSON.
@@ -1636,6 +1747,7 @@ mod tests {
                 content: "the lexer lives in src/lex.rs".into(),
                 tags: Some(" parser , code ".into()),
                 task_seq: Some(seq),
+                paths: None,
             }))
             .await,
         );
@@ -1653,6 +1765,7 @@ mod tests {
                 content: "x".into(),
                 tags: None,
                 task_seq: Some(404),
+                paths: None,
             }))
             .await
             .unwrap_err();
@@ -1666,6 +1779,7 @@ mod tests {
             content: "the lexer lives in src/lex.rs".into(),
             tags: None,
             task_seq: None,
+            paths: None,
         }))
         .await
         .unwrap();
@@ -1695,6 +1809,7 @@ mod tests {
                 content: format!("fact {i} about widgets"),
                 tags: None,
                 task_seq: None,
+                paths: None,
             }))
             .await
             .unwrap();

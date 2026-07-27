@@ -14,9 +14,10 @@ use clap::{Args, Parser, Subcommand};
 use crate::config::{self, Config};
 use crate::db::Db;
 use crate::fmt;
+use crate::footing;
 use crate::glob;
 use crate::identity::{self, ACTOR_CLI};
-use crate::model::{Status, TaskSummary};
+use crate::model::{Standing, Status, TaskSummary};
 use crate::plan;
 use crate::repo::{dispatch_waves, MemoryQuery, NewAssertion, OnConflict, ProjectScope};
 use crate::witness;
@@ -196,6 +197,10 @@ pub struct LsArgs {
 #[derive(Debug, Subcommand)]
 pub enum MemCommand {
     /// Record one factual assertion.
+    ///
+    /// Recording something already on file word for word does not duplicate it:
+    /// it re-anchors that assertion to the code as it stands now and records
+    /// another voice for it.
     Add {
         /// The assertion, in plain prose.
         content: String,
@@ -205,6 +210,10 @@ pub enum MemCommand {
         /// Link it to the task it was learned on.
         #[arg(long, value_name = "SEQ")]
         task: Option<i64>,
+        /// The file this fact is about. Repeatable. hird records what it says
+        /// now, so a later reader can be told when it has moved.
+        #[arg(long = "path", value_name = "PATH")]
+        paths: Vec<String>,
     },
     /// Search assertions.
     Search {
@@ -219,6 +228,19 @@ pub enum MemCommand {
         /// Include assertions that have been replaced.
         #[arg(long)]
         include_superseded: bool,
+    },
+    /// Audit what the memory still stands on.
+    ///
+    /// Every anchored assertion against the files it was learned from, oldest
+    /// first: which are still exactly what they were, which have moved, and
+    /// which were about code that no longer exists.
+    Standing {
+        /// Only the assertions worth re-reading — shaky and orphaned.
+        #[arg(long)]
+        shaky: bool,
+        /// Audit every project.
+        #[arg(long)]
+        all_projects: bool,
     },
 }
 
@@ -258,6 +280,8 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
         }
         Command::Recall { seq, limit } => recall(
             &db,
+            &config,
+            &project,
             *seq,
             limit.map(|n| n.min(200)).unwrap_or(config.recall_limit()),
             out,
@@ -765,8 +789,20 @@ fn ls_line(
 ///
 /// The same view an agent gets on `task_claim`, so a human can see what their
 /// swarm is being told — and notice when it is telling them something stale.
-fn recall(db: &Db, seq: i64, limit: usize, out: &mut impl Write) -> anyhow::Result<()> {
-    let recalled = db.recall().for_task(seq, limit)?;
+fn recall(
+    db: &Db,
+    config: &Config,
+    project: &str,
+    seq: i64,
+    limit: usize,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
+    let discovered = config.witness(Path::new(project));
+    let recalled = footing::decorate(
+        db,
+        config.footing(discovered.as_ref()),
+        db.recall().for_task(seq, limit)?,
+    );
     if recalled.is_empty() {
         writeln!(out, "nothing recorded so far touches task {seq}")?;
         return Ok(());
@@ -781,6 +817,19 @@ fn recall(db: &Db, seq: i64, limit: usize, out: &mut impl Write) -> anyhow::Resu
             item.assertion.actor,
             fmt::age_phrase(&item.assertion.created_at, now)
         )?;
+        // This is exactly what the agent will be handed on claiming, so the
+        // human reading it should see the same hedge the agent will.
+        if let Some(why) = item
+            .standing
+            .as_ref()
+            .filter(|s| s.needs_checking())
+            .and_then(Standing::describe)
+        {
+            writeln!(out, "    {why}")?;
+        }
+        if let Some(voices) = &item.corroboration {
+            writeln!(out, "    {voices}")?;
+        }
     }
     Ok(())
 }
@@ -873,9 +922,19 @@ fn show(db: &Db, seq: i64, config: &Config, out: &mut impl Write) -> anyhow::Res
 
     let learned = db.memory().for_task(&task.id)?;
     if !learned.is_empty() {
+        let discovered = config.witness(Path::new(&task.project));
+        let ids: Vec<String> = learned.iter().map(|a| a.id.clone()).collect();
+        let standings = footing::standings(db, config.footing(discovered.as_ref()), &ids);
         writeln!(out, "\nassertions recorded on this task")?;
         for assertion in learned {
             writeln!(out, "  - {}", fmt::truncate(&assertion.content, 88))?;
+            if let Some(why) = standings
+                .get(&assertion.id)
+                .filter(|s| s.needs_checking())
+                .and_then(Standing::describe)
+            {
+                writeln!(out, "    {why}")?;
+            }
         }
     }
 
@@ -904,21 +963,49 @@ fn mem(
     cmd: &MemCommand,
     out: &mut impl Write,
 ) -> anyhow::Result<()> {
+    let discovered = config.witness(Path::new(project));
+    let witness = config.footing(discovered.as_ref());
     match cmd {
         MemCommand::Add {
             content,
             tags,
             task,
+            paths,
         } => {
-            let assertion = db.memory().store(NewAssertion {
+            let recorded = db.memory().record(NewAssertion {
                 project,
                 content,
                 tags,
                 actor: ACTOR_CLI,
                 task_seq: *task,
             })?;
-            writeln!(out, "{}", assertion.id)?;
+            let ground =
+                footing::ground(db, *task, Some(paths.as_slice()).filter(|p| !p.is_empty()));
+            let anchored = footing::anchor(db, witness, &recorded.assertion().id, &ground)?;
+            writeln!(out, "{}", recorded.assertion().id)?;
+            if recorded.was_affirmed() {
+                writeln!(
+                    out,
+                    "  already on record — affirmed, not duplicated{}",
+                    if anchored.is_empty() {
+                        String::new()
+                    } else {
+                        " and re-anchored".to_string()
+                    }
+                )?;
+            }
+            if !anchored.is_empty() {
+                let paths: Vec<&str> = anchored.iter().map(|a| a.path.as_str()).collect();
+                writeln!(out, "  anchored to {}", paths.join(", "))?;
+            }
             Ok(())
+        }
+        MemCommand::Standing {
+            shaky,
+            all_projects,
+        } => {
+            let scope = ProjectScope::resolve(project, config.all_projects(Some(*all_projects)));
+            standing(db, witness, &scope, *shaky, out)
         }
         MemCommand::Search {
             query,
@@ -937,7 +1024,10 @@ fn mem(
                 return Ok(());
             }
             let now = Utc::now();
+            let ids: Vec<String> = hits.iter().map(|a| a.id.clone()).collect();
+            let standings = footing::standings(db, witness, &ids);
             for assertion in hits {
+                let standing = standings.get(&assertion.id);
                 let mut meta = vec![
                     assertion.actor.clone(),
                     fmt::age_phrase(&assertion.created_at, now),
@@ -948,15 +1038,102 @@ fn mem(
                 if assertion.superseded_by.is_some() {
                     meta.push("superseded".to_string());
                 }
+                if let Some(standing) = standing.filter(|s| **s != Standing::Unanchored) {
+                    meta.push(standing.as_str().to_string());
+                }
                 if scope.is_all() {
                     meta.push(assertion.project.clone());
                 }
                 writeln!(out, "{}", assertion.content)?;
                 writeln!(out, "    {}  {}", assertion.id, meta.join("  "))?;
+                // Only the ones worth acting on explain themselves. A line
+                // saying "unchanged" under every row is how a reader learns to
+                // skip the line under the row that says otherwise.
+                if let Some(why) = standing
+                    .filter(|s| s.needs_checking())
+                    .and_then(|s| s.describe())
+                {
+                    writeln!(out, "    {why}")?;
+                }
             }
             Ok(())
         }
     }
+}
+
+/// `hird mem standing`: what the memory still stands on.
+fn standing(
+    db: &Db,
+    witness: Option<&witness::Witness>,
+    scope: &ProjectScope,
+    shaky_only: bool,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
+    if witness.is_none() {
+        writeln!(
+            out,
+            "no footing here: assertions are only anchored to files in a git checkout \
+             with `memory_footing` on"
+        )?;
+        return Ok(());
+    }
+    let anchored = db.footings().anchored(scope)?;
+    if anchored.is_empty() {
+        writeln!(out, "no anchored assertions")?;
+        return Ok(());
+    }
+
+    let now = Utc::now();
+    let ids: Vec<String> = anchored.iter().map(|a| a.id.clone()).collect();
+    let standings = footing::standings(db, witness, &ids);
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut shown = 0usize;
+
+    for assertion in &anchored {
+        let standing = standings
+            .get(&assertion.id)
+            .cloned()
+            .unwrap_or(Standing::Unanchored);
+        *counts.entry(standing.as_str()).or_default() += 1;
+        if shaky_only && !standing.needs_checking() {
+            continue;
+        }
+        shown += 1;
+        writeln!(
+            out,
+            "{:<9} {}",
+            standing.as_str(),
+            fmt::truncate(&assertion.content, 78)
+        )?;
+        let mut meta = vec![
+            assertion.actor.clone(),
+            fmt::age_phrase(&assertion.created_at, now),
+        ];
+        if scope.is_all() {
+            meta.push(assertion.project.clone());
+        }
+        writeln!(out, "    {}  {}", assertion.id, meta.join("  "))?;
+        writeln!(out, "    {}", standing.paths().join(", "))?;
+        if let Some(why) = standing.describe().filter(|_| standing.needs_checking()) {
+            writeln!(out, "    {why}")?;
+        }
+        if let Some(voices) = footing::corroboration(db, assertion) {
+            writeln!(out, "    {voices}")?;
+        }
+    }
+
+    if shown == 0 {
+        writeln!(
+            out,
+            "nothing shaky: every anchored assertion still checks out"
+        )?;
+    }
+    let summary: Vec<String> = counts
+        .iter()
+        .map(|(label, n)| format!("{n} {label}"))
+        .collect();
+    writeln!(out, "\n{} anchored: {}", anchored.len(), summary.join(", "))?;
+    Ok(())
 }
 
 #[cfg(test)]

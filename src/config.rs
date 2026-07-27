@@ -58,6 +58,10 @@ pub struct Config {
     /// Whether the queue watches the working tree to see what claimed tasks
     /// actually change. Needs git; goes quiet by itself where there is none.
     pub witness: bool,
+    /// Whether an assertion records the files it was learned against, so a
+    /// later reader can be told the code has moved under it. Rides on the same
+    /// working-tree access as `witness` and is off wherever that is.
+    pub memory_footing: bool,
 }
 
 impl Default for Config {
@@ -69,6 +73,7 @@ impl Default for Config {
             dispatch_avoids_conflicts: true,
             recall_limit: DEFAULT_RECALL_LIMIT,
             witness: true,
+            memory_footing: true,
         }
     }
 }
@@ -127,6 +132,23 @@ impl Config {
             .then(|| crate::witness::Witness::discover(root))
             .flatten()
     }
+
+    /// The witness memory may read the tree through, if it may.
+    ///
+    /// Narrower than [`Config::witness`] by one flag: a human who wants the
+    /// queue to watch what tasks change but does not want assertions carrying
+    /// file fingerprints can have exactly that, and gets memory as it behaved
+    /// before footing existed rather than a half-populated version of it.
+    pub fn footing<'w>(
+        &self,
+        witness: Option<&'w crate::witness::Witness>,
+    ) -> Option<&'w crate::witness::Witness> {
+        if self.memory_footing {
+            witness
+        } else {
+            None
+        }
+    }
 }
 
 /// Resolve the database path: `--db` beats `HIRD_DB` beats the XDG default.
@@ -163,6 +185,10 @@ mod tests {
         // Watching the tree is on by default: it costs nothing where there is
         // no live task, and the failure it catches is silent and expensive.
         assert!(cfg.witness);
+        // Likewise the footing under memory: an assertion that cannot say what
+        // it was learned against can never be checked, and the whole cost is a
+        // hash of files somebody already named.
+        assert!(cfg.memory_footing);
     }
 
     #[test]
@@ -172,6 +198,25 @@ mod tests {
             ..Config::default()
         };
         assert!(off.witness(Path::new(".")).is_none());
+    }
+
+    /// Footing rides on the witness but can be given up on its own.
+    #[test]
+    fn memory_footing_is_a_second_switch_over_the_same_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // A stand-in for "there is a witness here", without needing git: the
+        // question under test is the flag, not the discovery.
+        let witness = crate::witness::Witness::discover(root);
+        let both_off = Config {
+            memory_footing: false,
+            ..Config::default()
+        };
+        assert!(both_off.footing(witness.as_ref()).is_none());
+        assert_eq!(
+            Config::default().footing(witness.as_ref()).is_some(),
+            witness.is_some()
+        );
     }
 
     #[test]
