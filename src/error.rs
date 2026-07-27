@@ -3,7 +3,7 @@
 //! Every variant's `Display` is written to be relayed verbatim to a human or a
 //! model — see the "errors are descriptive strings" rule in DESIGN.md §6.
 
-use crate::model::{Blocker, Conflict, Status};
+use crate::model::{Blocker, Conflict, Recusal, Status};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -53,6 +53,14 @@ pub enum Error {
         /// The existing chain from `on` back to `seq`, which the new edge
         /// would close.
         path: Vec<i64>,
+    },
+
+    /// This harness is the one barred from working the task.
+    #[error("{}", recused_message(*.seq, .recusal, .actor))]
+    Recused {
+        seq: i64,
+        recusal: Recusal,
+        actor: String,
     },
 
     /// The declared file scope overlaps work another agent is doing.
@@ -111,6 +119,21 @@ fn cycle_message(seq: i64, on: i64, path: &[i64]) -> String {
     format!(
         "task {seq} cannot depend on task {on}: task {on} already depends on \
          task {seq} ({chain}), and that would be a cycle"
+    )
+}
+
+fn recused_message(seq: i64, recusal: &Recusal, actor: &str) -> String {
+    let worker = recusal.worker.as_deref().unwrap_or("nobody");
+    let reason = if recusal.reason.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", recusal.reason)
+    };
+    format!(
+        "task {seq} is recused from task {} ({}){reason}, which {worker} worked — so {actor} \
+         cannot take it. Tell the human it needs an agent in a different harness.",
+        recusal.from_seq,
+        crate::fmt::truncate(&recusal.from_title, 40),
     )
 }
 

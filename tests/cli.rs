@@ -700,3 +700,250 @@ fn agents_work_a_filed_plan_the_way_they_work_anything_else() {
     claude.shutdown();
     copilot.shutdown();
 }
+
+// ------------------------------------------------- the footing under a fact
+
+/// The human's audit of what the memory still stands on.
+///
+/// Three facts, three fates: one whose file is untouched, one whose file was
+/// rewritten, one whose file was deleted. The board has to sort them without
+/// anybody having curated anything, and `--shaky` has to leave only the ones
+/// worth a re-read.
+#[test]
+fn the_standing_audit_sorts_the_memory_by_whether_its_ground_has_moved() {
+    let sandbox = Sandbox::new();
+    sandbox.write_file("src/config.rs", "fn load() {}\n");
+    sandbox.write_file("src/db.rs", "fn open() {}\n");
+    sandbox.write_file("src/gone.rs", "fn doomed() {}\n");
+    sandbox.git_init();
+
+    sandbox.run(&[
+        "mem",
+        "add",
+        "the loader has one entry point",
+        "--path",
+        "src/config.rs",
+    ]);
+    sandbox.run(&["mem", "add", "the db opens lazily", "--path", "src/db.rs"]);
+    sandbox.run(&["mem", "add", "doomed does nothing", "--path", "src/gone.rs"]);
+
+    let all_firm = sandbox.run(&["mem", "standing"]);
+    assert!(all_firm.contains("3 anchored: 3 firm"), "{all_firm}");
+    assert!(
+        sandbox
+            .run(&["mem", "standing", "--shaky"])
+            .contains("nothing shaky"),
+        "nothing has moved yet"
+    );
+
+    sandbox.write_file("src/db.rs", "fn open() { eagerly() }\n");
+    std::fs::remove_file(sandbox.project().join("src/gone.rs")).unwrap();
+
+    let audit = sandbox.run(&["mem", "standing"]);
+    assert!(audit.contains("3 anchored:"), "{audit}");
+    assert!(audit.contains("1 firm"), "{audit}");
+    assert!(audit.contains("1 shaky"), "{audit}");
+    assert!(audit.contains("1 orphaned"), "{audit}");
+
+    let shaky = sandbox.run(&["mem", "standing", "--shaky"]);
+    assert!(shaky.contains("the db opens lazily"), "{shaky}");
+    assert!(shaky.contains("doomed does nothing"), "{shaky}");
+    assert!(
+        !shaky.contains("the loader has one entry point"),
+        "an unmoved fact is not worth a re-read:\n{shaky}"
+    );
+    assert!(shaky.contains("no longer exists"), "{shaky}");
+}
+
+/// Searching says the same thing the audit does, in one word, so a human
+/// scanning results sees which line to distrust without opening anything.
+#[test]
+fn search_marks_the_results_whose_files_have_moved() {
+    let sandbox = Sandbox::new();
+    sandbox.write_file("src/config.rs", "fn load() {}\n");
+    sandbox.git_init();
+    sandbox.run(&[
+        "mem",
+        "add",
+        "the loader is lazy",
+        "--path",
+        "src/config.rs",
+    ]);
+
+    assert!(sandbox.run(&["mem", "search", "loader"]).contains("firm"));
+    sandbox.write_file("src/config.rs", "fn load() { eager() }\n");
+    let moved = sandbox.run(&["mem", "search", "loader"]);
+    assert!(moved.contains("shaky"), "{moved}");
+    assert!(moved.contains("re-read before relying on it"), "{moved}");
+}
+
+/// Saying a fact again is how anyone — agent or human — says "I checked".
+#[test]
+fn restating_a_fact_from_the_command_line_affirms_it_rather_than_duplicating() {
+    let sandbox = Sandbox::new();
+    sandbox.write_file("src/config.rs", "fn load() {}\n");
+    sandbox.git_init();
+    let first = sandbox.run(&[
+        "mem",
+        "add",
+        "the loader is lazy",
+        "--path",
+        "src/config.rs",
+    ]);
+    let id = first.lines().next().unwrap().to_string();
+
+    sandbox.write_file("src/config.rs", "fn load() { /* tidied */ }\n");
+    assert!(sandbox
+        .run(&["mem", "standing", "--shaky"])
+        .contains("the loader is lazy"));
+
+    let again = sandbox.run(&[
+        "mem",
+        "add",
+        "the loader is lazy",
+        "--path",
+        "src/config.rs",
+    ]);
+    assert!(again.starts_with(&id), "one fact, not two:\n{again}");
+    assert!(again.contains("affirmed, not duplicated"), "{again}");
+    assert!(again.contains("re-anchored"), "{again}");
+    assert!(
+        sandbox
+            .run(&["mem", "standing", "--shaky"])
+            .contains("nothing shaky"),
+        "checking a fact is what puts it back on solid ground"
+    );
+    assert!(sandbox
+        .run(&["mem", "standing"])
+        .contains("1 anchored: 1 firm"));
+}
+
+/// Outside git there is no footing, and the audit says so plainly rather than
+/// printing an empty list that reads like "your memory is fine".
+#[test]
+fn the_standing_audit_outside_git_says_there_is_nothing_to_stand_on() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["mem", "add", "the loader is lazy"]);
+    let out = sandbox.run(&["mem", "standing"]);
+    assert!(out.contains("no footing here"), "{out}");
+    assert!(out.contains("git checkout"), "{out}");
+}
+
+// ------------------------------------------------- no agent reviews its own work
+
+/// The human's side of it: mark work for review when you file it, and see the
+/// bar on the board afterwards without having arranged anything.
+#[test]
+fn a_reviewed_task_shows_who_cannot_take_the_review() {
+    let sandbox = Sandbox::new();
+    sandbox.write_file("src/config.rs", "fn load() {}\n");
+    sandbox.git_init();
+    sandbox.run(&[
+        "add",
+        "Port the loader",
+        "--review",
+        "--path",
+        "src/config.rs",
+    ]);
+
+    let before = sandbox.run(&["show", "1"]);
+    assert!(before.contains("review    on finishing"), "{before}");
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex.claim(1);
+    sandbox.write_file("src/config.rs", "fn load() { ported() }\n");
+    codex
+        .call(
+            "task_complete",
+            serde_json::json!({"seq": 1, "result": "ported"}),
+        )
+        .unwrap();
+    codex.shutdown();
+
+    let listed = sandbox.run(&["ls"]);
+    assert!(listed.contains("Review: Port the loader"), "{listed}");
+
+    let review = sandbox.run(&["show", "2"]);
+    assert!(review.contains("recused"), "{review}");
+    assert!(review.contains("codex:"), "{review}");
+    assert!(review.contains("files     src/config.rs"), "{review}");
+}
+
+/// The bar is a first-class thing a human can set and lift, not something only
+/// the review machinery can produce.
+#[test]
+fn recusals_can_be_set_and_lifted_by_hand() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["add", "Port the loader"]);
+    sandbox.run(&["add", "Check the loader port"]);
+
+    assert!(sandbox
+        .run(&["recuse", "2"])
+        .contains("recused from nothing"));
+
+    let set = sandbox.run(&["recuse", "2", "--from", "1", "--reason", "wrote it"]);
+    assert!(set.contains("task 1"), "{set}");
+    assert!(
+        set.contains("nobody has yet"),
+        "nothing is worked yet:\n{set}"
+    );
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex.claim(1);
+    codex.shutdown();
+    let now = sandbox.run(&["recuse", "2"]);
+    assert!(now.contains("codex:"), "{now}");
+    assert!(now.contains("another harness"), "{now}");
+    assert!(now.contains("wrote it"), "{now}");
+
+    assert!(sandbox
+        .run(&["recuse", "2", "--clear"])
+        .contains("lifted 1 recusal"));
+    assert!(sandbox
+        .run(&["recuse", "2"])
+        .contains("recused from nothing"));
+}
+
+/// A plan is where the judgement belongs: which work deserves a second pair of
+/// eyes is a property of the job, decided once, in the file next to the code.
+#[test]
+fn a_plan_can_mark_work_for_review() {
+    let sandbox = Sandbox::new();
+    sandbox.git_init();
+    let plan = sandbox.dir.path().join("plan.toml");
+    std::fs::write(
+        &plan,
+        r#"
+plan = "migration"
+
+[[task]]
+name = "schema"
+title = "Design the storage schema"
+paths = ["src/db.rs"]
+review = true
+
+[[task]]
+name = "docs"
+title = "Write it up"
+needs = ["schema"]
+"#,
+    )
+    .unwrap();
+    sandbox.run(&["plan", "apply", plan.to_str().unwrap()]);
+
+    assert!(sandbox
+        .run(&["show", "1"])
+        .contains("review    on finishing"));
+    assert!(!sandbox
+        .run(&["show", "2"])
+        .contains("review    on finishing"));
+
+    // Applying it again must not write a second event saying the same thing.
+    sandbox.run(&["plan", "apply", plan.to_str().unwrap()]);
+    let shown = sandbox.run(&["show", "1"]);
+    assert_eq!(
+        shown.matches("marked for review").count(),
+        1,
+        "re-applying should be quiet:\n{shown}"
+    );
+}

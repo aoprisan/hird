@@ -14,9 +14,10 @@ use clap::{Args, Parser, Subcommand};
 use crate::config::{self, Config};
 use crate::db::Db;
 use crate::fmt;
+use crate::footing;
 use crate::glob;
 use crate::identity::{self, ACTOR_CLI};
-use crate::model::{Status, TaskSummary};
+use crate::model::{Standing, Status, TaskSummary};
 use crate::plan;
 use crate::repo::{dispatch_waves, MemoryQuery, NewAssertion, OnConflict, ProjectScope};
 use crate::witness;
@@ -70,6 +71,11 @@ pub enum Command {
     Scope(ScopeArgs),
     /// Show which agent is working what, and where they overlap.
     Agents(ScopeFilterArgs),
+    /// Bar whoever worked one task from working another, or lift the bar.
+    ///
+    /// This is what makes a review a review: the queue refuses the claim from
+    /// the harness that did the work, and dispatch routes around it.
+    Recuse(RecuseArgs),
     /// Show what earlier work already learned about a task, and why it is
     /// relevant. This is what an agent is handed when it claims the task.
     Recall {
@@ -114,6 +120,11 @@ pub struct AddArgs {
     /// the same file.
     #[arg(long = "path", value_name = "GLOB")]
     pub paths: Vec<String>,
+    /// When this task finishes, file a review of what it changed — scoped to
+    /// the files that actually moved, and barred to the harness that moved
+    /// them.
+    #[arg(long)]
+    pub review: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -177,6 +188,22 @@ pub struct ScopeArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct RecuseArgs {
+    /// The task to put under the bar.
+    pub seq: i64,
+    /// Task numbers whose worker must not take it. Repeatable, or
+    /// comma-separated.
+    #[arg(long = "from", value_name = "SEQ", value_delimiter = ',')]
+    pub from: Vec<i64>,
+    /// Why, for the record and for the refusal message.
+    #[arg(long, default_value = "")]
+    pub reason: String,
+    /// Lift every bar on the task instead.
+    #[arg(long, conflicts_with = "from")]
+    pub clear: bool,
+}
+
+#[derive(Debug, Args)]
 pub struct ScopeFilterArgs {
     /// Span every project rather than just the current one.
     #[arg(long)]
@@ -196,6 +223,10 @@ pub struct LsArgs {
 #[derive(Debug, Subcommand)]
 pub enum MemCommand {
     /// Record one factual assertion.
+    ///
+    /// Recording something already on file word for word does not duplicate it:
+    /// it re-anchors that assertion to the code as it stands now and records
+    /// another voice for it.
     Add {
         /// The assertion, in plain prose.
         content: String,
@@ -205,6 +236,10 @@ pub enum MemCommand {
         /// Link it to the task it was learned on.
         #[arg(long, value_name = "SEQ")]
         task: Option<i64>,
+        /// The file this fact is about. Repeatable. hird records what it says
+        /// now, so a later reader can be told when it has moved.
+        #[arg(long = "path", value_name = "PATH")]
+        paths: Vec<String>,
     },
     /// Search assertions.
     Search {
@@ -219,6 +254,19 @@ pub enum MemCommand {
         /// Include assertions that have been replaced.
         #[arg(long)]
         include_superseded: bool,
+    },
+    /// Audit what the memory still stands on.
+    ///
+    /// Every anchored assertion against the files it was learned from, oldest
+    /// first: which are still exactly what they were, which have moved, and
+    /// which were about code that no longer exists.
+    Standing {
+        /// Only the assertions worth re-reading — shaky and orphaned.
+        #[arg(long)]
+        shaky: bool,
+        /// Audit every project.
+        #[arg(long)]
+        all_projects: bool,
     },
 }
 
@@ -258,6 +306,8 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
         }
         Command::Recall { seq, limit } => recall(
             &db,
+            &config,
+            &project,
             *seq,
             limit.map(|n| n.min(200)).unwrap_or(config.recall_limit()),
             out,
@@ -281,6 +331,7 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
             look(&db, &config, &project);
             agents(&db, &scope_of(&project, &config, args.all_projects), out)
         }
+        Command::Recuse(args) => recuse(&db, args, out),
     }
 }
 
@@ -322,6 +373,9 @@ fn add(db: &Db, project: &str, args: &AddArgs, out: &mut impl Write) -> anyhow::
     if !args.paths.is_empty() {
         db.scopes()
             .declare(task.seq, &args.paths, ACTOR_CLI, OnConflict::Report)?;
+    }
+    if args.review {
+        db.tasks().set_review(task.seq, true, ACTOR_CLI)?;
     }
     writeln!(out, "{}", task.seq)?;
     Ok(())
@@ -521,6 +575,28 @@ fn count(n: usize, noun: &str) -> String {
         Some(stem) => format!("{n} {stem}ies"),
         None => format!("{n} {noun}s"),
     }
+}
+
+/// `hird recuse`: who must not work a task, and why.
+fn recuse(db: &Db, args: &RecuseArgs, out: &mut impl Write) -> anyhow::Result<()> {
+    if args.clear {
+        let removed = db.recusals().clear(args.seq, ACTOR_CLI)?;
+        writeln!(out, "lifted {removed} recusal(s) from task {}", args.seq)?;
+        return Ok(());
+    }
+    for from in &args.from {
+        db.recusals()
+            .add(args.seq, *from, &args.reason, ACTOR_CLI)?;
+    }
+    let recusals = db.recusals().for_task(args.seq)?;
+    if recusals.is_empty() {
+        writeln!(out, "task {} is recused from nothing", args.seq)?;
+        return Ok(());
+    }
+    for recusal in &recusals {
+        writeln!(out, "{}", recusal.describe())?;
+    }
+    Ok(())
 }
 
 fn scope_cmd(db: &Db, args: &ScopeArgs, out: &mut impl Write) -> anyhow::Result<()> {
@@ -765,8 +841,20 @@ fn ls_line(
 ///
 /// The same view an agent gets on `task_claim`, so a human can see what their
 /// swarm is being told — and notice when it is telling them something stale.
-fn recall(db: &Db, seq: i64, limit: usize, out: &mut impl Write) -> anyhow::Result<()> {
-    let recalled = db.recall().for_task(seq, limit)?;
+fn recall(
+    db: &Db,
+    config: &Config,
+    project: &str,
+    seq: i64,
+    limit: usize,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
+    let discovered = config.witness(Path::new(project));
+    let recalled = footing::decorate(
+        db,
+        config.footing(discovered.as_ref()),
+        db.recall().for_task(seq, limit)?,
+    );
     if recalled.is_empty() {
         writeln!(out, "nothing recorded so far touches task {seq}")?;
         return Ok(());
@@ -781,6 +869,19 @@ fn recall(db: &Db, seq: i64, limit: usize, out: &mut impl Write) -> anyhow::Resu
             item.assertion.actor,
             fmt::age_phrase(&item.assertion.created_at, now)
         )?;
+        // This is exactly what the agent will be handed on claiming, so the
+        // human reading it should see the same hedge the agent will.
+        if let Some(why) = item
+            .standing
+            .as_ref()
+            .filter(|s| s.needs_checking())
+            .and_then(Standing::describe)
+        {
+            writeln!(out, "    {why}")?;
+        }
+        if let Some(voices) = &item.corroboration {
+            writeln!(out, "    {voices}")?;
+        }
     }
     Ok(())
 }
@@ -826,6 +927,12 @@ fn show(db: &Db, seq: i64, config: &Config, out: &mut impl Write) -> anyhow::Res
     let patterns = db.scopes().for_task(seq)?;
     if !patterns.is_empty() {
         writeln!(out, "files     {}", patterns.join(", "))?;
+    }
+    if task.review {
+        writeln!(out, "review    on finishing, by another harness")?;
+    }
+    for recusal in db.recusals().for_task(seq)? {
+        writeln!(out, "recused   {}", recusal.describe())?;
     }
     for conflict in &conflicts {
         writeln!(out, "overlap   {}", conflict.describe())?;
@@ -873,9 +980,20 @@ fn show(db: &Db, seq: i64, config: &Config, out: &mut impl Write) -> anyhow::Res
 
     let learned = db.memory().for_task(&task.id)?;
     if !learned.is_empty() {
+        let discovered = config.witness(Path::new(&task.project));
+        let ids: Vec<String> = learned.iter().map(|a| a.id.clone()).collect();
+        let standings =
+            footing::standings(db, config.footing(discovered.as_ref()), &task.project, &ids);
         writeln!(out, "\nassertions recorded on this task")?;
         for assertion in learned {
             writeln!(out, "  - {}", fmt::truncate(&assertion.content, 88))?;
+            if let Some(why) = standings
+                .get(&assertion.id)
+                .filter(|s| s.needs_checking())
+                .and_then(Standing::describe)
+            {
+                writeln!(out, "    {why}")?;
+            }
         }
     }
 
@@ -904,21 +1022,49 @@ fn mem(
     cmd: &MemCommand,
     out: &mut impl Write,
 ) -> anyhow::Result<()> {
+    let discovered = config.witness(Path::new(project));
+    let witness = config.footing(discovered.as_ref());
     match cmd {
         MemCommand::Add {
             content,
             tags,
             task,
+            paths,
         } => {
-            let assertion = db.memory().store(NewAssertion {
+            let recorded = db.memory().record(NewAssertion {
                 project,
                 content,
                 tags,
                 actor: ACTOR_CLI,
                 task_seq: *task,
             })?;
-            writeln!(out, "{}", assertion.id)?;
+            let ground =
+                footing::ground(db, *task, Some(paths.as_slice()).filter(|p| !p.is_empty()));
+            let anchored = footing::anchor(db, witness, &recorded.assertion().id, &ground)?;
+            writeln!(out, "{}", recorded.assertion().id)?;
+            if recorded.was_affirmed() {
+                writeln!(
+                    out,
+                    "  already on record — affirmed, not duplicated{}",
+                    if anchored.is_empty() {
+                        String::new()
+                    } else {
+                        " and re-anchored".to_string()
+                    }
+                )?;
+            }
+            if !anchored.is_empty() {
+                let paths: Vec<&str> = anchored.iter().map(|a| a.path.as_str()).collect();
+                writeln!(out, "  anchored to {}", paths.join(", "))?;
+            }
             Ok(())
+        }
+        MemCommand::Standing {
+            shaky,
+            all_projects,
+        } => {
+            let scope = ProjectScope::resolve(project, config.all_projects(Some(*all_projects)));
+            standing(db, config, witness, &scope, *shaky, out)
         }
         MemCommand::Search {
             query,
@@ -937,7 +1083,10 @@ fn mem(
                 return Ok(());
             }
             let now = Utc::now();
+            let ids: Vec<String> = hits.iter().map(|a| a.id.clone()).collect();
+            let standings = footing::standings(db, witness, project, &ids);
             for assertion in hits {
+                let standing = standings.get(&assertion.id);
                 let mut meta = vec![
                     assertion.actor.clone(),
                     fmt::age_phrase(&assertion.created_at, now),
@@ -948,15 +1097,123 @@ fn mem(
                 if assertion.superseded_by.is_some() {
                     meta.push("superseded".to_string());
                 }
+                if let Some(standing) = standing.filter(|s| **s != Standing::Unanchored) {
+                    meta.push(standing.as_str().to_string());
+                }
                 if scope.is_all() {
                     meta.push(assertion.project.clone());
                 }
                 writeln!(out, "{}", assertion.content)?;
                 writeln!(out, "    {}  {}", assertion.id, meta.join("  "))?;
+                // Only the ones worth acting on explain themselves. A line
+                // saying "unchanged" under every row is how a reader learns to
+                // skip the line under the row that says otherwise.
+                if let Some(why) = standing
+                    .filter(|s| s.needs_checking())
+                    .and_then(|s| s.describe())
+                {
+                    writeln!(out, "    {why}")?;
+                }
             }
             Ok(())
         }
     }
+}
+
+/// `hird mem standing`: what the memory still stands on.
+///
+/// Deciding a standing means resolving paths against a working tree, and each
+/// project has its own — so with `--all-projects` this discovers a witness per
+/// project rather than measuring everybody's files against the checkout the
+/// command happened to be run from.
+fn standing(
+    db: &Db,
+    config: &Config,
+    witness: Option<&witness::Witness>,
+    scope: &ProjectScope,
+    shaky_only: bool,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
+    if witness.is_none() && !scope.is_all() {
+        writeln!(
+            out,
+            "no footing here: assertions are only anchored to files in a git checkout \
+             with `memory_footing` on"
+        )?;
+        return Ok(());
+    }
+    let anchored = db.footings().anchored(scope)?;
+    if anchored.is_empty() {
+        writeln!(out, "no anchored assertions")?;
+        return Ok(());
+    }
+
+    let now = Utc::now();
+    let mut by_project: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for assertion in &anchored {
+        by_project
+            .entry(assertion.project.as_str())
+            .or_default()
+            .push(assertion.id.clone());
+    }
+    let mut standings: BTreeMap<String, Standing> = BTreeMap::new();
+    for (project, ids) in by_project {
+        let discovered = config.witness(Path::new(project));
+        standings.extend(footing::standings(
+            db,
+            config.footing(discovered.as_ref()),
+            project,
+            &ids,
+        ));
+    }
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut shown = 0usize;
+
+    for assertion in &anchored {
+        let standing = standings
+            .get(&assertion.id)
+            .cloned()
+            .unwrap_or(Standing::Unanchored);
+        *counts.entry(standing.as_str()).or_default() += 1;
+        if shaky_only && !standing.needs_checking() {
+            continue;
+        }
+        shown += 1;
+        writeln!(
+            out,
+            "{:<9} {}",
+            standing.as_str(),
+            fmt::truncate(&assertion.content, 78)
+        )?;
+        let mut meta = vec![
+            assertion.actor.clone(),
+            fmt::age_phrase(&assertion.created_at, now),
+        ];
+        if scope.is_all() {
+            meta.push(assertion.project.clone());
+        }
+        writeln!(out, "    {}  {}", assertion.id, meta.join("  "))?;
+        writeln!(out, "    {}", standing.paths().join(", "))?;
+        if let Some(why) = standing.describe().filter(|_| standing.needs_checking()) {
+            writeln!(out, "    {why}")?;
+        }
+        if let Some(voices) = footing::corroboration(db, assertion) {
+            writeln!(out, "    {voices}")?;
+        }
+    }
+
+    if shown == 0 {
+        writeln!(
+            out,
+            "nothing shaky: every anchored assertion still checks out"
+        )?;
+    }
+    let summary: Vec<String> = counts
+        .iter()
+        .map(|(label, n)| format!("{n} {label}"))
+        .collect();
+    writeln!(out, "\n{} anchored: {}", anchored.len(), summary.join(", "))?;
+    Ok(())
 }
 
 #[cfg(test)]

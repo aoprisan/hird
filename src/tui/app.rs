@@ -11,7 +11,7 @@ use crate::config::Config;
 use crate::db::Db;
 use crate::glob;
 use crate::identity::ACTOR_TUI;
-use crate::model::{Assertion, Blocker, Conflict, Status, Task, TaskEvent, TaskSummary};
+use crate::model::{Assertion, Blocker, Conflict, Standing, Status, Task, TaskEvent, TaskSummary};
 use crate::repo::{dispatch_waves, MemoryQuery, ProjectScope, Recalled};
 
 /// How often the database is re-read.
@@ -90,6 +90,8 @@ pub struct Readiness {
     pub blocks: Vec<i64>,
     pub paths: Vec<String>,
     pub conflicts: Vec<Conflict>,
+    /// Harnesses this task is barred from, already written out.
+    pub recusals: Vec<crate::model::Recusal>,
 }
 
 /// A column of the kanban board.
@@ -199,6 +201,9 @@ pub struct App {
 
     /// Task number to the unfinished tasks it waits for.
     pub unmet: BTreeMap<i64, Vec<i64>>,
+    /// Task numbers that are somebody's review, so the board can say so
+    /// without opening each card.
+    pub reviews: BTreeMap<i64, i64>,
 
     // Swarm screen.
     pub agents: Vec<AgentRow>,
@@ -212,6 +217,16 @@ pub struct App {
     pub memory_total: i64,
     pub query: String,
     pub include_superseded: bool,
+    /// Show only the assertions whose footing has moved — the ones a re-read
+    /// would actually pay for.
+    pub shaky_only: bool,
+    /// Assertion id to how its footing compares with the tree right now.
+    /// Empty wherever there is no witness, which is why every reader treats a
+    /// missing entry as "nothing to say" rather than as "firm".
+    pub standings: BTreeMap<String, Standing>,
+    /// The selected assertion's other voices, when it has any. Kept to the
+    /// selection because that is the only place they are rendered.
+    pub voices: BTreeMap<String, String>,
     pub memory_selected: usize,
     /// Task id to human-facing number, for the "learned on #7" badge.
     pub task_seqs: BTreeMap<String, i64>,
@@ -220,6 +235,10 @@ pub struct App {
     /// Set when this project is somewhere the working tree can be watched.
     witness: Option<crate::witness::Witness>,
     last_look: DateTime<Utc>,
+    /// The assertion ids `standings` was last computed for, so a changed page
+    /// re-reads immediately and an unchanged one waits for the interval.
+    footed_ids: Vec<String>,
+    last_footing: DateTime<Utc>,
 }
 
 impl App {
@@ -241,6 +260,7 @@ impl App {
             column: Column::Open,
             selected: [0; 4],
             unmet: BTreeMap::new(),
+            reviews: BTreeMap::new(),
             agents: Vec::new(),
             waves: Vec::new(),
             swarm_selected: 0,
@@ -248,11 +268,16 @@ impl App {
             memory_total: 0,
             query: String::new(),
             include_superseded: false,
+            shaky_only: false,
+            standings: BTreeMap::new(),
+            voices: BTreeMap::new(),
             memory_selected: 0,
             task_seqs: BTreeMap::new(),
             last_poll: DateTime::from_timestamp(0, 0).unwrap_or_default(),
             witness: config_witness,
             last_look: DateTime::from_timestamp(0, 0).unwrap_or_default(),
+            footed_ids: Vec::new(),
+            last_footing: DateTime::from_timestamp(0, 0).unwrap_or_default(),
         }
     }
 
@@ -273,6 +298,47 @@ impl App {
         let _ = crate::witness::sweep(db, witness, &self.project, ACTOR_TUI);
     }
 
+    /// The witness memory may read the tree through, if the configuration
+    /// lets it.
+    pub fn footing(&self) -> Option<&crate::witness::Witness> {
+        self.config.footing(self.witness.as_ref())
+    }
+
+    /// How the assertion's footing compares with the tree, if hird knows.
+    pub fn standing(&self, assertion: &Assertion) -> Option<&Standing> {
+        self.standings.get(&assertion.id)
+    }
+
+    /// Re-read the footing under the assertions on screen, at most every
+    /// [`WITNESS_INTERVAL`].
+    ///
+    /// Throttled for the same reason [`App::look`] is, and rather harder: a
+    /// standing costs one file read and one SHA-256 per distinct anchored file,
+    /// and the poll runs twice a second. It is also recomputed immediately
+    /// whenever the visible set changes, so typing in the search box never
+    /// shows a badge belonging to a row that has scrolled away.
+    fn read_footing(&mut self, db: &Db) {
+        let ids: Vec<String> = self.assertions.iter().map(|a| a.id.clone()).collect();
+        let now = Utc::now();
+        let same_rows = ids == self.footed_ids;
+        if same_rows && now - self.last_footing < WITNESS_INTERVAL {
+            return;
+        }
+        self.last_footing = now;
+        self.footed_ids = ids;
+        self.standings =
+            crate::footing::standings(db, self.footing(), &self.project, &self.footed_ids);
+    }
+
+    /// Who else has stated the selected assertion, if anyone.
+    ///
+    /// Only the selection, because only the detail overlay shows it — asking
+    /// for every row would be two hundred queries twice a second to render one
+    /// line that is usually not on screen.
+    pub fn voices_of(&self, assertion: &Assertion) -> Option<&String> {
+        self.voices.get(&assertion.id)
+    }
+
     pub fn scope(&self) -> ProjectScope {
         ProjectScope::resolve(&self.project, self.all_projects)
     }
@@ -286,6 +352,7 @@ impl App {
         self.tasks = db.tasks().list(&scope, None)?;
         self.counts = db.tasks().counts(&scope)?;
         self.unmet = db.deps().unmet_map(&scope)?;
+        self.reviews = db.recusals().reviews(&scope)?;
         self.waves = dispatch_waves(&self.tasks, &db.deps().edges(&scope)?);
         self.look(db);
         self.agents = agent_rows(
@@ -307,6 +374,12 @@ impl App {
                 .limit(MEMORY_PAGE)
                 .include_superseded(self.include_superseded),
         )?;
+        self.read_footing(db);
+        if self.shaky_only {
+            let standings = &self.standings;
+            self.assertions
+                .retain(|a| standings.get(&a.id).is_some_and(Standing::needs_checking));
+        }
         self.memory_total = db.memory().count_current(&scope)?;
         self.task_seqs = db.tasks().seq_index()?;
         self.last_poll = Utc::now();
@@ -529,8 +602,31 @@ impl App {
                     "showing current assertions only".to_string()
                 });
             }
+            KeyCode::Char('f') if self.footing().is_none() => {
+                self.warn(
+                    "no footing in this project — assertions are only anchored to files in a \
+                     git checkout with `memory_footing` on"
+                        .to_string(),
+                );
+            }
+            KeyCode::Char('f') => {
+                self.shaky_only = !self.shaky_only;
+                self.memory_selected = 0;
+                self.refresh(db)?;
+                self.note(if self.shaky_only {
+                    "showing only assertions whose files have moved".to_string()
+                } else {
+                    "showing every assertion".to_string()
+                });
+            }
             KeyCode::Enter => {
                 if let Some(assertion) = self.selected_assertion().cloned() {
+                    // Looked up here rather than on every poll: this is the one
+                    // place it is drawn, and it is one query for one row.
+                    self.voices.clear();
+                    if let Some(sentence) = crate::footing::corroboration(db, &assertion) {
+                        self.voices.insert(assertion.id.clone(), sentence);
+                    }
                     self.mode = Mode::AssertionDetail {
                         assertion: Box::new(assertion),
                     };
@@ -725,6 +821,7 @@ impl App {
                 .collect(),
             paths: db.scopes().for_task(seq)?,
             conflicts,
+            recusals: db.recusals().for_task(seq)?,
         };
         // Only what came from elsewhere: `learned` already holds this task's
         // own assertions, listed under their own heading.

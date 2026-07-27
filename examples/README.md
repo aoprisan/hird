@@ -15,6 +15,8 @@ installed, but nothing requires it.
 | [`plan-file.sh`](plan-file.sh) | **The plan as a file** — read it before it is filed, file the whole graph in one transaction, edit it and file it again. |
 | [`plan.toml`](plan.toml) | The plan format, annotated, every field at work. |
 | [`witness.sh`](witness.sh) | **What actually happened** — two agents, one checkout, one file, and the warning that arrives while there is still time to act on it. |
+| [`footing.sh`](footing.sh) | **Memory that knows when it went stale** — a fact recorded against a file, that file rewritten, and every later reader told so without anybody curating anything. |
+| [`review.sh`](review.sh) | **No agent reviews its own work** — finishing files the review, scoped to what actually moved, and the queue refuses it to the harness that did it. |
 | [`task-body.md`](task-body.md) | A task body worth writing, for `--body-file`. |
 | [`config.toml`](config.toml) | Every configuration key, annotated, at its default. |
 | [`harness/`](harness) | Drop-in MCP registration for Claude Code, Codex CLI and VS Code. |
@@ -25,6 +27,8 @@ installed, but nothing requires it.
 ./examples/swarm-plan.sh
 ./examples/plan-file.sh
 ./examples/witness.sh          # needs git; makes its own throwaway repository
+./examples/footing.sh          # likewise
+./examples/review.sh           # likewise
 ```
 
 ## Why the scripts speak JSON-RPC
@@ -39,7 +43,7 @@ Each `mcp <harness>` call in a script is one agent session with its own identity
 (`codex:9f2c`), and its lease outlives the process — which is exactly why the
 next session in the script is handed something else.
 
-`witness.sh` needs more than that. To show two agents taking turns in one file
+`witness.sh`, `footing.sh` and `review.sh` need more than that. To show two agents taking turns in one file
 it has to keep both sessions open and edit the tree *between* their calls, so it
 uses `session_open` / `session_call` instead: a pair of fifos per session, and
 every call waiting for its own answer. A heredoc will not do it — a script

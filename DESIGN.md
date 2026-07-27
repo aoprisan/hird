@@ -604,3 +604,252 @@ a plan and apply it unread would have removed it. An agent that discovers its
 task is really three jobs already has `task_split`, which puts the pieces in
 front of the *other* agents and keeps the human on the board rather than in the
 loop.
+
+## 14. (v1.4) Footing — memory that knows when its evidence moved
+
+Everything hird stores about a *task* is answerable. A claim has a holder. A
+declared scope has an overlap. A footprint has a diff. §12 exists because the
+one thing agents could not be trusted to report was what they had actually
+done, so the queue went and looked.
+
+Memory was never held to that standard, and it is the half where it matters
+most. An assertion recorded in March is served up in July in the same voice,
+with the same confidence, whether the code it describes has been untouched
+since or rewritten twice. That is how a shared memory stops being an asset —
+not by filling up with lies, which a human would notice, but by filling up with
+sentences that *were* true, which nobody notices, because reading one tells you
+nothing about which kind you have.
+
+The sentence cannot tell you. The code can.
+
+### Migration 5
+
+```sql
+CREATE TABLE assertion_footing (
+  assertion_id TEXT NOT NULL REFERENCES assertions(id),
+  path         TEXT NOT NULL,
+  hash         TEXT NOT NULL DEFAULT '',
+  at           TEXT NOT NULL,
+  PRIMARY KEY (assertion_id, path)
+);
+
+CREATE TABLE assertion_affirmations (
+  assertion_id TEXT NOT NULL REFERENCES assertions(id),
+  actor        TEXT NOT NULL,
+  at           TEXT NOT NULL,
+  PRIMARY KEY (assertion_id, actor)
+);
+```
+
+An assertion's **footing** is the files it was read off and the content hash
+each of them had at the time. Any later reader asks the working tree whether
+that ground has moved. hird can afford this for almost nothing because §12 is
+already fingerprinting files for a different reason — the whole feature is one
+table, one hash per anchored file per read, and the module that decides what it
+means.
+
+### It reports, it does not judge
+
+`Standing` has four values and none of them is `false`:
+
+| | |
+|---|---|
+| `unanchored` | No files were recorded. hird has nothing to say, and says nothing. |
+| `firm` | Every file it was read off still hashes to what it hashed to. |
+| `shaky` | At least one does not. |
+| `orphaned` | All of them are gone. |
+
+A changed file does not falsify an assertion. A rename, a `cargo fmt` and a
+total rewrite are indistinguishable from here, and a queue that announced
+"this fact is now wrong" on the strength of a whitespace change would be
+training every reader to ignore it. `shaky` means **unverified**, which is a
+weaker claim and a far more useful one, because that set is exactly where
+opening the file pays for itself.
+
+`orphaned` is held to the strongest condition available — not one file gone,
+but nothing left standing — for the same reason. An assertion about three files
+of which one was deleted is shaky; the other two may still be exactly what it
+describes.
+
+### Where the footing comes from
+
+Two sources, unioned, and the asymmetry is deliberate:
+
+- **What the task declared**, but only its *literal* paths. A glob names a set
+  nobody has enumerated, and hird will not guess at its members.
+- **What the witness saw move.** This covers the agent that never declared
+  anything — most of them, in practice — and a realized glob's members are in
+  here already by construction: they are the files that actually changed.
+
+An agent may also name files outright (`mem_store` gained a `paths` argument),
+which is the escape hatch for a fact not tied to a task. An assertion with
+neither stays unanchored, because inventing a footing for a general statement
+about the project would be inventing a reason to distrust it later.
+
+The two are not interchangeable, and `assertion_footing.named` records which
+happened. **A derived footing never overwrites a named one.** Deriving is hird
+being helpful where nobody said anything; overruling a stated footing — on a
+finishing task, or when somebody else restates the fact — would be hird
+deciding it knows better than the agent that wrote the sentence, about a file
+that agent may have chosen precisely because the task never went near it. The
+rule lives in `Footings::anchor` rather than at its call sites, so there is one
+authority for it and no way to route around it.
+
+### One project at a time
+
+An anchor is a path relative to *its own* project root, and a `Witness` can
+only answer for one tree. `Footings::anchors_for` therefore takes the project
+it is being resolved for, and a cross-project search gets standings for the
+rows hird can vouch for and silence for the rest. `hird mem standing
+--all-projects` does the other thing available — discovers a witness per
+project — because there it is a report rather than a hot path. Resolving
+another checkout's relative paths against this one would produce answers that
+look exactly like facts.
+
+### Settling, which is what makes it quiet enough to read
+
+A fact recorded in the third minute of a task is a statement about the code as
+it was in the third minute, and by the time that task finishes its own author
+has usually edited that code. Without a correction, every task would mark its
+own facts shaky by its own hand, and `shaky` would mean nothing at all.
+
+So finishing a task **settles** what it learned: re-anchors every assertion
+recorded on it to the tree it is leaving behind. After that, `shaky` means
+*somebody else moved this*, which is the only reading worth a warning. Like the
+sweep it rides beside, it is best-effort in the strongest sense — nothing it
+does may turn a completed task into a failed one.
+
+### The way back, without a thirteenth tool
+
+An agent that checks a shaky fact and finds it still true has exactly one way to
+say so: say the fact again. It should not have to know anything else. So that is
+what hird made it mean — `mem_store` with content that matches an existing
+current assertion **word for word** does not duplicate it. It records this actor
+as another voice for it and re-anchors it to today's code, and the answer says
+`affirmed: true`.
+
+Word for word is the deliberate bar. Two sentences that mean the same thing are
+a judgement call, and a memory store that quietly merged what a model thought
+were similar would be a memory store that loses facts.
+
+Two things fall out of it. Duplicate assertions stop accumulating, which is the
+oldest complaint about assertion memories. And the affirmation table counts
+*voices* rather than sentences, so hird can say the thing no single harness is
+positioned to say: **two agents in two different harnesses, unable to see each
+other's sessions, arrived at the same fact independently.** That is a trust
+signal only the process both of them talk to can produce.
+
+### Still twelve MCP tools
+
+`mem_store` gained an argument and `mem_search` and recall gained a field. There
+is no `mem_verify`, no `mem_reaffirm` and no `mem_audit`: something an agent has
+to know to ask for is something it will not ask for, and the confirmation an
+agent already had a reason to perform is the one that should carry the
+re-grounding. The human's audit — `hird mem standing`, and `f` in the memory
+browser — is a CLI and TUI concern, because deciding what to do about a memory
+that has drifted is a human's job and always was.
+
+### Off is off
+
+`memory_footing = false`, or a project outside git, and memory behaves exactly
+as it did before any of this existed: no anchors written, no standing computed,
+no `standing` field in any payload, and the `initialize` instructions do not
+mention it — a model told to read a field nothing will ever populate has been
+handed a rule it cannot use and a reason to doubt the ones it can. That is the
+same rule §12 lives by, for the same reason.
+
+## 15. (v1.5) Recusal — no agent reviews its own work
+
+Every result line in the queue was written by the agent that produced the work
+it describes. `task_complete` takes a summary; the summary is the last word;
+nobody else ever looks. §12 exists because that same asymmetry was intolerable
+for *what an agent did*, and went and read the disk instead. It was left in
+place for *whether the work was any good*.
+
+For one agent that is not a choice — there is nobody else to ask. For a swarm
+it is, and a strange one, because the single most valuable property of running
+three different models on one codebase is precisely that they are not the same
+model, and the cheapest way to spend that is to have them read each other.
+
+Every harness can review code. What none of them can do is know *whose* code it
+is looking at: a harness cannot see another harness's session, and an agent
+asked "review this" has no way to tell whether it is being handed its own work
+from an hour ago. hird can. It is the process all of them talk to, and it wrote
+down who held the lease.
+
+### Migration 6
+
+```sql
+CREATE TABLE task_recusals (
+  task_id      TEXT NOT NULL REFERENCES tasks(id),
+  from_task_id TEXT NOT NULL REFERENCES tasks(id),
+  reason       TEXT NOT NULL DEFAULT '',
+  actor        TEXT NOT NULL,
+  at           TEXT NOT NULL,
+  PRIMARY KEY (task_id, from_task_id),
+  CHECK (task_id <> from_task_id)
+);
+
+ALTER TABLE tasks ADD COLUMN review INTEGER NOT NULL DEFAULT 0;
+```
+
+A **recusal** is one edge: *whoever worked task N must not work this one*. It is
+the second kind of edge in the graph and the mirror of the first — `task_deps`
+constrains *when* a task may be claimed, `task_recusals` constrains *who* may
+claim it — and like dependencies it is enforced rather than annotated.
+
+### Three decisions
+
+**The bar is the harness, not the session.** Two Claude Code windows are one
+model reading its own homework. A recusal that excluded only the exact session
+would be satisfied by opening a new tab, which is to say satisfied by nothing.
+`actor_harness` already exists for the badge colours; here it decides an
+outcome.
+
+**It is enforced where the claim is decided.** `claim_in_tx` checks it in the
+same `IMMEDIATE` transaction as the compare-and-set, between the dependency
+check and the `UPDATE`, so there is no race to win and a refused claim leaves no
+trace. `claim_next` checks it too, but as a *filter* — dispatch routes around a
+recused task rather than handing out something it would then refuse, because an
+agent that asked for "whatever is workable" and got an error would reasonably
+conclude the queue was empty.
+
+**Who worked a task is read from the trail, not the row.** Completing clears
+`claimed_by`, so `worker_of` takes the latest of the `claimed`, `completed` and
+`failed` events. That gets the awkward cases right for free: work released and
+picked up by somebody else is credited to whoever finished it, and a recusal
+filed before anybody has worked the task bars nobody rather than locking the
+queue.
+
+### Why the review files itself
+
+A review a human has to remember to file is a review that does not happen. This
+is the same observation recall and the witness are built on — *something an
+agent has to know to ask for is something it will not ask for* — pointed at the
+human for once.
+
+So `tasks.review` is a flag set when the work is filed (`hird add --review`,
+`review = true` in a plan), and completing a task that carries it files the
+review as an ordinary task: titled after the work, at the same priority,
+**scoped to the files the witness actually saw move** rather than the ones
+anybody declared, carrying the author's own summary marked as the thing under
+review rather than as the brief, and recused from the task it reviews.
+
+It declines to file in three cases, and each of them is a case where filing
+would put noise on a human's board: work the witness saw no trace of, work that
+`failed` — there is nothing to check, and whether the attempt is worth reading
+is the human's call — and work whose previous review is still unfinished, so
+reopening and re-completing cannot stack them up.
+
+### It is a constraint, not a scheduler
+
+A recusal says who may **not** take a task. It never says who must, nothing here
+pushes work at anybody, and §13's rule holds unchanged: a plan file may carry
+`review = true` because `tasks.review` is a column, and may not carry anything
+that would decide *when* work runs.
+
+The consequence is that a queue with one harness on it and a recusal in it has
+one task nobody can claim. That is reported rather than papered over — a
+`task_next` whose only remaining candidates are recused says so in as many
+words, because "nothing is open" would send the human away from the one thing
+that needs them, and the fix is to open a different tool rather than to wait.

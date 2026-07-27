@@ -24,6 +24,17 @@ one blind spot, `hird` also watches the working tree — so when a file two agen
 both declared moves under both of them, they hear about it while there is still
 time to re-read it, instead of at merge time.
 
+The same look at the tree is what keeps the memory honest. A fact is recorded
+against the files it was read off, so when that code is rewritten the fact
+arrives marked *unverified* rather than arriving looking exactly like one
+learned this morning. Confirm it and it goes back to standing; the way to
+confirm it is to say it again.
+
+And because the point of running three different models is that they are not
+the same model, work can be marked for review: finishing it files a review of
+exactly what changed, and the queue refuses that review to the harness that did
+the changing. No agent gets to be the last word on its own work.
+
 No daemon. No server. No accounts.
 
 - 📖 **Documentation: [aoprisan.github.io/hird](https://aoprisan.github.io/hird/)**
@@ -431,6 +442,84 @@ Measured on this repository: about 8 ms for a claim and 6 ms for a check-in,
 against 0.5 ms for a call that never looks — three git subprocesses, against a
 heartbeat measured in minutes. `witness = false` turns it off.
 
+## No agent reviews its own work
+
+Every result line in the queue was written by the agent that did the work. It is
+the last word, and nobody else ever looks. With one agent that is not a choice.
+With three it is a waste of the only thing that makes running three worth doing.
+
+Every harness can review code already. None of them can tell *whose* code it is
+looking at — a harness cannot see another harness's session, and an agent handed
+"review this" has no way to know it wrote it an hour ago. hird can: it is the
+process all of them talk to, and it wrote down who held the lease.
+
+```sh
+hird add "Port the config loader" --review --path src/config.rs
+```
+
+That is the whole opt-in, and it says nothing about who or when. Codex claims
+it, works it, and finishes the way it always does:
+
+```
+task_complete { seq: 1, result: "ported; env still wins over the file" }
+
+{ "seq": 1, "status": "done", "changed": ["src/config.rs (modified)"],
+  "review_filed": 2,
+  "advice": "this work was marked for review, so task 2 is now open for an agent
+             in another harness — you cannot take it yourself. Tell the human." }
+```
+
+Task 2 was filed by the completion. It is titled after the work, scoped to the
+file the **witness saw move** rather than the one anybody declared, and its body
+carries codex's own summary marked as the thing under review rather than as the
+brief. Then:
+
+```
+task_next {}                       # asked by codex
+
+{ "idle": "1 task is ready, but every one of them is a review of work this
+           harness did — they need an agent in another harness. Tell the human;
+           waiting will not change it",
+  "recused": [{ "seq": 2, "why": "not whoever worked task 1 (Port the config
+                loader): that was codex:43em, so this needs another harness" }] }
+```
+
+Not "nothing to do". The queue is not idle — it is waiting for a different tool,
+and an agent told the queue was empty would send you away from the one thing
+that needs you. Claiming it by name is refused too, in the same transaction as
+the compare-and-set, so there is no race to win.
+
+**The bar is the harness, not the session.** Two Claude Code windows are one
+model reading its own homework; a bar you could get around by opening a tab
+would be no bar at all.
+
+**It is a constraint, not a scheduler.** A recusal says who may *not* take a
+task and never who must. Run one harness and the review simply sits there
+unclaimable — which the board says plainly, because that is a fact about your
+setup rather than something to paper over.
+
+You can set the bar by hand, and lift it:
+
+```sh
+hird recuse 7 --from 4 --reason "wrote the thing being checked"
+hird recuse 7 --clear
+```
+
+And a plan file is where the judgement belongs, since which work deserves a
+second pair of eyes is a property of the job:
+
+```toml
+[[task]]
+name = "renderer"
+title = "Rewrite the renderer"
+paths = ["src/tui/**"]
+review = true
+```
+
+Nothing is filed for work the witness saw no trace of, for work that `failed` —
+there is nothing to check, and whether the attempt is worth reading is your
+call — or while an earlier review of the same work is still open.
+
 ## Memory
 
 The queue is for work; memory is for what the work taught you. Agents call
@@ -507,11 +596,101 @@ the loader reads HIRD_DB before the config file
 
 Five facts ride along by default; `recall_limit = 0` switches it off.
 
+### Footing: a fact knows what it was learned against
+
+A memory that only grows is a memory that eventually lies to you. Not by
+filling up with falsehoods — you would notice those — but by filling up with
+sentences that *were* true. A fact recorded in March about a file that has been
+rewritten twice since arrives in July in exactly the same voice as one recorded
+this morning, and nothing about reading it tells you which is which.
+
+The sentence cannot tell you. The code can. So hird records what an assertion
+was read off — the files behind it, and the content hash each one had at the
+time — and every later reader is told whether that ground has moved.
+
+```
+$ hird mem standing
+firm      the loader reads HIRD_DB before the config file
+    01J…  codex:9f2c  2h ago
+    src/config.rs
+shaky     the renderer redraws on every poll
+    01J…  claude-code:af31  3d ago
+    src/tui/view.rs
+    src/tui/view.rs has changed since this was recorded — re-read before relying on it
+
+2 anchored: 1 firm, 1 shaky
+```
+
+Nobody curated that. Nobody notified hird that `src/tui/view.rs` had changed.
+The fact remembers which file it came from and what that file said, and the
+file no longer says it.
+
+The same word rides along everywhere a fact is served — `mem_search` results,
+the memory browser, and the `recalled` list a claim arrives with, which is the
+one that matters most because it lands in an agent's context unasked:
+
+```
+"recalled": [
+  { "content": "the renderer redraws on every poll",
+    "why": "learned on task 4 (Fix the renderer), working src/tui/view.rs",
+    "standing": "shaky",
+    "caution": "src/tui/view.rs has changed since this was recorded — re-read before relying on it" } ]
+```
+
+**It never says a fact is false.** A rename, a formatting pass and a total
+rewrite look identical from here. `shaky` means *unverified*, which is a
+weaker claim and a much more useful one: it is exactly the set of facts where
+opening the file pays for itself. `orphaned` — every file it was about is gone —
+is the strongest thing hird will say, and it still stops short of a verdict.
+
+Where the files come from needs nothing from the agent. A fact stored with
+`task_seq` is anchored to the literal paths that task declared plus everything
+the witness saw it move; `mem_store { paths: [...] }` names them outright for a
+fact that belongs to no task. A fact with neither stays unanchored, and hird
+says nothing about it rather than guessing.
+
+#### Saying it again is how you say you checked
+
+An agent that re-reads a shaky fact and finds it still true has one way to say
+so, and it should not need to know any more than that: say the fact again.
+
+```sh
+hird mem add "the renderer redraws on every poll" --path src/tui/view.rs
+# 01J…
+#   already on record — affirmed, not duplicated and re-anchored
+```
+
+No second row, no lost provenance. The original is re-anchored to today's code
+and you are recorded as another voice for it. That kills duplicate assertions —
+the oldest complaint about memory stores — and buys something else on the way
+past: hird counts *voices*, not sentences, so it can say the thing no single
+harness is positioned to say.
+
+```
+also stated by codex:9f2c, independently across 2 harnesses
+```
+
+Two agents that cannot see each other's sessions arrived at the same fact. Only
+the process both of them talk to can know that.
+
+#### Why it stays quiet
+
+A task that records a fact and then keeps editing the same file would, left
+alone, mark its own fact shaky by its own hand. Finishing a task **settles**
+what it learned against the tree it is leaving behind, so `shaky` keeps meaning
+*somebody else moved this* — which is the only reading worth a warning, and a
+warning that fires on everything is a warning nobody reads.
+
+It rides on the same working-tree access as the witness, and is off wherever
+that is: no git, or `memory_footing = false`, and memory behaves exactly as it
+did before any of this existed — no anchors, no `standing` field, and the
+`initialize` instructions do not mention it.
+
 ## Command line
 
 ```
 hird add <title> [--body <md>|--body-file <path>] [--priority N] [--project <path>]
-                 [--needs <seq>,…] [--path <glob>]…
+                 [--needs <seq>,…] [--path <glob>]… [--review]
 hird ls [--status <status>] [--all-projects]
 hird show <seq>
 hird cancel <seq> [--reason <text>]
@@ -522,9 +701,11 @@ hird plan apply <file> [--dry-run] [--project <path>]
 hird graph [--all-projects]
 hird scope <seq> [--path <glob>]… [--clear]
 hird agents [--all-projects]
+hird recuse <seq> --from <seq>,… [--reason <text>] | --clear
 hird recall <seq> [--limit N]
-hird mem add <content> [--tags a,b] [--task <seq>]
+hird mem add <content> [--tags a,b] [--task <seq>] [--path <file>]…
 hird mem search [query] [--limit N] [--all-projects] [--include-superseded]
+hird mem standing [--shaky] [--all-projects]
 hird tui
 hird mcp
 hird db-path
@@ -576,6 +757,7 @@ moving under them.
 | `Enter` | show the assertion and its provenance |
 | `d` | supersede it with something truer |
 | `s` | show or hide superseded assertions |
+| `f` | only the facts whose files have moved since |
 
 | Key | Swarm |
 |---|---|
@@ -583,7 +765,9 @@ moving under them.
 | `Enter` | open the task that agent is holding |
 
 Cards on the queue board carry a yellow `waits #1 #3` badge when a task looks
-open but nobody can actually claim it yet.
+open but nobody can actually claim it yet, and a magenta `reviews #4` badge when
+a task is somebody's review — which decides who can take it, and is exactly the
+thing you cannot tell from the title.
 
 ## Projects
 
@@ -627,6 +811,11 @@ recall_limit = 5
 # Needs git, goes quiet by itself where there is none, and costs nothing while
 # no task in the project holds a lease. Default true.
 witness = true
+
+# Whether an assertion remembers the files it was learned against, so a later
+# reader is told when that code has moved. Rides on the same working-tree access
+# as `witness` and is off wherever that is. Default true.
+memory_footing = true
 ```
 
 Agents are told the configured TTL in the MCP handshake and asked to check in at
@@ -645,7 +834,7 @@ Twelve, and no more.
 
 | Tool | Purpose |
 |---|---|
-| `task_list` | What work exists, optionally filtered by status. |
+| `task_list` | What work exists, optionally filtered by status — marking the ones your harness cannot claim. |
 | `task_get` | One task in full: dependencies, file scope, recent history. |
 | `task_next` | **Be handed the next workable task, already claimed.** |
 | `task_claim` | Take a named task. Atomic; fails if someone else has it. |
@@ -655,17 +844,18 @@ Twelve, and no more.
 | `task_complete` | Finish, with a summary. Holder only. |
 | `task_fail` | Give up, with a reason. Holder only. |
 | `task_release` | Hand the task back unfinished, still claimable. Holder only. |
-| `mem_store` | Record one durable fact. |
-| `mem_search` | Find facts recorded earlier, by anyone. |
+| `mem_store` | Record one durable fact — or, said again word for word, confirm one. |
+| `mem_search` | Find facts recorded earlier, by anyone, each marked with whether its code has moved since. |
 
 Results are compact JSON. Failures come back as `isError` text rather than
 protocol errors, so a model can relay them to you as-is instead of reporting
 that a tool broke.
 
-Neither of the two things an agent is told without asking needed a thirteenth
-tool. Recall rides along with the claim; `changed`, `contended` and `undeclared`
-ride along with every check-in and every finishing call. Something an agent has
-to know to ask for is something it will not ask for.
+None of the things an agent is told without asking needed a thirteenth tool.
+Recall rides along with the claim; `changed`, `contended` and `undeclared` ride
+along with every check-in and every finishing call; `standing` rides along with
+every fact hird serves. Something an agent has to know to ask for is something
+it will not ask for.
 
 ## Examples
 
@@ -677,6 +867,8 @@ points `HIRD_DB` at a throwaway file, so running one cannot disturb your board.
 ./examples/swarm-plan.sh        # file a plan, three agents pull from it
 ./examples/plan-file.sh         # the same plan as a file: read it, file it, edit it
 ./examples/witness.sh           # two agents in one file, caught in the act
+./examples/footing.sh           # a fact, the file it came from, and that file rewritten
+./examples/review.sh            # work that files its own review, barred to whoever did it
 ```
 
 They open real `hird mcp` sessions and send the tool calls a harness would,
@@ -740,9 +932,13 @@ way. Recall came out of the same observation applied to the other half: the
 queue already knew which memory was relevant to a task, and was making agents
 guess at it. The witness (§12) came from noticing that every one of those
 answers was still assembled out of things agents had said about themselves, and
-that the one failure worth catching is the one nobody reports. Still absent:
-multi-machine sync and vector search. The append-only event trail is meant to
-make sync tractable later.
+that the one failure worth catching is the one nobody reports. Footing (§14) is
+that same look at the working tree turned on the memory: an assertion is a
+statement about code, code changes, and until now nothing anywhere noticed.
+Recusal (§15) is the third application of the same idea: the one thing an agent
+cannot honestly report is whether its own work is any good, and hird is the only
+process in the room that knows whose work it is. Still absent: multi-machine sync and vector search. The append-only event trail
+is meant to make sync tractable later.
 
 ## Licence
 

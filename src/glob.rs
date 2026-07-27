@@ -51,6 +51,16 @@ pub fn is_everything(pattern: &str) -> bool {
     normalize(pattern).is_some_and(|p| p == "**")
 }
 
+/// Does `pattern` name exactly one path, with nothing wild in it?
+///
+/// The distinction matters wherever hird has to turn intent into files without
+/// asking the filesystem: a literal names its one member, while `src/**` names
+/// a set whose membership only a directory walk could settle — and guessing at
+/// it would be inventing facts.
+pub fn is_literal(pattern: &str) -> bool {
+    normalize(pattern).is_some_and(|p| !p.contains(['*', '?']))
+}
+
 /// Does `path` — a literal path, not a pattern — match `pattern`?
 pub fn matches(pattern: &str, path: &str) -> bool {
     let (Some(pattern), Some(path)) = (normalize(pattern), normalize(path)) else {
@@ -188,6 +198,19 @@ fn chars_agree(a: char, b: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_literal_names_one_path_and_a_glob_names_a_set() {
+        assert!(is_literal("src/config.rs"));
+        assert!(is_literal("./src/config.rs"));
+        assert!(!is_literal("src/*.rs"));
+        assert!(!is_literal("src/**"));
+        assert!(!is_literal("src/config.r?"));
+        // A directory written as one is `**` after normalization, so it is a
+        // set even though nothing in it was typed with a star.
+        assert!(!is_literal("src/"));
+        assert!(!is_literal(""));
+    }
 
     #[test]
     fn normalization_strips_the_noise_a_human_types() {

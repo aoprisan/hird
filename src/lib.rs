@@ -11,6 +11,8 @@
 //! - [`db`] — connection setup and schema migrations
 //! - [`repo`] — the only place SQL is written
 //! - [`witness`] — the only place the working tree is read
+//! - [`footing`] — the second reader of it, on memory's behalf: what an
+//!   assertion was learned against, and whether that has moved since
 //! - [`plan`] — a dependency graph as a file, which [`repo`] turns into rows
 //! - [`mcp`], [`cli`], [`tui`] — the three front ends, which call [`repo`]
 
@@ -19,6 +21,7 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod fmt;
+pub mod footing;
 pub mod glob;
 pub mod hash;
 pub mod identity;
