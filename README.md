@@ -834,7 +834,7 @@ Twelve, and no more.
 
 | Tool | Purpose |
 |---|---|
-| `task_list` | What work exists, optionally filtered by status. |
+| `task_list` | What work exists, optionally filtered by status — marking the ones your harness cannot claim. |
 | `task_get` | One task in full: dependencies, file scope, recent history. |
 | `task_next` | **Be handed the next workable task, already claimed.** |
 | `task_claim` | Take a named task. Atomic; fails if someone else has it. |

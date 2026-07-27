@@ -4,6 +4,7 @@
 //! result is compact JSON; every error is a sentence the model can relay to the
 //! human verbatim.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -16,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::Config;
 use crate::db::Db;
 use crate::error::Error;
+
 use crate::footing;
 use crate::identity::{self, AgentId};
 use crate::model::{
@@ -469,10 +471,20 @@ struct TaskRow {
     /// cannot be claimed yet.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     blocked_by: Vec<i64>,
+    /// Set when this task is a review of work *you* did, so you cannot claim
+    /// it however open it looks. Same reason `blocked_by` is here: a list that
+    /// shows unclaimable work as available is lying to whoever reads it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recused_from_you: Option<String>,
 }
 
 impl TaskRow {
-    fn from_summary(summary: TaskSummary, show_project: bool, blocked_by: Vec<i64>) -> TaskRow {
+    fn from_summary(
+        summary: TaskSummary,
+        show_project: bool,
+        blocked_by: Vec<i64>,
+        recused: Option<Recusal>,
+    ) -> TaskRow {
         TaskRow {
             seq: summary.seq,
             title: summary.title,
@@ -482,6 +494,7 @@ impl TaskRow {
             updated_at: summary.updated_at,
             project: show_project.then_some(summary.project),
             blocked_by,
+            recused_from_you: recused.map(|r| r.describe()),
         }
     }
 }
@@ -1100,16 +1113,38 @@ impl HirdMcp {
         let scope = self.scope(args.all_projects);
         let show_project = scope.is_all();
 
-        let (released, tasks, unmet) = self.with_db(|db| {
+        let actor = self.actor();
+        let (released, tasks, unmet, recused) = self.with_db(|db| {
             let released = db
                 .tasks()
                 .sweep_leases()
                 .map(|s| s.expired)
                 .unwrap_or_default();
+            let listed = db.tasks().list(&scope, status);
+            // Which of these this session is barred from. Only the open ones
+            // are worth asking about: a claimed or finished task's claimability
+            // is not the reader's question.
+            let recused: BTreeMap<i64, Recusal> = listed
+                .as_ref()
+                .map(|tasks| {
+                    tasks
+                        .iter()
+                        .filter(|t| t.status == Status::Open)
+                        .filter_map(|t| {
+                            db.recusals()
+                                .bars(t.seq, &actor)
+                                .ok()
+                                .flatten()
+                                .map(|r| (t.seq, r))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             (
                 released,
-                db.tasks().list(&scope, status),
+                listed,
                 db.deps().unmet_map(&scope).unwrap_or_default(),
+                recused,
             )
         });
         let tasks = tasks.map_err(stringify)?;
@@ -1122,7 +1157,8 @@ impl HirdMcp {
                 .into_iter()
                 .map(|t| {
                     let blocked = unmet.get(&t.seq).cloned().unwrap_or_default();
-                    TaskRow::from_summary(t, show_project, blocked)
+                    let barred = recused.get(&t.seq).cloned();
+                    TaskRow::from_summary(t, show_project, blocked, barred)
                 })
                 .collect(),
             released,

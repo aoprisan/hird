@@ -187,10 +187,11 @@ pub(super) fn worker_of(conn: &Connection, task_id: &str) -> Result<Option<Strin
 ///
 /// Three things it refuses to do. It will not file a review of work the witness
 /// saw no trace of, because a review with nothing to read is busywork on
-/// somebody's board. It will not file a second review while the first is
-/// unfinished, so re-completing a reopened task cannot stack them up. And it
-/// never fails the completion: a task that could not have a review filed for it
-/// is still a task that is done.
+/// somebody's board. It will not file one while some unfinished task is already
+/// recused from this work — which is exactly what being its review means, so
+/// this covers both a review still open and one a human filed by hand, and it
+/// is what keeps a reopened task from stacking them up. And it never fails the
+/// completion: a task that could not have a review filed for it is still done.
 pub(super) fn file_review(
     tx: &Transaction<'_>,
     task: &crate::model::Task,

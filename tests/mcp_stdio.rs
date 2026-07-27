@@ -976,6 +976,16 @@ fn work_marked_for_review_is_handed_to_a_different_harness() {
     assert!(refused.contains("codex"), "{refused}");
     assert!(refused.contains("a different harness"), "{refused}");
 
+    // And the list says so too, rather than showing it as available work.
+    let listed = codex.call("task_list", json!({"status": "open"})).unwrap();
+    assert!(
+        listed["tasks"][0]["recused_from_you"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("another harness"),
+        "{listed}"
+    );
+
     // Nor by asking for "whatever is workable" — dispatch routes around it
     // rather than handing out something it will then refuse.
     let next = codex.call("task_next", json!({})).unwrap();
