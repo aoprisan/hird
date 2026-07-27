@@ -686,6 +686,26 @@ which is the escape hatch for a fact not tied to a task. An assertion with
 neither stays unanchored, because inventing a footing for a general statement
 about the project would be inventing a reason to distrust it later.
 
+The two are not interchangeable, and `assertion_footing.named` records which
+happened. **A derived footing never overwrites a named one.** Deriving is hird
+being helpful where nobody said anything; overruling a stated footing — on a
+finishing task, or when somebody else restates the fact — would be hird
+deciding it knows better than the agent that wrote the sentence, about a file
+that agent may have chosen precisely because the task never went near it. The
+rule lives in `Footings::anchor` rather than at its call sites, so there is one
+authority for it and no way to route around it.
+
+### One project at a time
+
+An anchor is a path relative to *its own* project root, and a `Witness` can
+only answer for one tree. `Footings::anchors_for` therefore takes the project
+it is being resolved for, and a cross-project search gets standings for the
+rows hird can vouch for and silence for the rest. `hird mem standing
+--all-projects` does the other thing available — discovers a witness per
+project — because there it is a report rather than a hot path. Resolving
+another checkout's relative paths against this one would produce answers that
+look exactly like facts.
+
 ### Settling, which is what makes it quiet enough to read
 
 A fact recorded in the third minute of a task is a statement about the code as

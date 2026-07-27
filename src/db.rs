@@ -144,6 +144,9 @@ CREATE TABLE assertion_footing (
   assertion_id TEXT NOT NULL REFERENCES assertions(id),
   path         TEXT NOT NULL,
   hash         TEXT NOT NULL DEFAULT '',
+  -- 1 when the author named this file rather than hird deriving it from the
+  -- task. A named footing is never overruled by settling.
+  named        INTEGER NOT NULL DEFAULT 0,
   at           TEXT NOT NULL,
   PRIMARY KEY (assertion_id, path)
 );

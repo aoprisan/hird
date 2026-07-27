@@ -35,7 +35,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use rusqlite::{params, Connection, Transaction, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use super::deps::id_for_seq;
 use super::memory::{row_to_assertion, ASSERTION_COLUMNS};
@@ -43,6 +43,21 @@ use super::ProjectScope;
 use crate::error::Result;
 use crate::glob;
 use crate::model::{now_ts, Anchor, Assertion, Shift, Standing, Voices};
+
+/// Who chose the files an assertion stands on.
+///
+/// The distinction only matters at one moment, and it matters a lot there: a
+/// finishing task re-anchors what it learned to the tree it is leaving behind,
+/// and it must not do that to a fact whose author said, in so many words,
+/// *this is about these files*. Deriving a footing is hird being helpful;
+/// overruling a stated one would be hird being wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Anchoring {
+    /// hird worked the files out from the task's scope and footprint.
+    Derived,
+    /// The author named them.
+    Named,
+}
 
 /// Repository over `assertion_footing` and `assertion_affirmations`.
 pub struct Footings<'a> {
@@ -67,7 +82,18 @@ impl<'a> Footings<'a> {
     /// assertion gets its standing back, and an anchor set that only ever grew
     /// would keep every version it had ever been checked against and never be
     /// firm again.
-    pub fn anchor(&self, assertion_id: &str, anchors: &[Anchor]) -> Result<()> {
+    ///
+    /// The one thing it will not replace is a footing the author *named* with a
+    /// footing hird *derived*, and `false` is that refusal. Deriving a footing
+    /// is hird being helpful where nobody said anything; overruling a stated one
+    /// — on a finishing task, or on somebody else restating the fact — would be
+    /// hird deciding it knows better than the agent that wrote the sentence.
+    /// The rule lives here rather than at the two call sites so there is one
+    /// authority for it.
+    pub fn anchor(&self, assertion_id: &str, anchors: &[Anchor], by: Anchoring) -> Result<bool> {
+        if by == Anchoring::Derived && self.anchored_by(assertion_id)? == Anchoring::Named {
+            return Ok(false);
+        }
         let tx = self.immediate_tx()?;
         tx.execute(
             "DELETE FROM assertion_footing WHERE assertion_id = ?1",
@@ -75,21 +101,45 @@ impl<'a> Footings<'a> {
         )?;
         for anchor in anchors {
             tx.execute(
-                "INSERT INTO assertion_footing (assertion_id, path, hash, at)
-                 VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(assertion_id, path) DO UPDATE SET
-                   hash = excluded.hash, at = excluded.at",
-                params![assertion_id, anchor.path, anchor.hash, anchor.at],
+                "INSERT INTO assertion_footing (assertion_id, path, hash, named, at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    assertion_id,
+                    anchor.path,
+                    anchor.hash,
+                    i64::from(by == Anchoring::Named),
+                    anchor.at
+                ],
             )?;
         }
         tx.commit()?;
-        Ok(())
+        Ok(true)
+    }
+
+    /// Did the author of this assertion name its files, or did hird work them
+    /// out?
+    ///
+    /// The one thing settling has to ask before it overwrites anything.
+    pub fn anchored_by(&self, assertion_id: &str) -> Result<Anchoring> {
+        let named: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT MAX(named) FROM assertion_footing WHERE assertion_id = ?1",
+                [assertion_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(match named {
+            Some(1) => Anchoring::Named,
+            _ => Anchoring::Derived,
+        })
     }
 
     /// What one assertion was read off, in path order.
     pub fn anchors(&self, assertion_id: &str) -> Result<Vec<Anchor>> {
         Ok(self
-            .anchors_for(std::slice::from_ref(&assertion_id.to_string()))?
+            .anchors_for(None, std::slice::from_ref(&assertion_id.to_string()))?
             .remove(assertion_id)
             .unwrap_or_default())
     }
@@ -100,7 +150,17 @@ impl<'a> Footings<'a> {
     /// per row would read the same file twenty times. Absent keys mean an
     /// unanchored assertion, which is why the caller gets a map and not a
     /// parallel vector.
-    pub fn anchors_for(&self, assertion_ids: &[String]) -> Result<BTreeMap<String, Vec<Anchor>>> {
+    ///
+    /// `project` is not a filter for convenience, it is a correctness bound: an
+    /// anchor is a path relative to *its own* project root, and whoever is about
+    /// to resolve these against a working tree can only do so for one project.
+    /// Passing `None` says the caller has no tree in mind and only wants the
+    /// rows.
+    pub fn anchors_for(
+        &self,
+        project: Option<&str>,
+        assertion_ids: &[String],
+    ) -> Result<BTreeMap<String, Vec<Anchor>>> {
         let mut out: BTreeMap<String, Vec<Anchor>> = BTreeMap::new();
         if assertion_ids.is_empty() {
             return Ok(out);
@@ -111,12 +171,21 @@ impl<'a> Footings<'a> {
             let holes = std::iter::repeat_n("?", batch.len())
                 .collect::<Vec<_>>()
                 .join(",");
+            let scoped = if project.is_some() {
+                "AND a.project = ?"
+            } else {
+                ""
+            };
             let sql = format!(
-                "SELECT assertion_id, path, hash, at FROM assertion_footing
-                 WHERE assertion_id IN ({holes}) ORDER BY assertion_id, path"
+                "SELECT f.assertion_id, f.path, f.hash, f.at
+                 FROM assertion_footing f JOIN assertions a ON a.id = f.assertion_id
+                 WHERE f.assertion_id IN ({holes}) {scoped}
+                 ORDER BY f.assertion_id, f.path"
             );
+            let mut binds: Vec<&str> = batch.iter().map(String::as_str).collect();
+            binds.extend(project);
             let mut stmt = self.conn.prepare(&sql)?;
-            let rows = stmt.query_map(rusqlite::params_from_iter(batch.iter()), |row| {
+            let rows = stmt.query_map(rusqlite::params_from_iter(binds), |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     Anchor {
@@ -417,12 +486,12 @@ mod tests {
         let db = db();
         let a = store(&db, "the loader reads env first", None);
         db.footings()
-            .anchor(&a.id, &[anchor("src/config.rs", "h1")])
+            .anchor(&a.id, &[anchor("src/config.rs", "h1")], Anchoring::Derived)
             .unwrap();
         assert_eq!(db.footings().anchors(&a.id).unwrap().len(), 1);
 
         db.footings()
-            .anchor(&a.id, &[anchor("src/config.rs", "h2")])
+            .anchor(&a.id, &[anchor("src/config.rs", "h2")], Anchoring::Derived)
             .unwrap();
         let anchors = db.footings().anchors(&a.id).unwrap();
         assert_eq!(anchors.len(), 1, "re-anchoring replaces, {anchors:?}");
@@ -439,14 +508,15 @@ mod tests {
             .anchor(
                 &a.id,
                 &[anchor("src/a.rs", "h1"), anchor("shared.rs", "hs")],
+                Anchoring::Derived,
             )
             .unwrap();
         db.footings()
-            .anchor(&b.id, &[anchor("shared.rs", "hs")])
+            .anchor(&b.id, &[anchor("shared.rs", "hs")], Anchoring::Derived)
             .unwrap();
 
         let ids = vec![a.id.clone(), b.id.clone(), unanchored.id.clone()];
-        let footings = db.footings().anchors_for(&ids).unwrap();
+        let footings = db.footings().anchors_for(Some(PROJECT), &ids).unwrap();
         assert_eq!(footings.len(), 2, "an unanchored assertion has no entry");
         assert_eq!(footings[&a.id].len(), 2);
         // The shared file is named once, so it is read off disk once.
@@ -527,7 +597,7 @@ mod tests {
         let dead = store(&db, "will be retracted", None);
         for a in [&old, &new, &dead] {
             db.footings()
-                .anchor(&a.id, &[anchor("src/a.rs", "h1")])
+                .anchor(&a.id, &[anchor("src/a.rs", "h1")], Anchoring::Derived)
                 .unwrap();
         }
         db.memory()

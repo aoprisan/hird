@@ -924,7 +924,8 @@ fn show(db: &Db, seq: i64, config: &Config, out: &mut impl Write) -> anyhow::Res
     if !learned.is_empty() {
         let discovered = config.witness(Path::new(&task.project));
         let ids: Vec<String> = learned.iter().map(|a| a.id.clone()).collect();
-        let standings = footing::standings(db, config.footing(discovered.as_ref()), &ids);
+        let standings =
+            footing::standings(db, config.footing(discovered.as_ref()), &task.project, &ids);
         writeln!(out, "\nassertions recorded on this task")?;
         for assertion in learned {
             writeln!(out, "  - {}", fmt::truncate(&assertion.content, 88))?;
@@ -1005,7 +1006,7 @@ fn mem(
             all_projects,
         } => {
             let scope = ProjectScope::resolve(project, config.all_projects(Some(*all_projects)));
-            standing(db, witness, &scope, *shaky, out)
+            standing(db, config, witness, &scope, *shaky, out)
         }
         MemCommand::Search {
             query,
@@ -1025,7 +1026,7 @@ fn mem(
             }
             let now = Utc::now();
             let ids: Vec<String> = hits.iter().map(|a| a.id.clone()).collect();
-            let standings = footing::standings(db, witness, &ids);
+            let standings = footing::standings(db, witness, project, &ids);
             for assertion in hits {
                 let standing = standings.get(&assertion.id);
                 let mut meta = vec![
@@ -1062,14 +1063,20 @@ fn mem(
 }
 
 /// `hird mem standing`: what the memory still stands on.
+///
+/// Deciding a standing means resolving paths against a working tree, and each
+/// project has its own — so with `--all-projects` this discovers a witness per
+/// project rather than measuring everybody's files against the checkout the
+/// command happened to be run from.
 fn standing(
     db: &Db,
+    config: &Config,
     witness: Option<&witness::Witness>,
     scope: &ProjectScope,
     shaky_only: bool,
     out: &mut impl Write,
 ) -> anyhow::Result<()> {
-    if witness.is_none() {
+    if witness.is_none() && !scope.is_all() {
         writeln!(
             out,
             "no footing here: assertions are only anchored to files in a git checkout \
@@ -1084,8 +1091,23 @@ fn standing(
     }
 
     let now = Utc::now();
-    let ids: Vec<String> = anchored.iter().map(|a| a.id.clone()).collect();
-    let standings = footing::standings(db, witness, &ids);
+    let mut by_project: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for assertion in &anchored {
+        by_project
+            .entry(assertion.project.as_str())
+            .or_default()
+            .push(assertion.id.clone());
+    }
+    let mut standings: BTreeMap<String, Standing> = BTreeMap::new();
+    for (project, ids) in by_project {
+        let discovered = config.witness(Path::new(project));
+        standings.extend(footing::standings(
+            db,
+            config.footing(discovered.as_ref()),
+            project,
+            &ids,
+        ));
+    }
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     let mut shown = 0usize;
 

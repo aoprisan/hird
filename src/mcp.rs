@@ -1446,7 +1446,7 @@ impl HirdMcp {
             .with_db(|db| {
                 let hits = db.memory().search(&query)?;
                 let ids: Vec<String> = hits.iter().map(|a| a.id.clone()).collect();
-                let standings = footing::standings(db, self.footing(), &ids);
+                let standings = footing::standings(db, self.footing(), &self.project, &ids);
                 Ok::<_, Error>((hits, standings))
             })
             .map_err(stringify)?;

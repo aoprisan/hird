@@ -219,7 +219,8 @@ pub struct App {
     /// Empty wherever there is no witness, which is why every reader treats a
     /// missing entry as "nothing to say" rather than as "firm".
     pub standings: BTreeMap<String, Standing>,
-    /// Assertion id to who has stated it, when more than one agent has.
+    /// The selected assertion's other voices, when it has any. Kept to the
+    /// selection because that is the only place they are rendered.
     pub voices: BTreeMap<String, String>,
     pub memory_selected: usize,
     /// Task id to human-facing number, for the "learned on #7" badge.
@@ -229,6 +230,10 @@ pub struct App {
     /// Set when this project is somewhere the working tree can be watched.
     witness: Option<crate::witness::Witness>,
     last_look: DateTime<Utc>,
+    /// The assertion ids `standings` was last computed for, so a changed page
+    /// re-reads immediately and an unchanged one waits for the interval.
+    footed_ids: Vec<String>,
+    last_footing: DateTime<Utc>,
 }
 
 impl App {
@@ -265,6 +270,8 @@ impl App {
             last_poll: DateTime::from_timestamp(0, 0).unwrap_or_default(),
             witness: config_witness,
             last_look: DateTime::from_timestamp(0, 0).unwrap_or_default(),
+            footed_ids: Vec::new(),
+            last_footing: DateTime::from_timestamp(0, 0).unwrap_or_default(),
         }
     }
 
@@ -294,6 +301,36 @@ impl App {
     /// How the assertion's footing compares with the tree, if hird knows.
     pub fn standing(&self, assertion: &Assertion) -> Option<&Standing> {
         self.standings.get(&assertion.id)
+    }
+
+    /// Re-read the footing under the assertions on screen, at most every
+    /// [`WITNESS_INTERVAL`].
+    ///
+    /// Throttled for the same reason [`App::look`] is, and rather harder: a
+    /// standing costs one file read and one SHA-256 per distinct anchored file,
+    /// and the poll runs twice a second. It is also recomputed immediately
+    /// whenever the visible set changes, so typing in the search box never
+    /// shows a badge belonging to a row that has scrolled away.
+    fn read_footing(&mut self, db: &Db) {
+        let ids: Vec<String> = self.assertions.iter().map(|a| a.id.clone()).collect();
+        let now = Utc::now();
+        let same_rows = ids == self.footed_ids;
+        if same_rows && now - self.last_footing < WITNESS_INTERVAL {
+            return;
+        }
+        self.last_footing = now;
+        self.footed_ids = ids;
+        self.standings =
+            crate::footing::standings(db, self.footing(), &self.project, &self.footed_ids);
+    }
+
+    /// Who else has stated the selected assertion, if anyone.
+    ///
+    /// Only the selection, because only the detail overlay shows it — asking
+    /// for every row would be two hundred queries twice a second to render one
+    /// line that is usually not on screen.
+    pub fn voices_of(&self, assertion: &Assertion) -> Option<&String> {
+        self.voices.get(&assertion.id)
     }
 
     pub fn scope(&self) -> ProjectScope {
@@ -330,23 +367,12 @@ impl App {
                 .limit(MEMORY_PAGE)
                 .include_superseded(self.include_superseded),
         )?;
-        // Reading the footing costs one hash per distinct anchored file, and
-        // the poll runs twice a second — so it is deliberately kept to the page
-        // on screen rather than the whole memory.
-        let ids: Vec<String> = self.assertions.iter().map(|a| a.id.clone()).collect();
-        self.standings = crate::footing::standings(db, self.footing(), &ids);
+        self.read_footing(db);
         if self.shaky_only {
             let standings = &self.standings;
             self.assertions
                 .retain(|a| standings.get(&a.id).is_some_and(Standing::needs_checking));
         }
-        self.voices = self
-            .assertions
-            .iter()
-            .filter_map(|a| {
-                crate::footing::corroboration(db, a).map(|sentence| (a.id.clone(), sentence))
-            })
-            .collect();
         self.memory_total = db.memory().count_current(&scope)?;
         self.task_seqs = db.tasks().seq_index()?;
         self.last_poll = Utc::now();
@@ -588,6 +614,12 @@ impl App {
             }
             KeyCode::Enter => {
                 if let Some(assertion) = self.selected_assertion().cloned() {
+                    // Looked up here rather than on every poll: this is the one
+                    // place it is drawn, and it is one query for one row.
+                    self.voices.clear();
+                    if let Some(sentence) = crate::footing::corroboration(db, &assertion) {
+                        self.voices.insert(assertion.id.clone(), sentence);
+                    }
                     self.mode = Mode::AssertionDetail {
                         assertion: Box::new(assertion),
                     };

@@ -912,7 +912,7 @@ fn render_assertion_detail(
             ]));
         }
     }
-    if let Some(voices) = app.voices.get(&assertion.id) {
+    if let Some(voices) = app.voices_of(assertion) {
         lines.push(Line::from(vec![
             Span::styled("voices    ", theme::dim_style()),
             Span::raw(voices.clone()),
