@@ -1,0 +1,63 @@
+# A plan: a whole dependency graph, written down before it is filed.
+#
+#   hird plan apply examples/plan.toml --dry-run   # read it first
+#   hird plan apply examples/plan.toml             # file it
+#
+# Everything here is what `hird add` takes, with names in place of queue
+# numbers — so this file means the same thing in a fresh database as in one
+# that already holds two hundred tasks, and it can live in the repository next
+# to the code it describes.
+#
+# There is nothing else. No conditionals, no loops, no retries, no "run this
+# after that fails": hird hands work out because an agent asked for it, and
+# a plan that could say *when* to run something would be describing a
+# scheduler this queue does not have. Nothing goes in a plan that is not
+# already a column.
+
+# Names the plan. Applying the same plan again recognizes the tasks it filed
+# last time and adds only what the file has gained since, so this is a file to
+# edit and re-run rather than a script you get one shot at.
+plan = "serde-migration"
+
+# `name` is how the rest of this file refers to the task; it never reaches the
+# queue. `title` is what a human sees on the board.
+[[task]]
+name = "schema"
+title = "Design the storage schema"
+priority = 3
+paths = ["src/db.rs"]
+
+# A brief worth writing goes in `body`, as markdown. This is the whole of what
+# the agent is handed when it claims the task, so say what "done" means.
+[[task]]
+name = "repos"
+title = "Port the repository layer"
+body = """
+Keep the env-var precedence: `--db` beats `HIRD_DB` beats the XDG default.
+Tests in tests/config.rs must pass unchanged.
+"""
+paths = ["src/repo/**"]
+needs = ["schema"]
+
+# `paths` is what lets the queue keep two agents out of one file — globs, not
+# files, because nothing has been written yet.
+[[task]]
+name = "renderer"
+title = "Rewrite the renderer"
+priority = 2
+paths = ["src/tui/**"]
+
+# This one overlaps `renderer` and waits for nothing, which `--dry-run` will
+# point out: the two look parallel here and will be handed out one at a time.
+# Give it `needs = ["renderer"]` to say so on purpose, or leave it and let the
+# queue sequence them.
+[[task]]
+name = "audit"
+title = "Audit the renderer tests"
+paths = ["src/tui/view.rs"]
+
+# `needs` may name any task in the file, in any order — forwards or backwards.
+[[task]]
+name = "notes"
+title = "Write the release notes"
+needs = ["repos", "renderer"]

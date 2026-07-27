@@ -711,7 +711,7 @@ pub struct Subtask<'a> {
     pub paths: &'a [String],
 }
 
-fn create_in_tx(
+pub(crate) fn create_in_tx(
     tx: &Transaction<'_>,
     project: &str,
     title: &str,
@@ -768,7 +768,7 @@ fn release_in_tx(
     Ok(fetch_task_by_seq(tx, task.seq)?.expect("released row exists"))
 }
 
-fn insert_dep(
+pub(crate) fn insert_dep(
     tx: &Transaction<'_>,
     task_id: &str,
     depends_on_id: &str,

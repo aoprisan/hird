@@ -56,6 +56,7 @@ examples: build
     export HIRD_BIN="$PWD/target/debug/hird"
     ./examples/manual-dispatch.sh
     ./examples/swarm-plan.sh
+    ./examples/plan-file.sh
     ./examples/witness.sh
 
 # Where this machine's database lives.

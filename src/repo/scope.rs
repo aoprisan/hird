@@ -244,7 +244,7 @@ pub(crate) fn conflicts_for(
     Ok(conflicts)
 }
 
-fn patterns_for_id(conn: &Connection, task_id: &str) -> Result<Vec<String>> {
+pub(crate) fn patterns_for_id(conn: &Connection, task_id: &str) -> Result<Vec<String>> {
     let mut stmt =
         conn.prepare("SELECT pattern FROM task_paths WHERE task_id = ?1 ORDER BY rowid")?;
     let rows = stmt.query_map([task_id], |row| row.get(0))?;

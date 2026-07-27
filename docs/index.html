@@ -22,6 +22,7 @@
     <li><a href="#dispatch">Dispatching work</a></li>
     <li class="sub"><a href="#by-hand">By hand, by number</a></li>
     <li class="sub"><a href="#work-the-queue">Letting agents pull</a></li>
+    <li class="sub"><a href="#plan-files">The plan as a file</a></li>
     <li><a href="#harnesses">Registering a harness</a></li>
     <li><a href="#lifecycle">How a task moves</a></li>
     <li><a href="#dependencies">Dependencies</a></li>
@@ -205,6 +206,95 @@ wave 2  (after wave 1)
   Agents keep calling <code>task_next</code> as they finish, until it comes back
   with nothing to do — and it says why it is idle: everything done, everything
   blocked, or everything left overlapping live work.
+</p>
+
+<h3 id="plan-files">The plan as a file</h3>
+
+<p>
+  Three <code>hird add</code> calls are fine. A plan worth reviewing before you
+  point three agents at it is worth writing down, and a plan you will edit is
+  worth being able to run twice.
+</p>
+
+<pre><code><span class="c"># plan.toml</span>
+plan = <span class="s">"serde-migration"</span>
+
+[[task]]
+name = <span class="s">"schema"</span>
+title = <span class="s">"Design the storage schema"</span>
+priority = 3
+paths = [<span class="s">"src/db.rs"</span>]
+
+[[task]]
+name = <span class="s">"repos"</span>
+title = <span class="s">"Port the repository layer"</span>
+paths = [<span class="s">"src/repo/**"</span>]
+needs = [<span class="s">"schema"</span>]</code></pre>
+
+<pre><code><span class="k">hird</span> plan apply plan.toml --dry-run   <span class="c"># read it first</span>
+<span class="k">hird</span> plan apply plan.toml             <span class="c"># file the whole graph in one transaction</span></code></pre>
+
+<p>
+  Tasks carry names instead of numbers, so the file means the same thing in a
+  fresh database as in one holding two hundred tasks, and it can live in the
+  repository beside the code it describes. Each task is remembered under the
+  name it was filed with, so applying an edited plan files only what the file
+  has gained — the tasks already in flight keep their claims, their history and
+  their numbers. Either the whole graph lands or none of it does.
+</p>
+
+<p>
+  What a plan may say is exactly what a task row can hold: a title, a body, a
+  priority, the files it expects to touch, the tasks it waits for. There are no
+  conditionals, no loops and no retries, and that is not an omission to be
+  filled in later — <code>hird</code> hands work out because an agent asked for
+  it, and a file that could say <em>when</em> to run something would be
+  describing a scheduler this queue deliberately does not have.
+</p>
+
+<p>
+  <strong><code>--dry-run</code> is the reason the file earns its place.</strong>
+  It lays the plan out in the waves <code>hird graph</code> will print, and then
+  tells you the thing the queue could not have told you until the work was
+  already live:
+</p>
+
+<pre><code>$ <span class="k">hird</span> plan apply plan.toml --dry-run
+plan "serde-migration" — 5 tasks, 3 waves, at most 3 at once
+
+wave 1  (workable now)
+  new   schema         Design the storage schema
+      files  src/db.rs
+  new   renderer       Rewrite the renderer
+      files  src/tui/**
+  new   audit          Audit the renderer tests
+      files  src/tui/view.rs
+…
+
+<span class="w">same files, nothing ordering them — the queue hands these out one at a time,
+so the waves above are wider than the work really is
+  renderer and audit — src/tui/** overlaps src/tui/view.rs
+
+declaring no files: notes
+  the queue cannot keep another agent out of what these touch, and what
+  earlier work learned reaches them by title alone</span>
+
+nothing was written; drop --dry-run to file it</code></pre>
+
+<p>
+  Two globs can be intersected before either file exists, so a pair that
+  <em>looks</em> parallel and will in fact be handed out one at a time is
+  knowable while the plan is still a file. Wave 1 above says three; the work
+  says two and a queue.
+</p>
+
+<p>
+  Filing a plan is a human act, which is why there is no MCP tool for it: the
+  review is the point, and an agent that could apply its own plan unread would
+  have removed the only step this feature exists for. An agent that finds its
+  task is really three jobs has <a href="#split"><code>task_split</code></a>
+  instead. The annotated format is
+  <a href="https://github.com/aoprisan/hird/blob/main/examples/plan.toml">examples/plan.toml</a>.
 </p>
 </section>
 
@@ -618,6 +708,7 @@ hird cancel &lt;seq&gt; [--reason &lt;text&gt;]
 hird reopen &lt;seq&gt; [--reason &lt;text&gt;]
 hird dep add &lt;seq&gt; --needs &lt;seq&gt;,…
 hird dep rm  &lt;seq&gt; --needs &lt;seq&gt;,…
+hird plan apply &lt;file&gt; [--dry-run] [--project &lt;path&gt;]
 hird graph [--all-projects]
 hird scope &lt;seq&gt; [--path &lt;glob&gt;]… [--clear]
 hird agents [--all-projects]
@@ -637,6 +728,7 @@ hird db-path</code></pre>
     <tr><td><code>show</code></td><td>One task in full — body, dependencies, scope, history, what was learned on it.</td></tr>
     <tr><td><code>cancel</code> / <code>reopen</code></td><td>Human overrides. They work regardless of who holds the task.</td></tr>
     <tr><td><code>dep</code></td><td>Add or remove "must wait for" edges after the fact.</td></tr>
+    <tr><td><code>plan</code></td><td>File a whole graph from a <a href="#plan-files">plan file</a>, in one transaction. <code>--dry-run</code> reads it out — waves, overlaps and all — and writes nothing.</td></tr>
     <tr><td><code>graph</code></td><td>The plan as dispatch waves: workable now, and what each later wave waits for.</td></tr>
     <tr><td><code>scope</code></td><td>Show or set the files a task is expected to touch. Warns about overlaps.</td></tr>
     <tr><td><code>agents</code></td><td>Who is working what, with a <code>!!</code> line wherever two agents are in the same files.</td></tr>
@@ -650,8 +742,9 @@ hird db-path</code></pre>
 </div>
 
 <p>
-  <code>--body-file -</code> reads the task body from stdin, which is handy for
-  piping a plan straight into the queue. Every CLI action is recorded with
+  <code>--body-file -</code> reads the task body from stdin, and
+  <code>hird plan apply -</code> reads a whole plan from it, so either can be
+  piped straight into the queue. Every CLI action is recorded with
   <code>actor = "cli"</code>, so the history pane shows who did what.
 </p>
 </section>
@@ -848,6 +941,14 @@ witness = true</code></pre>
     <tr>
       <td><a href="https://github.com/aoprisan/hird/blob/main/examples/swarm-plan.sh"><code>swarm-plan.sh</code></a></td>
       <td>A dependency graph with file scopes, then <code>hird graph</code> and simulated concurrent <code>task_next</code> dispatch.</td>
+    </tr>
+    <tr>
+      <td><a href="https://github.com/aoprisan/hird/blob/main/examples/plan-file.sh"><code>plan-file.sh</code></a></td>
+      <td>The same graph as a <a href="#plan-files">file</a>: read before it is filed, applied in one transaction, then edited and applied again.</td>
+    </tr>
+    <tr>
+      <td><a href="https://github.com/aoprisan/hird/blob/main/examples/plan.toml"><code>plan.toml</code></a></td>
+      <td>The plan format, annotated, every field at work.</td>
     </tr>
     <tr>
       <td><a href="https://github.com/aoprisan/hird/blob/main/examples/witness.sh"><code>witness.sh</code></a></td>

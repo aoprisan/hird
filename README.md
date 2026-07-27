@@ -229,6 +229,85 @@ By default `task_next` simply does not hand out work that would collide — with
 several tasks to choose from there is no reason to pick the one that clashes.
 Set `path_conflicts = "refuse"` to make an overlapping claim fail outright.
 
+### The plan can be a file
+
+Three `hird add` calls are fine. A plan worth reviewing before you point three
+agents at it is worth writing down, and a plan you will edit is worth being able
+to run twice:
+
+```toml
+# plan.toml
+plan = "serde-migration"
+
+[[task]]
+name = "schema"
+title = "Design the storage schema"
+priority = 3
+paths = ["src/db.rs"]
+
+[[task]]
+name = "repos"
+title = "Port the repository layer"
+paths = ["src/repo/**"]
+needs = ["schema"]
+```
+
+```sh
+hird plan apply plan.toml --dry-run   # read it first
+hird plan apply plan.toml             # file the whole graph in one transaction
+```
+
+Tasks carry names instead of numbers, so the file means the same thing in a
+fresh database as in one holding two hundred tasks, and it can live in the
+repository beside the code it describes. Each task is remembered under the name
+it was filed with, so applying an edited plan files only what the file has
+gained — the tasks already in flight keep their claims, their history and their
+numbers.
+
+What a plan may say is exactly what a task row can hold: a title, a body, a
+priority, the files it expects to touch, the tasks it waits for. There are no
+conditionals, no loops and no retries, and that is not an omission to be filled
+in later — `hird` hands work out because an agent asked for it, and a file that
+could say *when* to run something would be describing a scheduler this queue
+deliberately does not have.
+
+**`--dry-run` is the reason the file earns its place.** It lays the plan out in
+the waves `hird graph` will print, and then tells you the thing the queue could
+not have told you until the work was already live:
+
+```
+$ hird plan apply plan.toml --dry-run
+plan "serde-migration" — 5 tasks, 3 waves, at most 3 at once
+
+wave 1  (workable now)
+  new   schema         Design the storage schema
+      files  src/db.rs
+  new   renderer       Rewrite the renderer
+      files  src/tui/**
+  new   audit          Audit the renderer tests
+      files  src/tui/view.rs
+…
+
+same files, nothing ordering them — the queue hands these out one at a time,
+so the waves above are wider than the work really is
+  renderer and audit — src/tui/** overlaps src/tui/view.rs
+
+declaring no files: notes
+  the queue cannot keep another agent out of what these touch, and what
+  earlier work learned reaches them by title alone
+
+nothing was written; drop --dry-run to file it
+```
+
+Two globs can be intersected before either file exists, so a pair that *looks*
+parallel and will in fact be handed out one at a time is knowable while the plan
+is still a file. Wave 1 above says three; the work says two and a queue.
+
+Filing a plan is a human act, which is why there is no MCP tool for it: the
+review is the point, and an agent that could apply its own plan unread would
+have removed the only step this feature exists for. An agent that finds its
+task is really three jobs has `task_split` instead.
+
 ### Agents can split work for each other
 
 An agent that finds its task is really three jobs does not have to do them in
@@ -439,6 +518,7 @@ hird cancel <seq> [--reason <text>]
 hird reopen <seq> [--reason <text>]
 hird dep add <seq> --needs <seq>,…
 hird dep rm  <seq> --needs <seq>,…
+hird plan apply <file> [--dry-run] [--project <path>]
 hird graph [--all-projects]
 hird scope <seq> [--path <glob>]… [--clear]
 hird agents [--all-projects]
@@ -450,8 +530,8 @@ hird mcp
 hird db-path
 ```
 
-`--body-file -` reads the task body from stdin, which is handy for piping a
-plan straight into the queue.
+`--body-file -` reads the task body from stdin, and `hird plan apply -` reads a
+whole plan from it, so either can be piped straight into the queue.
 
 `hird show` and `hird agents` sweep the working tree as they render, so both
 report what has actually moved alongside what was declared.
@@ -595,6 +675,7 @@ points `HIRD_DB` at a throwaway file, so running one cannot disturb your board.
 ```sh
 ./examples/manual-dispatch.sh   # file work, hand it out by number
 ./examples/swarm-plan.sh        # file a plan, three agents pull from it
+./examples/plan-file.sh         # the same plan as a file: read it, file it, edit it
 ./examples/witness.sh           # two agents in one file, caught in the act
 ```
 

@@ -5,6 +5,7 @@
 
 mod deps;
 mod memory;
+mod plan;
 mod recall;
 mod scope;
 mod tasks;
@@ -12,10 +13,15 @@ mod witness;
 
 pub use deps::{dispatch_waves, Deps};
 pub use memory::{Memory, MemoryQuery, NewAssertion};
+pub use plan::{Applied, Drift, Placed, Plans};
 pub use recall::{Recall, RecallReason, Recalled};
 pub use scope::{OnConflict, Scopes};
 pub use tasks::{Claim, Dispatch, Subtask, SweepOutcome, Tasks};
 pub use witness::{Baseline, Witnessed};
+
+/// Pattern validation, shared with the plan format so a plan file is refused
+/// for exactly the reasons a declaration would be.
+pub(crate) use scope::normalize_all;
 
 use ulid::Ulid;
 
