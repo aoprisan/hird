@@ -348,7 +348,10 @@ mod tests {
 
         assert_eq!(standing(&db, Some(&witness), &id).as_str(), "firm");
         let sentence = corroboration(&db, again.assertion()).unwrap();
-        assert!(sentence.contains("2 harnesses"), "{sentence}");
+        assert!(
+            sentence.contains("independently across 2 harnesses"),
+            "{sentence}"
+        );
     }
 
     /// The failure this feature would have had if `settle` did not exist: a

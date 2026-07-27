@@ -698,24 +698,33 @@ impl Voices {
         out
     }
 
-    /// One sentence, or `None` when only one agent has ever said it — which is
+    /// One sentence, or `None` when only one voice has ever said it — which is
     /// the ordinary case and not worth a line.
+    ///
+    /// Names them rather than counting them, because who confirmed a fact is
+    /// most of what the count was standing in for, and a reader can weigh
+    /// `codex:9f2c` against `cli` for themselves. Long lists are cut off with a
+    /// tally rather than truncated silently.
     pub fn describe(&self) -> Option<String> {
-        if self.actors.len() < 2 {
+        let [_first, others @ ..] = self.actors.as_slice() else {
+            return None;
+        };
+        if others.is_empty() {
             return None;
         }
-        let harnesses = self.harnesses();
-        let others = self.actors.len() - 1;
-        let plural = if others == 1 { "" } else { "s" };
-        if harnesses.len() > 1 {
-            Some(format!(
-                "confirmed since by {others} other agent{plural}, across {} harnesses ({})",
-                harnesses.len(),
-                harnesses.join(", "),
-            ))
-        } else {
-            Some(format!("confirmed since by {others} other agent{plural}"))
+        const NAMED: usize = 3;
+        let shown: Vec<&str> = others.iter().take(NAMED).map(String::as_str).collect();
+        let mut sentence = format!("also stated by {}", shown.join(", "));
+        if others.len() > shown.len() {
+            sentence.push_str(&format!(" and {} more", others.len() - shown.len()));
         }
+        // The claim worth making loudest: not that several sessions agree, but
+        // that sessions which cannot see each other agree.
+        let harnesses = self.harnesses().len();
+        if harnesses > 1 {
+            sentence.push_str(&format!(", independently across {harnesses} harnesses"));
+        }
+        Some(sentence)
     }
 }
 
@@ -920,8 +929,11 @@ mod tests {
         let same_harness = Voices {
             actors: vec!["codex:9f2c".into(), "codex:1a2b".into()],
         };
-        let sentence = same_harness.describe().unwrap();
-        assert_eq!(sentence, "confirmed since by 1 other agent");
+        assert_eq!(
+            same_harness.describe().unwrap(),
+            "also stated by codex:1a2b",
+            "two sessions of one harness are not independent confirmation"
+        );
         assert_eq!(same_harness.harnesses(), vec!["codex"]);
 
         let across = Voices {
@@ -931,13 +943,17 @@ mod tests {
                 "copilot:77".into(),
             ],
         };
-        let sentence = across.describe().unwrap();
-        assert!(sentence.contains("2 other agents"), "{sentence}");
-        assert!(sentence.contains("3 harnesses"), "{sentence}");
-        assert!(
-            sentence.contains("codex, claude-code, copilot"),
-            "{sentence}"
+        assert_eq!(
+            across.describe().unwrap(),
+            "also stated by claude-code:af31, copilot:77, independently across 3 harnesses"
         );
+
+        // A long list is cut off with a tally, never silently truncated.
+        let many = Voices {
+            actors: (0..6).map(|i| format!("codex:{i}")).collect(),
+        };
+        let sentence = many.describe().unwrap();
+        assert!(sentence.contains("and 2 more"), "{sentence}");
     }
 
     #[test]

@@ -820,7 +820,10 @@ fn restating_a_shaky_fact_makes_it_firm_again_and_records_a_second_voice() {
     assert_eq!(again["affirmed"], true);
     assert_eq!(again["id"], id, "one fact, not two");
     let voices = again["corroboration"].as_str().unwrap_or_default();
-    assert!(voices.contains("2 harnesses"), "{voices}");
+    assert!(
+        voices.contains("independently across 2 harnesses"),
+        "{voices}"
+    );
 
     let firm = claude.call("mem_search", json!({"query": "env"})).unwrap();
     assert_eq!(firm["count"], 1);

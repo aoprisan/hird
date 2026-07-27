@@ -31,6 +31,7 @@
     <li><a href="#split">Splitting a task</a></li>
     <li><a href="#memory">Memory</a></li>
     <li class="sub"><a href="#recall">Recall</a></li>
+    <li class="sub"><a href="#footing">Footing: when a fact went stale</a></li>
     <li><a href="#cli">Command line</a></li>
     <li><a href="#tui">The TUI</a></li>
     <li><a href="#mcp">MCP tools</a></li>
@@ -695,6 +696,114 @@ codex:9f2c        #1 in_progress  Port the config loader        11m left
   being told. Five facts ride along by default; set
   <code>recall_limit = 0</code> to switch it off entirely.
 </p>
+
+<h3 id="footing">Footing: a fact knows what it was learned against</h3>
+
+<p>
+  A memory that only grows eventually lies to you. Not by filling up with
+  falsehoods — you would notice those — but by filling up with sentences that
+  <em>were</em> true. A fact recorded in March about a file that has been
+  rewritten twice since arrives in July in exactly the same voice as one
+  recorded this morning, and nothing about reading it tells you which is which.
+</p>
+
+<p>
+  The sentence cannot tell you. The code can. So hird records what an assertion
+  was read off — the files behind it, and the content hash each one had at the
+  time — and every later reader is told whether that ground has moved.
+</p>
+
+<pre><code>$ <span class="k">hird</span> mem standing
+firm      the loader reads HIRD_DB before the config file
+    01J…  codex:9f2c  2h ago
+    src/config.rs
+shaky     the renderer redraws on every poll
+    01J…  claude-code:af31  3d ago
+    src/tui/view.rs
+    src/tui/view.rs has changed since this was recorded — re-read before relying on it
+
+2 anchored: 1 firm, 1 shaky</code></pre>
+
+<p>
+  Nobody curated that, and nobody told hird that <code>src/tui/view.rs</code>
+  had changed. The fact remembers which file it came from and what that file
+  said, and the file no longer says it.
+</p>
+
+<p>
+  The same word rides along everywhere a fact is served — <code>mem_search</code>
+  results, the memory browser, and the <code>recalled</code> list a claim arrives
+  with, which is the one that matters most because it lands in an agent's
+  context unasked:
+</p>
+
+<pre><code><span class="s">"recalled"</span>: [
+  { <span class="s">"content"</span>: <span class="s">"the renderer redraws on every poll"</span>,
+    <span class="s">"why"</span>: <span class="s">"learned on task 4 (Fix the renderer), working src/tui/view.rs"</span>,
+    <span class="s">"standing"</span>: <span class="s">"shaky"</span>,
+    <span class="s">"caution"</span>: <span class="s">"src/tui/view.rs has changed since this was recorded — re-read before relying on it"</span> } ]</code></pre>
+
+<p>
+  <strong>It never says a fact is false.</strong> A rename, a formatting pass and
+  a total rewrite look identical from here. <code>shaky</code> means
+  <em>unverified</em>, which is a weaker claim and a far more useful one: it is
+  exactly the set of facts where opening the file pays for itself.
+  <code>orphaned</code> — every file it was about is gone — is the strongest
+  thing hird will say, and it still stops short of a verdict.
+</p>
+
+<p>
+  Where the files come from needs nothing from the agent. A fact stored with
+  <code>task_seq</code> is anchored to the literal paths that task declared plus
+  everything the <a href="#witness">witness</a> saw it move;
+  <code>mem_store { paths: […] }</code> names them outright for a fact that
+  belongs to no task. A fact with neither stays unanchored, and hird says
+  nothing about it rather than guessing.
+</p>
+
+<h4>Saying it again is how you say you checked</h4>
+
+<p>
+  An agent that re-reads a shaky fact and finds it still true has one way to say
+  so, and should not need to know any more than that: say the fact again.
+</p>
+
+<pre><code>$ <span class="k">hird</span> mem add <span class="s">"the renderer redraws on every poll"</span> --path src/tui/view.rs
+01J…
+  already on record — affirmed, not duplicated and re-anchored</code></pre>
+
+<p>
+  No second row, no lost provenance. The original is re-anchored to today's code
+  and you are recorded as another voice for it. That kills duplicate assertions —
+  the oldest complaint about memory stores — and buys something else on the way
+  past: hird counts <em>voices</em>, not sentences, so it can say the thing no
+  single harness is positioned to say.
+</p>
+
+<pre><code>also stated by codex:9f2c, independently across 2 harnesses</code></pre>
+
+<p>
+  Two agents that cannot see each other's sessions arrived at the same fact.
+  Only the process both of them talk to can know that.
+</p>
+
+<h4>Why it stays quiet</h4>
+
+<p>
+  A task that records a fact and then keeps editing the same file would, left
+  alone, mark its own fact shaky by its own hand. Finishing a task
+  <strong>settles</strong> what it learned against the tree it is leaving behind,
+  so <code>shaky</code> keeps meaning <em>somebody else moved this</em> — which
+  is the only reading worth a warning, and a warning that fires on everything is
+  a warning nobody reads.
+</p>
+
+<p>
+  It rides on the same working-tree access as the witness and is off wherever
+  that is: no git, or <code>memory_footing = false</code>, and memory behaves
+  exactly as it did before any of this existed — no anchors, no
+  <code>standing</code> field, and the handshake does not mention it.
+</p>
 </section>
 
 <section id="cli">
@@ -713,8 +822,9 @@ hird graph [--all-projects]
 hird scope &lt;seq&gt; [--path &lt;glob&gt;]… [--clear]
 hird agents [--all-projects]
 hird recall &lt;seq&gt; [--limit N]
-hird mem add &lt;content&gt; [--tags a,b] [--task &lt;seq&gt;]
+hird mem add &lt;content&gt; [--tags a,b] [--task &lt;seq&gt;] [--path &lt;file&gt;]…
 hird mem search [query] [--limit N] [--all-projects] [--include-superseded]
+hird mem standing [--shaky] [--all-projects]
 hird tui
 hird mcp
 hird db-path</code></pre>
@@ -798,6 +908,7 @@ hird db-path</code></pre>
 <tr><td><kbd>Enter</kbd></td><td>show the assertion and its provenance</td></tr>
 <tr><td><kbd>d</kbd></td><td>supersede it with something truer</td></tr>
 <tr><td><kbd>s</kbd></td><td>show or hide superseded assertions</td></tr>
+<tr><td><kbd>f</kbd></td><td>only the facts whose files have moved since</td></tr>
 </tbody></table></div>
 </div>
 
@@ -835,8 +946,8 @@ hird db-path</code></pre>
     <tr><td><code>task_complete</code></td><td>Finish, with a summary. Holder only.</td></tr>
     <tr><td><code>task_fail</code></td><td>Give up, with a reason. Holder only.</td></tr>
     <tr><td><code>task_release</code></td><td>Hand the task back unfinished, still claimable. Holder only.</td></tr>
-    <tr><td><code>mem_store</code></td><td>Record one durable fact.</td></tr>
-    <tr><td><code>mem_search</code></td><td>Find facts recorded earlier, by anyone.</td></tr>
+    <tr><td><code>mem_store</code></td><td>Record one durable fact — or, said again word for word, confirm one.</td></tr>
+    <tr><td><code>mem_search</code></td><td>Find facts recorded earlier, by anyone, each marked with whether its code has moved since.</td></tr>
   </tbody>
 </table>
 </div>
@@ -847,7 +958,9 @@ hird db-path</code></pre>
   reporting that a tool broke. There is deliberately no tool for filing
   arbitrary new work: agents split what they hold, and everything else is filed
   by you. <a href="#recall">Recall</a> did not need a thirteenth tool either — it
-  rides along with the claim, so an agent gets it without knowing to ask.
+  rides along with the claim — and neither did
+  <a href="#footing">footing</a>, which rides along with every fact hird serves.
+  Something an agent has to know to ask for is something it will not ask for.
 </p>
 </section>
 
@@ -887,7 +1000,12 @@ recall_limit = 5
 <span class="c"># Whether the queue watches the working tree to see what tasks actually
 # change. Needs git, goes quiet by itself where there is none, and costs
 # nothing while no task in the project holds a lease. Default true.</span>
-witness = true</code></pre>
+witness = true
+
+<span class="c"># Whether an assertion remembers the files it was learned against, so a later
+# reader is told when that code has moved. Rides on the same working-tree
+# access as `witness` and is off wherever that is. Default true.</span>
+memory_footing = true</code></pre>
 
 <p>
   Unknown keys are an error rather than a shrug, so a typo is reported instead of
@@ -955,6 +1073,10 @@ witness = true</code></pre>
       <td>Two agents, one checkout, one file — the <a href="#witness">witness</a> catching a lost edit while there is still time to act on it. Makes its own throwaway git repository.</td>
     </tr>
     <tr>
+      <td><a href="https://github.com/aoprisan/hird/blob/main/examples/footing.sh"><code>footing.sh</code></a></td>
+      <td>A fact recorded against a file, that file rewritten, and every later reader told so — plus the way back to <a href="#footing">firm</a>. Makes its own throwaway git repository.</td>
+    </tr>
+    <tr>
       <td><a href="https://github.com/aoprisan/hird/blob/main/examples/task-body.md"><code>task-body.md</code></a></td>
       <td>A task body worth writing, for <code>--body-file</code>.</td>
     </tr>
@@ -1010,6 +1132,23 @@ witness = true</code></pre>
   <a href="#contention">working tree confirms</a> — the file has moved, and the
   two of them disagree about what it now says — is reported to both by name,
   with the one instruction that saves the work: re-read it before you write.
+</p>
+
+<h3>Does the memory go stale?</h3>
+<p>
+  It does, and hird is the part that notices. An assertion is stored with its
+  <a href="#footing">footing</a> — the files it was read off and what they said
+  at the time — so a fact whose code has since been rewritten arrives marked
+  <code>shaky</code> instead of arriving indistinguishable from one recorded
+  this morning. hird never calls it false; a rename and a rewrite look the same
+  from here. It tells you which facts a re-read would pay for, and
+  <code>hird mem standing</code> lists them.
+</p>
+<p>
+  Nothing has to be curated. Confirming a fact is the ordinary act of stating
+  it: <code>mem_store</code> the same sentence word for word and the original is
+  re-anchored to today's code rather than duplicated, with you recorded as
+  another voice for it.
 </p>
 
 <h3>Does hird know which agent changed a file?</h3>

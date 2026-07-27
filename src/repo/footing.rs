@@ -512,9 +512,10 @@ mod tests {
         let voices = db.footings().voices(&a).unwrap();
         assert_eq!(voices.actors, vec!["codex:9f2c", "claude-code:af31"]);
         assert_eq!(voices.harnesses(), vec!["codex", "claude-code"]);
-        let sentence = voices.describe().unwrap();
-        assert!(sentence.contains("1 other agent"), "{sentence}");
-        assert!(sentence.contains("2 harnesses"), "{sentence}");
+        assert_eq!(
+            voices.describe().unwrap(),
+            "also stated by claude-code:af31, independently across 2 harnesses"
+        );
     }
 
     #[test]
