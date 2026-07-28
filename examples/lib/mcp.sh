@@ -6,6 +6,9 @@
 #   mcp codex <<'JSON'               # one MCP session, one JSON-RPC line per call
 #   {"jsonrpc":"2.0","id":1,"method":"tools/call", …}
 #   JSON
+#
+# The MCP 2026-07-28 equivalents — no handshake, `_meta` on every request — are
+# `discover`, `call_stateless` and `mcp_stateless`, at the bottom of this file.
 
 set -euo pipefail
 
@@ -168,4 +171,61 @@ sandbox_repo() {
 #   edit src/config.rs '// ported'
 edit() {
     printf '%s\n' "$2" >"$1"
+}
+
+# ------------------------------------------------- MCP 2026-07-28 (stateless)
+
+# The 2026-07-28 lifecycle has no `initialize` and no session to hold state in.
+# A client opens with `server/discover`, or simply with the request it wanted to
+# make, and every request carries the protocol version, the client's own name
+# and its capabilities in `params._meta`.
+#
+# `hird mcp` serves both lifecycles, so these helpers exist to show the new one
+# on the wire rather than because anything needs it.
+
+# The name the example client gives for itself. hird files a session under this
+# when HIRD_HARNESS is unset, which is the whole of what it uses it for.
+MCP_CLIENT="${MCP_CLIENT:-hird-examples}"
+
+# The `_meta` every 2026-07-28 request carries in place of a handshake.
+stateless_meta() {
+    printf '{"io.modelcontextprotocol/protocolVersion":"2026-07-28",'
+    printf '"io.modelcontextprotocol/clientInfo":{"name":"%s","version":"0"},' "$MCP_CLIENT"
+    printf '"io.modelcontextprotocol/clientCapabilities":{}}'
+}
+
+# A self-contained `tools/call` request line, for feeding to `mcp_stateless`.
+#
+#   call_stateless 1 task_claim '{"seq":1}'
+call_stateless() {
+    printf '{"jsonrpc":"2.0","id":%s,"method":"tools/call","params":{"name":"%s","arguments":%s,"_meta":%s}}\n' \
+        "$1" "$2" "$3" "$(stateless_meta)"
+}
+
+# Run one 2026-07-28 session, reading request lines from stdin.
+#
+# The harness name is optional here in a way it is not above: pass `-` to leave
+# HIRD_HARNESS unset and let the client's own name stand as the identity.
+mcp_stateless() {
+    local harness="${1:--}"
+    if [[ "$harness" == "-" ]]; then
+        env -u HIRD_HARNESS "$HIRD_BIN" mcp | tool_results
+    else
+        HIRD_HARNESS="$harness" "$HIRD_BIN" mcp | tool_results
+    fi
+}
+
+# Ask the server to describe itself, without opening a session first.
+discover() {
+    local out
+    out=$(printf '{"jsonrpc":"2.0","id":0,"method":"server/discover","params":{"_meta":%s}}\n' \
+        "$(stateless_meta)" | env -u HIRD_HARNESS "$HIRD_BIN" mcp 2>/dev/null)
+    if command -v jq >/dev/null 2>&1; then
+        printf '%s\n' "$out" | jq -r '.result
+            | "server:  \(.serverInfo.name) \(.serverInfo.version)",
+              "speaks:  \(.supportedVersions | join(", "))",
+              "caching: \(.cacheScope), ttl \(.ttlMs)ms"'
+    else
+        printf '%s\n' "$out"
+    fi
 }

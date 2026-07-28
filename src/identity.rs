@@ -2,9 +2,12 @@
 //!
 //! Both answers come from the environment the harness starts `hird` in, so a
 //! Claude Code session and a Codex session pointed at the same checkout land on
-//! the same project scope while staying distinguishable as actors.
+//! the same project scope while staying distinguishable as actors. The one
+//! thing the environment does not always say is the harness's name, and there
+//! the client's own name for itself stands in — see [`AgentId`].
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use ulid::Ulid;
 
@@ -20,10 +23,24 @@ pub const ACTOR_CLI: &str = "cli";
 /// Actor string recorded for TUI actions.
 pub const ACTOR_TUI: &str = "tui";
 
+/// Longest harness name recorded in an actor string. A name is a badge in a
+/// TUI column, not a payload, and it arrives over the wire in the MCP case.
+const HARNESS_MAX: usize = 32;
+
 /// A `<harness>:<session>` identity for one MCP session.
+///
+/// The session half is minted once, when the process starts. The harness half
+/// is whatever `HIRD_HARNESS` says; when the environment does not say, it is
+/// taken from the first client that names itself — MCP 2026-07-28 carries the
+/// client's implementation on every request, so a harness configured by hand
+/// still arrives with a name instead of being filed as `unknown`.
+///
+/// Taken once and then latched, not re-read per call. An actor string that
+/// changed mid-session would leave this process unable to find its own leases.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentId {
-    harness: String,
+    /// Unset until the environment or a client supplies a usable name.
+    harness: OnceLock<String>,
     session: String,
 }
 
@@ -37,21 +54,39 @@ impl AgentId {
     }
 
     pub fn new(harness: impl Into<String>, session: impl Into<String>) -> AgentId {
-        let harness = sanitize(&harness.into());
-        let harness = if harness.is_empty() {
-            "unknown".to_string()
-        } else {
-            harness
-        };
-        AgentId {
-            harness,
+        let id = AgentId {
+            harness: OnceLock::new(),
             session: sanitize(&session.into()),
+        };
+        id.name_harness(&harness.into());
+        id
+    }
+
+    /// Offer a name a client gave for itself, and say whether it was taken.
+    ///
+    /// Ignored once the identity has a name, so `HIRD_HARNESS` — set by
+    /// `hird register`, and the only half of this the human controls — is never
+    /// overridden by what a client calls itself.
+    pub fn name_from_client(&self, client_name: &str) -> bool {
+        self.name_harness(client_name)
+    }
+
+    fn name_harness(&self, raw: &str) -> bool {
+        let mut name = sanitize(raw);
+        if name.is_empty() {
+            return false;
         }
+        name.truncate(
+            name.char_indices()
+                .nth(HARNESS_MAX)
+                .map_or(name.len(), |(i, _)| i),
+        );
+        self.harness.set(name).is_ok()
     }
 
     /// The harness name alone, used for colour-coding badges in the TUI.
     pub fn harness(&self) -> &str {
-        &self.harness
+        self.harness.get().map_or("unknown", String::as_str)
     }
 
     pub fn session(&self) -> &str {
@@ -60,13 +95,13 @@ impl AgentId {
 
     /// The full `harness:session` string stored on claims and assertions.
     pub fn as_actor(&self) -> String {
-        format!("{}:{}", self.harness, self.session)
+        format!("{}:{}", self.harness(), self.session)
     }
 }
 
 impl std::fmt::Display for AgentId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}", self.harness, self.session)
+        write!(f, "{}:{}", self.harness(), self.session)
     }
 }
 
@@ -187,6 +222,51 @@ mod tests {
     fn a_missing_harness_name_becomes_unknown() {
         assert_eq!(AgentId::new("", "af31").harness(), "unknown");
         assert_eq!(AgentId::new("   ", "af31").harness(), "unknown");
+    }
+
+    #[test]
+    fn a_nameless_identity_takes_the_name_the_client_gives_for_itself() {
+        let id = AgentId::new("", "af31");
+        assert!(id.name_from_client("codex-cli"));
+        assert_eq!(id.as_actor(), "codex-cli:af31");
+    }
+
+    #[test]
+    fn the_environment_outranks_whatever_the_client_calls_itself() {
+        let id = AgentId::new("claude-code", "af31");
+        assert!(!id.name_from_client("something-else"));
+        assert_eq!(id.harness(), "claude-code");
+    }
+
+    #[test]
+    fn the_first_client_name_is_the_one_that_sticks() {
+        let id = AgentId::new("", "af31");
+        assert!(id.name_from_client("codex-cli"));
+        assert!(!id.name_from_client("copilot"));
+        assert_eq!(id.harness(), "codex-cli");
+    }
+
+    #[test]
+    fn a_client_that_names_itself_nothing_leaves_the_identity_open() {
+        let id = AgentId::new("", "af31");
+        assert!(!id.name_from_client("  "));
+        assert_eq!(id.harness(), "unknown");
+        assert!(id.name_from_client("cursor"));
+        assert_eq!(id.harness(), "cursor");
+    }
+
+    #[test]
+    fn a_client_cannot_make_its_name_an_essay() {
+        let id = AgentId::new("", "af31");
+        id.name_from_client(&"x".repeat(500));
+        assert_eq!(id.harness().len(), HARNESS_MAX);
+    }
+
+    #[test]
+    fn a_client_name_cannot_forge_a_second_field_either() {
+        let id = AgentId::new("", "af31");
+        id.name_from_client("cla ude:code");
+        assert_eq!(id.as_actor(), "claudecode:af31");
     }
 
     #[test]

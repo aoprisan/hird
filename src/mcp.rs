@@ -3,14 +3,27 @@
 //! One process per harness session, speaking JSON-RPC over stdio. Every tool
 //! result is compact JSON; every error is a sentence the model can relay to the
 //! human verbatim.
+//!
+//! Both lifecycles are served. A client may handshake with `initialize`, or —
+//! from MCP 2026-07-28, which has no handshake — open with `server/discover` or
+//! with the request it wanted to make, carrying the protocol version, its own
+//! name and its capabilities in `_meta` on each one. Nothing below depends on
+//! which: the session is a process, the identity and the project scope are read
+//! from the environment when it starts, and there is no protocol-level session
+//! state to keep either way.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Mutex;
 
+use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
-use rmcp::{tool, tool_handler, tool_router, ServerHandler, ServiceExt};
+use rmcp::model::{
+    CacheScope, CallToolRequestParams, CallToolResponse, DiscoverResult, ErrorCode, Implementation,
+    ServerCapabilities, ServerInfo,
+};
+use rmcp::service::RequestContext;
+use rmcp::{tool, tool_handler, tool_router, ErrorData, RoleServer, ServerHandler, ServiceExt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +43,14 @@ use crate::witness::{self, Witness};
 /// Number of trailing events `task_get` returns.
 const EVENT_WINDOW: usize = 20;
 
+/// What a 2026-07-28 client must put in `_meta` to open a connection without
+/// an `initialize` handshake, said the way the client's author would fix it.
+const SELF_CONTAINED: &str =
+    "a connection now opens either with an `initialize` request or with a \
+     self-contained one, and a self-contained request carries \
+     io.modelcontextprotocol/protocolVersion, io.modelcontextprotocol/clientInfo and \
+     io.modelcontextprotocol/clientCapabilities in its `params._meta`";
+
 /// Serve the MCP protocol on stdio until the client disconnects.
 pub async fn serve(db_path: &Path, config: Config) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
@@ -39,9 +60,46 @@ pub async fn serve(db_path: &Path, config: Config) -> anyhow::Result<()> {
         identity::resolve_project(&cwd),
         config,
     );
-    let running = server.serve(rmcp::transport::stdio()).await?;
+    let running = match server.serve(rmcp::transport::stdio()).await {
+        Ok(running) => running,
+        Err(rmcp::service::ServerInitializeError::ExpectedInitializeRequest(opener)) => {
+            refuse_opener(opener.as_ref());
+            anyhow::bail!("this connection was never opened: {SELF_CONTAINED}");
+        }
+        Err(other) => return Err(other.into()),
+    };
     running.waiting().await?;
     Ok(())
+}
+
+/// Answer an opening message that could not open anything.
+///
+/// The SDK hands back the offending message and drops the transport, which
+/// would leave the client reading a closed pipe and reporting that hird
+/// crashed. It did not crash; the request was malformed, and a request with an
+/// id is owed an answer saying so. Written straight to stdout because on this
+/// transport that is what the connection is. Best-effort: a client that has
+/// already hung up is exactly the case where there is nothing left to say.
+fn refuse_opener(opener: Option<&rmcp::model::ClientJsonRpcMessage>) {
+    use std::io::Write;
+
+    let Some(rmcp::model::JsonRpcMessage::Request(request)) = opener else {
+        return;
+    };
+    let response = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": request.id,
+        "error": {
+            "code": ErrorCode::INVALID_REQUEST.0,
+            "message": format!("this request cannot open a connection: {SELF_CONTAINED}"),
+        },
+    });
+    let Ok(line) = serde_json::to_string(&response) else {
+        return;
+    };
+    let mut stdout = std::io::stdout().lock();
+    let _ = writeln!(stdout, "{line}");
+    let _ = stdout.flush();
 }
 
 /// The MCP server state for one harness session.
@@ -1592,6 +1650,45 @@ impl ServerHandler for HirdMcp {
                     .with_title("hird work queue & memory"),
             )
             .with_instructions(self.instructions())
+    }
+
+    /// Every call is a chance to learn who is calling.
+    ///
+    /// Written out rather than left to `#[tool_handler]` for one reason: under
+    /// the 2026-07-28 lifecycle there is no `initialize`, so this is where a
+    /// client's name for itself arrives. It is offered to the identity, which
+    /// keeps it only if the environment left the harness unnamed. Nothing here
+    /// can fail the call — a session whose client will not say who it is works
+    /// exactly as it did before, filed as `unknown`.
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        if let Some(client) = context.client_info() {
+            self.agent.name_from_client(&client.name);
+        }
+        Self::tool_router()
+            .call(ToolCallContext::new(self, request, context))
+            .await
+    }
+
+    /// What `server/discover` answers, for clients that never call `initialize`.
+    ///
+    /// The default answer is right and this states why, so that a later SDK
+    /// default cannot quietly change it: these instructions name this project
+    /// and are shaped by this machine's configuration, so they are nobody
+    /// else's to reuse. Private, and stale the moment they are read.
+    async fn discover(
+        &self,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<DiscoverResult, ErrorData> {
+        Ok(DiscoverResult::from_server_info(
+            self.supported_protocol_versions().into_owned(),
+            self.get_info(),
+        )
+        .with_ttl_ms(0)
+        .with_cache_scope(CacheScope::Private))
     }
 }
 
