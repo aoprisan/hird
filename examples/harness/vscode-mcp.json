@@ -1,5 +1,5 @@
 {
-  "//": "Register hird with Copilot in VS Code. Save as .vscode/mcp.json in your repository. HIRD_HARNESS is how the board tells this session apart (copilot:1a4f).",
+  "//": "What `hird register copilot` writes. Register hird with Copilot in VS Code. Save as .vscode/mcp.json in your repository. HIRD_HARNESS is how the board tells this session apart (copilot:1a4f).",
   "//start": "Writing this file does not start the server: run `MCP: List Servers` -> hird -> Start Server, then tick hird in the agent-mode tools picker. `Show Output` on the same menu says why it failed.",
   "//path": "`command` resolves against the PATH VS Code inherits, which for a GUI launch is not your shell's. If no task_* tools appear, put the absolute path from `which hird` here.",
   "servers": {

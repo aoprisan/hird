@@ -1,4 +1,5 @@
-# Register hird with the Codex CLI.
+# Register hird with the Codex CLI. `hird register codex` appends this for
+# you, with `command` set to the absolute path of the binary that wrote it.
 #
 # Merge this into ~/.codex/config.toml. HIRD_HARNESS is how the board and the
 # other agents tell this session apart (codex:9f2c); leave it unset and the

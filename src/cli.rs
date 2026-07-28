@@ -19,6 +19,7 @@ use crate::glob;
 use crate::identity::{self, ACTOR_CLI};
 use crate::model::{Standing, Status, TaskSummary};
 use crate::plan;
+use crate::register::{self, Registration};
 use crate::repo::{dispatch_waves, MemoryQuery, NewAssertion, OnConflict, ProjectScope};
 use crate::witness;
 
@@ -92,8 +93,27 @@ pub enum Command {
     Tui,
     /// Serve the Model Context Protocol on stdio. Harnesses run this.
     Mcp,
+    /// Write this binary's MCP registration into a harness's config file.
+    Register(RegisterArgs),
     /// Print the database path this invocation would use.
     DbPath,
+}
+
+#[derive(Debug, Args)]
+pub struct RegisterArgs {
+    /// Which harness to register with. Each has one config file, and this
+    /// writes to that one.
+    pub harness: register::Harness,
+    /// Name the server something other than `hird` — for a second
+    /// registration alongside the first, usually with its own `--db`.
+    #[arg(long, default_value = "hird", value_name = "NAME")]
+    pub name: String,
+    /// Print what would be written and write nothing.
+    #[arg(long)]
+    pub print: bool,
+    /// Replace an entry of the same name that says something else.
+    #[arg(long, conflicts_with = "print")]
+    pub force: bool,
 }
 
 #[derive(Debug, Args)]
@@ -275,6 +295,12 @@ pub enum MemCommand {
 /// `Command::Tui` and `Command::Mcp` are handled by the binary, which owns the
 /// terminal and the async runtime; they are rejected here.
 pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
+    // Registering is the one thing a human does before there is anything to
+    // open, so it happens without touching the database.
+    if let Command::Register(args) = &cli.command {
+        return register_cmd(args, cli.db.as_deref(), out);
+    }
+
     let db_path = config::resolve_db_path(cli.db.as_deref());
 
     if let Command::DbPath = cli.command {
@@ -288,7 +314,7 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
     let project = identity::resolve_project(&cwd);
 
     match &cli.command {
-        Command::DbPath => unreachable!("handled above"),
+        Command::DbPath | Command::Register(_) => unreachable!("handled above"),
         Command::Tui | Command::Mcp => {
             anyhow::bail!(
                 "`hird {}` is served by the binary, not the command dispatcher",
@@ -333,6 +359,52 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
         }
         Command::Recuse(args) => recuse(&db, args, out),
     }
+}
+
+/// `hird register`: put this binary in a harness's MCP config.
+///
+/// `--db` is honoured here as the database the *registered session* should use,
+/// not the one this command reads — it reads none. Passing it is how a second
+/// registration ends up pointed at a scratch board.
+fn register_cmd(
+    args: &RegisterArgs,
+    db: Option<&Path>,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
+    let harness = args.harness;
+    let registration = Registration::new(harness, &args.name, db);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    if args.print {
+        writeln!(
+            out,
+            "# {} — {}",
+            harness.label(),
+            harness.config_path(&cwd).display()
+        )?;
+        write!(out, "{}", registration.render(harness))?;
+        return Ok(());
+    }
+
+    let (path, outcome) = register::apply(harness, &registration, &cwd, args.force)?;
+
+    writeln!(out, "{}", outcome.describe(&registration.name, &path))?;
+    writeln!(
+        out,
+        "  command  {} {}",
+        registration.command,
+        registration.args.join(" ")
+    )?;
+    let env: Vec<String> = registration
+        .env
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect();
+    writeln!(out, "  env      {}", env.join("  "))?;
+    // The registration is only half of it, and the other half is the half
+    // people miss — so it is the last line either way.
+    writeln!(out, "next: {}", harness.next_step())?;
+    Ok(())
 }
 
 /// Bring the witness's record of the current project up to date.
@@ -1370,6 +1442,34 @@ mod tests {
         assert_eq!(overlapping(&scopes, 2, 1), vec!["src/db.rs".to_string()]);
         assert!(overlapping(&scopes, 1, 3).is_empty());
         assert!(overlapping(&scopes, 1, 99).is_empty());
+    }
+
+    #[test]
+    fn every_harness_is_registrable_by_name() {
+        for (word, expected) in [
+            ("claude-code", register::Harness::ClaudeCode),
+            ("codex", register::Harness::Codex),
+            ("copilot", register::Harness::Copilot),
+            ("copilot-cli", register::Harness::CopilotCli),
+        ] {
+            let cli = Cli::try_parse_from(["hird", "register", word]).unwrap();
+            match cli.command {
+                Command::Register(args) => {
+                    assert_eq!(args.harness, expected);
+                    assert_eq!(args.name, "hird");
+                    assert!(!args.print && !args.force);
+                }
+                other => panic!("parsed as {other:?}"),
+            }
+        }
+        assert!(Cli::try_parse_from(["hird", "register", "emacs"]).is_err());
+    }
+
+    #[test]
+    fn printing_a_registration_cannot_also_force_one() {
+        let err =
+            Cli::try_parse_from(["hird", "register", "codex", "--print", "--force"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]

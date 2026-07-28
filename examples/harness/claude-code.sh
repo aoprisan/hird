@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# Register hird with Claude Code.
+# Register hird with Claude Code, user-wide. `hird register claude-code`
+# writes the project-scoped equivalent into ./.mcp.json instead.
 #
 # HIRD_HARNESS is the one thing that must differ between harnesses: it is how
 # the board and the other agents tell this session apart (claude-code:af31).
