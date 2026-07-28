@@ -111,7 +111,7 @@ args = ["mcp"]
 env = { HIRD_HARNESS = "codex" }
 ```
 
-**Copilot / VS Code** — in `.vscode/mcp.json`:
+**Copilot in VS Code** — in `.vscode/mcp.json`:
 
 ```json
 {
@@ -126,8 +126,67 @@ env = { HIRD_HARNESS = "codex" }
 }
 ```
 
+Then start it: **MCP: List Servers** → `hird` → **Start Server**, and make sure
+`hird` is ticked in the tools picker of the agent-mode chat box. VS Code does
+not launch a newly written server on its own, and a stopped or unticked server
+looks exactly like one that was never registered.
+
+**Copilot CLI** — in `~/.copilot/mcp-config.json`:
+
+```json
+{
+  "mcpServers": {
+    "hird": {
+      "type": "local",
+      "command": "hird",
+      "args": ["mcp"],
+      "env": { "HIRD_HARNESS": "copilot" },
+      "tools": ["*"]
+    }
+  }
+}
+```
+
+`/mcp add` inside a session writes the same file.
+
 Any MCP-capable harness works the same way: run `hird mcp` over stdio and set
 `HIRD_HARNESS` to something recognisable.
+
+### When the agent says it has no hird tools
+
+A skill, a prompt file or a `copilot-instructions.md` that talks about
+`task_claim` is not a connection. It tells an agent what to do with the tools;
+it cannot hand it any. Registering the server is a separate step, and it is the
+one above. If the agent reports no `task_*` tools, work down this list.
+
+**Is the server registered where that harness reads?** Each registration above
+belongs to exactly one harness. Copilot in VS Code does not read
+`~/.copilot/mcp-config.json`, and the Copilot CLI does not read
+`.vscode/mcp.json`.
+
+**Can the harness spawn `hird`?** `command: "hird"` resolves against the
+harness's `PATH`, not your shell's. A GUI VS Code launched from Finder or a
+dock has neither `~/.cargo/bin` nor anything else your shell profile adds, so
+the spawn fails and the server dies before the handshake. Paste the absolute
+path instead:
+
+```sh
+which hird     # → /Users/you/.cargo/bin/hird
+```
+
+**What did the server say?** Every harness keeps the stdio server's output.
+In VS Code it is **MCP: List Servers** → `hird` → **Show Output**; in Claude
+Code, `claude mcp list`. A `hird` that starts prints nothing and waits, so an
+empty log is the healthy case and `command not found` is the usual one.
+
+**Is it the cloud coding agent?** The Copilot coding agent on github.com runs
+in an ephemeral container with no access to your machine. hird is a local
+queue in a local SQLite file, so there is nothing there for it to connect to —
+register hird in an editor or CLI that runs on the same machine as the
+database (`hird db-path`).
+
+Confirm the binary works at all before blaming the wiring: `hird ls` from a
+terminal exercises the same database over the same code the server does.
 
 ## How the queue behaves
 
@@ -875,7 +934,7 @@ They open real `hird mcp` sessions and send the tool calls a harness would,
 because claiming and completing are agent-side operations with no CLI verb —
 so the transcript shows exactly what "pick up task 42" looks like on the wire.
 [`examples/harness/`](examples/harness) has drop-in MCP registration for Claude
-Code, Codex CLI and VS Code.
+Code, Codex CLI, Copilot in VS Code and the Copilot CLI.
 
 ## Documentation
 
