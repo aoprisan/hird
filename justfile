@@ -60,6 +60,7 @@ examples: build
     ./examples/witness.sh
     ./examples/footing.sh
     ./examples/review.sh
+    ./examples/protocol.sh
 
 # Where this machine's database lives.
 db-path:

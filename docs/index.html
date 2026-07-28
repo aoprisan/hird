@@ -24,6 +24,7 @@
     <li class="sub"><a href="#work-the-queue">Letting agents pull</a></li>
     <li class="sub"><a href="#plan-files">The plan as a file</a></li>
     <li><a href="#harnesses">Registering a harness</a></li>
+    <li class="sub"><a href="#protocol">The protocol</a></li>
     <li><a href="#lifecycle">How a task moves</a></li>
     <li><a href="#dependencies">Dependencies</a></li>
     <li><a href="#scope">File scope and collisions</a></li>
@@ -413,9 +414,48 @@ env = { HIRD_HARNESS = <span class="s">"codex"</span> }</code></pre>
   over stdio and set <code>HIRD_HARNESS</code> to something recognisable.
   <code>hird register copilot --print</code> is a reasonable starting point for
   one hird has no entry for. Whichever way it is registered, the server states
-  the queue's rules during the handshake — claim before working, heartbeat
+  the queue's rules when the harness first asks — claim before working, heartbeat
   before the lease runs out, declare your files, write down what you learn — so
   agents generally behave without being coached in your prompt.
+</p>
+
+<h3 id="protocol">The protocol</h3>
+
+<p>
+  <code>hird mcp</code> speaks MCP <strong>2026-07-28</strong>, and every
+  earlier revision back to 2024-11-05. Which one a session uses is the harness’s
+  choice, not something to configure — hird answers whichever it is asked
+  for, and says so by name when asked for one it does not have.
+</p>
+
+<p>
+  2026-07-28 removes the <code>initialize</code> handshake: a client opens with
+  <code>server/discover</code>, or simply with the request it wanted to make,
+  and carries the protocol version, its own name and its capabilities in
+  <code>_meta</code> on every one. Nothing hird does depended on that handshake
+  — it is one process per session over a pipe, which is about as
+  stateless as a session gets — so a harness on the new lifecycle and one
+  still handshaking share a queue without noticing each other’s era. The
+  one visible difference is that a request claiming 2026-07-28 without carrying
+  what 2026-07-28 requires is refused as a bad request, in a sentence naming
+  what was missing, rather than served on a guess about who sent it.
+</p>
+
+<p>
+  The revision also means a client now names itself on every call, which hird
+  uses for exactly one thing: <strong>a harness that never set
+  <code>HIRD_HARNESS</code> is filed under the name its client gives, instead of
+  <code>unknown</code></strong>. <code>HIRD_HARNESS</code> still wins wherever
+  it is set — it is the half of the identity you control, and
+  <code>hird register</code> writes it — and the name is taken once and
+  then held for the life of the session, because an actor that changed its name
+  halfway through would lose track of its own claims.
+</p>
+
+<p>
+  What hird has never used, and does not start using now, are the three
+  features this revision deprecates: no roots, no sampling, no protocol
+  logging.
 </p>
 
 <h3>When the agent says it has no hird tools</h3>
@@ -1247,7 +1287,7 @@ memory_footing = true</code></pre>
 <table>
   <thead><tr><th>Variable</th><th>Meaning</th></tr></thead>
   <tbody>
-    <tr><td><code>HIRD_HARNESS</code></td><td>This session's harness name. Set it in the MCP registration.</td></tr>
+    <tr><td><code>HIRD_HARNESS</code></td><td>This session's harness name. Set it in the MCP registration. Unset, the name the harness’s client gives for itself is used instead.</td></tr>
     <tr><td><code>HIRD_PROJECT</code></td><td>Override project detection.</td></tr>
     <tr><td><code>HIRD_DB</code></td><td>Override the database path.</td></tr>
   </tbody>
@@ -1306,6 +1346,10 @@ memory_footing = true</code></pre>
     <tr>
       <td><a href="https://github.com/aoprisan/hird/blob/main/examples/review.sh"><code>review.sh</code></a></td>
       <td>Work that files its own <a href="#review">review</a> when it finishes, scoped to what actually moved and barred to the harness that moved it. Makes its own throwaway git repository.</td>
+    </tr>
+    <tr>
+      <td><a href="https://github.com/aoprisan/hird/blob/main/examples/protocol.sh"><code>protocol.sh</code></a></td>
+      <td><a href="#protocol">MCP 2026-07-28</a> on the wire: <code>server/discover</code>, a task worked without ever calling <code>initialize</code>, and a harness that never set <code>HIRD_HARNESS</code> named by its own client.</td>
     </tr>
     <tr>
       <td><a href="https://github.com/aoprisan/hird/blob/main/examples/task-body.md"><code>task-body.md</code></a></td>

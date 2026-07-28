@@ -133,26 +133,72 @@ pub fn assert_exists(path: &Path) {
     assert!(path.exists(), "{} does not exist", path.display());
 }
 
+/// How a session opens, and therefore what every later request has to carry.
+#[derive(Clone, Copy)]
+pub enum Lifecycle {
+    /// `initialize` first; the negotiated state lives in the connection.
+    Handshake(&'static str),
+    /// MCP 2026-07-28: no handshake, and `_meta` on every request instead.
+    Stateless(&'static str),
+    /// Nothing is sent or added for you. For tests about opening a connection.
+    Raw,
+}
+
 /// A live `hird mcp` subprocess.
 pub struct McpSession {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     next_id: i64,
+    lifecycle: Lifecycle,
 }
+
+/// The `_meta` a 2026-07-28 request must carry in place of a handshake.
+pub fn request_meta(client: &str) -> Value {
+    json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {"name": client, "version": "0"},
+        "io.modelcontextprotocol/clientCapabilities": {},
+    })
+}
+
+/// The name a test client gives for itself in `clientInfo`.
+pub const CLIENT_NAME: &str = "integration-test";
 
 impl McpSession {
     pub fn start(sandbox: &Sandbox, harness: &str) -> McpSession {
-        McpSession::spawn(sandbox, Some(harness))
+        McpSession::spawn(sandbox, Some(harness), Lifecycle::Handshake(CLIENT_NAME))
     }
 
     /// A session started the way a harness that forgot to set `HIRD_HARNESS`
     /// starts one.
     pub fn start_unnamed(sandbox: &Sandbox) -> McpSession {
-        McpSession::spawn(sandbox, None)
+        McpSession::spawn(sandbox, None, Lifecycle::Handshake(CLIENT_NAME))
     }
 
-    fn spawn(sandbox: &Sandbox, harness: Option<&str>) -> McpSession {
+    /// A session with neither `HIRD_HARNESS` nor a client willing to name
+    /// itself: the last case in which hird has to invent an identity.
+    pub fn start_anonymous(sandbox: &Sandbox) -> McpSession {
+        McpSession::spawn(sandbox, None, Lifecycle::Handshake(""))
+    }
+
+    /// A 2026-07-28 session: no `initialize`, every request self-contained.
+    pub fn start_stateless(sandbox: &Sandbox, harness: Option<&str>) -> McpSession {
+        McpSession::spawn(sandbox, harness, Lifecycle::Stateless(CLIENT_NAME))
+    }
+
+    /// A 2026-07-28 session whose client names itself something in particular.
+    pub fn start_stateless_as(sandbox: &Sandbox, client: &'static str) -> McpSession {
+        McpSession::spawn(sandbox, None, Lifecycle::Stateless(client))
+    }
+
+    /// A subprocess that has been sent nothing at all, so a test can say
+    /// exactly what the first message on the connection is.
+    pub fn start_raw(sandbox: &Sandbox) -> McpSession {
+        McpSession::spawn(sandbox, Some("claude-code"), Lifecycle::Raw)
+    }
+
+    fn spawn(sandbox: &Sandbox, harness: Option<&str>, lifecycle: Lifecycle) -> McpSession {
         let mut command: Command = sandbox.command();
         if let Some(harness) = harness {
             command.env("HIRD_HARNESS", harness);
@@ -171,8 +217,11 @@ impl McpSession {
             stdin,
             stdout,
             next_id: 0,
+            lifecycle,
         };
-        session.initialize();
+        if let Lifecycle::Handshake(client) = session.lifecycle {
+            session.initialize_as(client);
+        }
         session
     }
 
@@ -203,7 +252,19 @@ impl McpSession {
         }
     }
 
-    pub fn request(&mut self, method: &str, params: Value) -> Value {
+    /// Send a request, adding whatever this session's lifecycle requires.
+    ///
+    /// A stateless session has no negotiated state to lean on, so every
+    /// request carries the protocol version and the client's own name.
+    pub fn request(&mut self, method: &str, mut params: Value) -> Value {
+        if let Lifecycle::Stateless(client) = self.lifecycle {
+            params["_meta"] = request_meta(client);
+        }
+        self.request_verbatim(method, params)
+    }
+
+    /// Send a request exactly as given, adding nothing.
+    pub fn request_verbatim(&mut self, method: &str, params: Value) -> Value {
         self.next_id += 1;
         let id = self.next_id;
         self.send(&json!({
@@ -216,12 +277,16 @@ impl McpSession {
     }
 
     pub fn initialize(&mut self) -> Value {
-        let response = self.request(
+        self.initialize_as("integration-test")
+    }
+
+    pub fn initialize_as(&mut self, client: &str) -> Value {
+        let response = self.request_verbatim(
             "initialize",
             json!({
                 "protocolVersion": "2025-06-18",
                 "capabilities": {},
-                "clientInfo": {"name": "integration-test", "version": "0"},
+                "clientInfo": {"name": client, "version": "0"},
             }),
         );
         self.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
@@ -257,5 +322,19 @@ impl McpSession {
     pub fn shutdown(mut self) {
         drop(self.stdin);
         let _ = self.child.wait();
+    }
+
+    /// Wait for the subprocess to end on its own, and return what it said on
+    /// the way out. Used where hird refuses a connection rather than serving it.
+    pub fn wait_for_exit(mut self) -> String {
+        use std::io::Read;
+
+        drop(self.stdin);
+        let _ = self.child.wait().expect("wait for hird mcp");
+        let mut stderr = String::new();
+        if let Some(mut pipe) = self.child.stderr.take() {
+            let _ = pipe.read_to_string(&mut stderr);
+        }
+        stderr
     }
 }

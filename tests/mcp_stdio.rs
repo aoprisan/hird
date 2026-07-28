@@ -313,12 +313,52 @@ fn an_unknown_harness_still_gets_a_usable_identity() {
     let sandbox = Sandbox::new();
     let seq: i64 = sandbox.run(&["add", "t"]).trim().parse().unwrap();
 
-    // HIRD_HARNESS is removed by Sandbox::command; start without re-adding it.
-    let mut session = McpSession::start_unnamed(&sandbox);
+    // Neither HIRD_HARNESS (removed by Sandbox::command) nor a client willing
+    // to name itself. There is nothing left to go on, so the board says so.
+    let mut session = McpSession::start_anonymous(&sandbox);
 
     let claimed = session.call("task_claim", json!({"seq": seq})).unwrap();
     assert!(
         claimed["holder"].as_str().unwrap().starts_with("unknown:"),
+        "{}",
+        claimed["holder"]
+    );
+    session.shutdown();
+}
+
+/// A harness configured by hand, without `hird register`, still lands on the
+/// board under its own name: the client says who it is, and hird listens.
+#[test]
+fn a_harness_that_set_no_variable_is_named_by_its_client() {
+    let sandbox = Sandbox::new();
+    let seq: i64 = sandbox.run(&["add", "t"]).trim().parse().unwrap();
+
+    let mut session = McpSession::start_unnamed(&sandbox);
+
+    let claimed = session.call("task_claim", json!({"seq": seq})).unwrap();
+    let holder = claimed["holder"].as_str().unwrap();
+    assert!(
+        holder.starts_with(&format!("{}:", support::CLIENT_NAME)),
+        "{holder}"
+    );
+    session.shutdown();
+}
+
+/// `HIRD_HARNESS` is what the human wrote into their config; a client cannot
+/// talk its way out of it by calling itself something else.
+#[test]
+fn the_configured_harness_name_outranks_the_clients_own() {
+    let sandbox = Sandbox::new();
+    let seq: i64 = sandbox.run(&["add", "t"]).trim().parse().unwrap();
+
+    let mut session = McpSession::start(&sandbox, "claude-code");
+
+    let claimed = session.call("task_claim", json!({"seq": seq})).unwrap();
+    assert!(
+        claimed["holder"]
+            .as_str()
+            .unwrap()
+            .starts_with("claude-code:"),
         "{}",
         claimed["holder"]
     );
@@ -1063,4 +1103,240 @@ fn unreviewed_work_finishes_the_way_it_always_did() {
     assert_eq!(sandbox.run(&["ls"]).lines().count(), 1);
 
     codex.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// MCP 2026-07-28: the stateless lifecycle.
+//
+// There is no `initialize` and no session to hold state in. A client asks the
+// server to describe itself with `server/discover`, then sends requests that
+// each carry the protocol version and its own name in `_meta`. hird is one
+// process per session over stdio, so nothing about it depended on the
+// handshake; these tests are here to keep it that way.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn discovery_answers_without_a_handshake_and_offers_the_current_spec() {
+    let sandbox = Sandbox::new();
+    let mut session = McpSession::start_stateless(&sandbox, Some("claude-code"));
+
+    let response = session.request("server/discover", json!({}));
+    let result = &response["result"];
+    assert_eq!(result["serverInfo"]["name"], "hird");
+    assert!(result["capabilities"]["tools"].is_object());
+
+    let versions: Vec<&str> = result["supportedVersions"]
+        .as_array()
+        .expect("supportedVersions")
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(
+        versions.contains(&"2026-07-28"),
+        "discovery does not offer the current spec: {versions:?}"
+    );
+    // The versions hird's own tests and docs assume still keep working.
+    assert!(versions.contains(&"2025-11-25"), "{versions:?}");
+    assert!(versions.contains(&"2025-06-18"), "{versions:?}");
+
+    // The queue's rules reach a client that never calls `initialize`.
+    let instructions = result["instructions"].as_str().expect("instructions");
+    for expected in ["task_claim", "task_update", "mem_store", "seq"] {
+        assert!(
+            instructions.contains(expected),
+            "instructions omit {expected}"
+        );
+    }
+
+    // Those instructions name this project and are shaped by this machine's
+    // config, so they are nobody else's to reuse.
+    assert_eq!(result["cacheScope"], "private");
+    assert_eq!(result["ttlMs"], 0);
+
+    session.shutdown();
+}
+
+#[test]
+fn a_stateless_client_can_work_a_task_end_to_end() {
+    let sandbox = Sandbox::new();
+    sandbox.write_file("src/config.rs", "fn load() {}\n");
+    sandbox.git_init();
+    let seq: i64 = sandbox
+        .run(&["add", "Port the loader", "--path", "src/config.rs"])
+        .trim()
+        .parse()
+        .unwrap();
+
+    let mut session = McpSession::start_stateless(&sandbox, Some("claude-code"));
+
+    let listed = session.call("task_list", json!({})).unwrap();
+    assert_eq!(listed["count"], 1);
+
+    let claimed = session.call("task_claim", json!({"seq": seq})).unwrap();
+    assert!(
+        claimed["holder"]
+            .as_str()
+            .unwrap()
+            .starts_with("claude-code:"),
+        "{}",
+        claimed["holder"]
+    );
+
+    session
+        .call(
+            "task_scope",
+            json!({"seq": seq, "paths": ["src/config.rs"]}),
+        )
+        .unwrap();
+    session
+        .call(
+            "task_update",
+            json!({"seq": seq, "note": "porting", "status": "in_progress"}),
+        )
+        .unwrap();
+    sandbox.write_file("src/config.rs", "fn load() { ported() }\n");
+    session
+        .call("task_complete", json!({"seq": seq, "result": "ported"}))
+        .unwrap();
+
+    assert!(sandbox
+        .run(&["ls", "--status", "done"])
+        .contains("Port the loader"));
+    session.shutdown();
+}
+
+/// The point of the stateless lifecycle for hird: `clientInfo` arrives on
+/// every request, so a harness that never set `HIRD_HARNESS` is still somebody.
+#[test]
+fn a_stateless_client_names_itself_on_every_request() {
+    let sandbox = Sandbox::new();
+    let seq: i64 = sandbox.run(&["add", "t"]).trim().parse().unwrap();
+
+    let mut session = McpSession::start_stateless_as(&sandbox, "codex-cli");
+
+    let claimed = session.call("task_claim", json!({"seq": seq})).unwrap();
+    assert!(
+        claimed["holder"]
+            .as_str()
+            .unwrap()
+            .starts_with("codex-cli:"),
+        "{}",
+        claimed["holder"]
+    );
+    session.shutdown();
+}
+
+/// Two harnesses on one queue is the whole design, and it has to survive one
+/// of them being on the new lifecycle and the other on the old one.
+#[test]
+fn a_stateless_agent_and_a_handshaking_one_share_one_queue() {
+    let sandbox = Sandbox::new();
+    sandbox.git_init();
+    sandbox.run(&["add", "port the config loader", "--path", "src/config.rs"]);
+    sandbox.run(&["add", "rewrite the renderer", "--path", "src/tui/**"]);
+
+    let mut modern = McpSession::start_stateless(&sandbox, Some("claude-code"));
+    let mut legacy = McpSession::start(&sandbox, "codex");
+
+    let first = modern.call("task_next", json!({})).unwrap();
+    let second = legacy.call("task_next", json!({})).unwrap();
+
+    let a = first["claimed"]["claimed"]
+        .as_i64()
+        .expect("the stateless agent got work");
+    let b = second["claimed"]["claimed"]
+        .as_i64()
+        .expect("the handshaking agent got work");
+    assert_ne!(a, b, "both harnesses were handed task {a}");
+    assert!(
+        first["claimed"]["holder"]
+            .as_str()
+            .unwrap()
+            .starts_with("claude-code:"),
+        "{first}"
+    );
+    assert!(
+        second["claimed"]["holder"]
+            .as_str()
+            .unwrap()
+            .starts_with("codex:"),
+        "{second}"
+    );
+
+    // And the loser of a race is told who won, across the lifecycle divide.
+    let refused = legacy
+        .call("task_claim", json!({"seq": a}))
+        .expect_err("claiming a held task");
+    assert!(refused.contains("claude-code:"), "{refused}");
+
+    modern.shutdown();
+    legacy.shutdown();
+}
+
+/// A request that cannot open a connection is answered rather than dropped.
+///
+/// The SDK's own response to an unopenable first message is to close the
+/// transport, which reaches the harness as "the hird server crashed". It did
+/// not crash, and a request with an id is owed an answer that says so.
+#[test]
+fn an_opening_request_that_cannot_open_anything_is_answered() {
+    let sandbox = Sandbox::new();
+    let mut session = McpSession::start_raw(&sandbox);
+
+    // Declares the current spec but carries none of what it requires.
+    let response = session.request_verbatim(
+        "tools/list",
+        json!({"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28"}}),
+    );
+    let error = response.get("error").unwrap_or_else(|| {
+        panic!("a request missing its required metadata was served: {response}")
+    });
+    assert_eq!(error["code"], -32600);
+    let message = error["message"].as_str().unwrap_or_default();
+    for expected in ["initialize", "clientInfo", "_meta"] {
+        assert!(message.contains(expected), "{message}");
+    }
+
+    // And hird stands down rather than serving a session it never opened,
+    // saying the same thing to the human reading the harness's log.
+    let stderr = session.wait_for_exit();
+    assert!(stderr.contains("clientInfo"), "{stderr}");
+}
+
+/// A version hird does not implement is refused by name, rather than being
+/// quietly served as something else.
+#[test]
+fn a_request_declaring_an_unknown_version_is_refused() {
+    let sandbox = Sandbox::new();
+    let mut session = McpSession::start_stateless(&sandbox, Some("claude-code"));
+
+    // Open the connection properly first; this is about a later request.
+    session.call("task_list", json!({})).unwrap();
+
+    let response = session.request_verbatim(
+        "tools/list",
+        json!({"_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2099-01-01",
+            "io.modelcontextprotocol/clientInfo": {"name": "from-the-future", "version": "0"},
+            "io.modelcontextprotocol/clientCapabilities": {},
+        }}),
+    );
+    let error = response
+        .get("error")
+        .unwrap_or_else(|| panic!("an unknown protocol version was served: {response}"));
+    assert_eq!(error["code"], -32022, "{error}");
+    assert_eq!(error["data"]["requested"], "2099-01-01", "{error}");
+    let supported: Vec<&str> = error["data"]["supported"]
+        .as_array()
+        .expect("the refusal names what is supported")
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(supported.contains(&"2026-07-28"), "{supported:?}");
+
+    // The connection survives one bad request: the next good one still works.
+    let listed = session.call("task_list", json!({})).unwrap();
+    assert_eq!(listed["count"], 0);
+
+    session.shutdown();
 }

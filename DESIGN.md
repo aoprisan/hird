@@ -60,7 +60,7 @@ The human creates tasks (CLI or TUI), then tells any agent in any harness "pick 
 
 ## 3. Identity & scoping
 
-- **Agent identity:** every MCP session identifies itself as `<harness>:<session>`, e.g. `claude-code:af31`. The harness name comes from `HIRD_HARNESS` env var set in each harness's MCP registration config (fallback `unknown`); the session suffix is a short random id generated at MCP process start. Stored on claims and assertions.
+- **Agent identity:** every MCP session identifies itself as `<harness>:<session>`, e.g. `claude-code:af31`. The harness name comes from the `HIRD_HARNESS` env var set in each harness's MCP registration config; failing that **(v1.6)** from the name the client gives for itself, latched from the first request that carries one; failing that `unknown`. The session suffix is a short random id generated at MCP process start. Stored on claims and assertions.
 - **Project scoping:** every task and assertion carries a `project` string — the canonicalized project root path. The MCP server resolves it from `HIRD_PROJECT` env var if set, else the git toplevel of the server's CWD, else the CWD itself. One global DB, filterable by project. All MCP list/search tools default to the current project scope with an explicit `all_projects: true` escape hatch.
 
 ## 4. Data model
@@ -252,7 +252,7 @@ to the human, and one that says "no work" is not.
 
 ## 6. MCP server (`hird mcp`)
 
-stdio transport. Instructions string (returned in MCP initialize) must tell the model: how tasks are referenced (by `seq`), that it must claim before working, must call `task_update` at least every ~10 minutes to keep the lease, and should store assertions for durable facts it learns.
+stdio transport. Instructions string (returned from `server/discover`, and from `initialize` for clients still handshaking) must tell the model: how tasks are referenced (by `seq`), that it must claim before working, must call `task_update` at least every ~10 minutes to keep the lease, and should store assertions for durable facts it learns.
 
 ### Tools (exactly these twelve — eight from v1, four from v1.1)
 
@@ -271,11 +271,45 @@ stdio transport. Instructions string (returned in MCP initialize) must tell the 
 | `mem_store` | `content`, `tags?`, `task_seq?` | Insert assertion with actor + project provenance. |
 | `mem_search` | `query`, `limit? (20)`, `all_projects?`, `include_superseded? (false)` | FTS5 `MATCH`; fall back to `LIKE` if the query fails FTS syntax. Results include id, content, tags, actor, created_at. |
 
-**(v1.1)** The `initialize` instructions gain the swarm protocol: ask for work
+**(v1.1)** The server's instructions gain the swarm protocol: ask for work
 with `task_next` when no number was named, declare files with `task_scope` as
 soon as they are known, split rather than serialize, release rather than fail.
 
 Design rules: every tool result is compact JSON; errors are descriptive strings the model can relay verbatim ("task 42 is claimed by codex:9f2c until 14:32Z"). No tool mutates memory implicitly.
+
+### (v1.6) Lifecycle — MCP 2026-07-28
+
+The server answers every protocol revision the Rust SDK implements, 2024-11-05
+through 2026-07-28, and negotiates rather than requiring one. A revision it does
+not implement is refused by name, with the list it does implement attached.
+
+2026-07-28 deletes the `initialize` handshake and the protocol-level session:
+a client opens with `server/discover` or with the request it actually wanted,
+and each request carries the protocol version, the client's implementation and
+its capabilities in `params._meta`. Nothing in this design leaned on that
+handshake — the transport is stdio, one process per session, and the identity
+and project scope are both read from the environment at process start — so the
+two lifecycles coexist on one queue with nothing to reconcile.
+
+Three consequences, and only three:
+
+1. **Discovery is not cacheable.** The instructions string names the current
+   project and is shaped by this machine's config file, so `server/discover`
+   answers `cacheScope: private` and `ttlMs: 0`. It is nobody else's to reuse.
+2. **A client names itself on every call**, which is the one thing worth
+   taking. `call_tool` offers that name to the session identity, which keeps it
+   only if `HIRD_HARNESS` left the identity unnamed — the env var is the half a
+   human controls, and `hird register` writes it — and only once. An actor
+   string that changed mid-session would leave the process unable to find its
+   own leases, so the first name wins and is held.
+3. **An opening request that cannot open a connection is answered**, not
+   dropped. The SDK's response to one is to close the transport, which reaches
+   a harness as "the hird server crashed"; it did not, and a request with an id
+   is owed an error saying which `_meta` keys were missing.
+
+Nothing is adopted from the revision beyond that. The three features it
+deprecates — roots, sampling, protocol logging — are three this server never
+used, so the deprecation window is not a migration for hird.
 
 ### Harness registration (document in README)
 - Claude Code: `claude mcp add hird -e HIRD_HARNESS=claude-code -- hird mcp`
@@ -753,7 +787,7 @@ that has drifted is a human's job and always was.
 
 `memory_footing = false`, or a project outside git, and memory behaves exactly
 as it did before any of this existed: no anchors written, no standing computed,
-no `standing` field in any payload, and the `initialize` instructions do not
+no `standing` field in any payload, and the server's instructions do not
 mention it — a model told to read a field nothing will ever populate has been
 handed a rule it cannot use and a reason to doubt the ones it can. That is the
 same rule §12 lives by, for the same reason.

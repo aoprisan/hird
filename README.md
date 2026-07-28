@@ -188,6 +188,34 @@ Any other MCP-capable harness works the same way: run `hird mcp` over stdio and
 set `HIRD_HARNESS` to something recognisable. `hird register copilot --print`
 is a reasonable starting point for one hird has no entry for.
 
+### The protocol
+
+`hird mcp` speaks MCP **2026-07-28**, and every earlier revision back to
+2024-11-05. Which one a session uses is the harness's choice, not something to
+configure — hird answers whichever it is asked for, and says so by name when
+asked for one it does not have.
+
+2026-07-28 removes the `initialize` handshake: a client opens with
+`server/discover` or simply with the request it wanted to make, and carries the
+protocol version, its own name and its capabilities in `_meta` on each one.
+Nothing hird does depended on that handshake — it is one process per session
+over a pipe, which is about as stateless as a session gets — so a harness on
+the new lifecycle and one still handshaking share a queue without noticing each
+other's era. The one visible difference is that a request that claims
+2026-07-28 without carrying what 2026-07-28 requires is refused as a bad
+request, in a sentence naming what was missing, rather than served on a guess
+about who sent it.
+
+The revision also means a client now names itself on every call, which hird
+uses for exactly one thing: **a harness that never set `HIRD_HARNESS` is filed
+under the name its client gives, instead of `unknown`.** `HIRD_HARNESS` still
+wins wherever it is set — it is the half of the identity you control, and
+`hird register` writes it — and the name is taken once and then held for the
+life of the session, because an actor that changed its name halfway through
+would lose track of its own claims. What hird has never used, and does not
+start using now, are the three features this revision deprecates: no roots, no
+sampling, no protocol logging.
+
 ### When the agent says it has no hird tools
 
 A skill, a prompt file or a `copilot-instructions.md` that talks about
@@ -204,7 +232,7 @@ again and it will say `already registered` against the path it went to.
 **Can the harness spawn `hird`?** `command: "hird"` resolves against the
 harness's `PATH`, not your shell's. A GUI VS Code launched from Finder or a
 dock has neither `~/.cargo/bin` nor anything else your shell profile adds, so
-the spawn fails and the server dies before the handshake. This is what `hird
+the spawn fails and the server dies before it is ever spoken to. This is what `hird
 register` exists to get right; in a config written by hand, paste the absolute
 path instead:
 
@@ -781,7 +809,7 @@ warning that fires on everything is a warning nobody reads.
 It rides on the same working-tree access as the witness, and is off wherever
 that is: no git, or `memory_footing = false`, and memory behaves exactly as it
 did before any of this existed — no anchors, no `standing` field, and the
-`initialize` instructions do not mention it.
+server's instructions do not mention it.
 
 ## Command line
 
@@ -967,6 +995,7 @@ points `HIRD_DB` at a throwaway file, so running one cannot disturb your board.
 ./examples/witness.sh           # two agents in one file, caught in the act
 ./examples/footing.sh           # a fact, the file it came from, and that file rewritten
 ./examples/review.sh            # work that files its own review, barred to whoever did it
+./examples/protocol.sh          # MCP 2026-07-28 on the wire: no handshake, and who the client says it is
 ```
 
 They open real `hird mcp` sessions and send the tool calls a harness would,
