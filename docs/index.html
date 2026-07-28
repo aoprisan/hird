@@ -311,23 +311,71 @@ nothing was written; drop --dry-run to file it</code></pre>
   <code>unknown</code>.
 </p>
 
+<p>
+  <code>hird register</code> writes that for you, into the one file the harness
+  in question actually reads:
+</p>
+
+<pre><code><span class="k">hird</span> register claude-code    <span class="c"># ./.mcp.json</span>
+<span class="k">hird</span> register codex          <span class="c"># ~/.codex/config.toml</span>
+<span class="k">hird</span> register copilot        <span class="c"># ./.vscode/mcp.json — Copilot in VS Code</span>
+<span class="k">hird</span> register copilot-cli    <span class="c"># ~/.copilot/mcp-config.json</span></code></pre>
+
+<pre><code><span class="w">registered hird in /home/you/project/.vscode/mcp.json
+  command  /home/you/.cargo/bin/hird mcp
+  env      HIRD_HARNESS=copilot
+next: in VS Code: MCP: List Servers → hird → Start Server, then tick hird in
+      the agent-mode tools picker</span></code></pre>
+
+<p>
+  The <code>command</code> it writes is the absolute path of the binary doing
+  the writing, because that is the thing hand-written configs get wrong: a bare
+  <code>hird</code> resolves against the harness's <code>PATH</code>, and a GUI
+  editor's is not your shell's.
+</p>
+
+<p>
+  Register as many harnesses as you run — that is the point — and run it again
+  whenever you move the binary. Registering twice changes nothing and says so.
+  An entry you have since edited by hand is refused rather than overwritten,
+  with <code>--force</code> to say you meant it. <code>--print</code> writes
+  nothing and shows what it would have written, for a config this cannot safely
+  edit — one with comments in it, or a harness hird has never heard of.
+</p>
+
+<p>
+  A second registration on a scratch database, alongside the real one:
+</p>
+
+<pre><code><span class="k">hird</span> register codex --name hird-scratch --db /tmp/scratch/hird.db</code></pre>
+
+<h3>What it writes</h3>
+
 <h4>Claude Code</h4>
-<pre><code><span class="k">claude</span> mcp add hird -e HIRD_HARNESS=claude-code -- hird mcp</code></pre>
+<span class="filename">./.mcp.json</span>
+<p>
+  Project-scoped, so it belongs to the checkout rather than to you.
+  <code>claude mcp add hird -e HIRD_HARNESS=claude-code -- hird mcp</code> is
+  the user-wide equivalent.
+</p>
 
 <h4>Codex CLI</h4>
 <span class="filename">~/.codex/config.toml</span>
 <pre><code>[mcp_servers.hird]
-command = <span class="s">"hird"</span>
+command = <span class="s">"/home/you/.cargo/bin/hird"</span>
 args = [<span class="s">"mcp"</span>]
 env = { HIRD_HARNESS = <span class="s">"codex"</span> }</code></pre>
+<p>
+  Appended, with the comments already in the file left alone.
+</p>
 
-<h4>Copilot / VS Code</h4>
+<h4>Copilot in VS Code</h4>
 <span class="filename">.vscode/mcp.json</span>
 <pre><code>{
   <span class="s">"servers"</span>: {
     <span class="s">"hird"</span>: {
       <span class="s">"type"</span>: <span class="s">"stdio"</span>,
-      <span class="s">"command"</span>: <span class="s">"hird"</span>,
+      <span class="s">"command"</span>: <span class="s">"/home/you/.cargo/bin/hird"</span>,
       <span class="s">"args"</span>: [<span class="s">"mcp"</span>],
       <span class="s">"env"</span>: { <span class="s">"HIRD_HARNESS"</span>: <span class="s">"copilot"</span> }
     }
@@ -335,10 +383,93 @@ env = { HIRD_HARNESS = <span class="s">"codex"</span> }</code></pre>
 }</code></pre>
 
 <p>
-  Any MCP-capable harness works the same way. The server states the queue's
-  rules during the handshake — claim before working, heartbeat before the lease
-  runs out, declare your files, write down what you learn — so agents generally
-  behave without being coached in your prompt.
+  Writing this does not start it: <strong>MCP: List Servers</strong> → <code>hird</code> →
+  <strong>Start Server</strong>, and tick <code>hird</code> in the tools picker
+  of the agent-mode chat box. VS Code does not launch a newly written server on
+  its own, and a stopped or unticked server looks exactly like one that was
+  never registered.
+</p>
+
+<h4>Copilot CLI</h4>
+<span class="filename">~/.copilot/mcp-config.json</span>
+<pre><code>{
+  <span class="s">"mcpServers"</span>: {
+    <span class="s">"hird"</span>: {
+      <span class="s">"type"</span>: <span class="s">"local"</span>,
+      <span class="s">"command"</span>: <span class="s">"/home/you/.cargo/bin/hird"</span>,
+      <span class="s">"args"</span>: [<span class="s">"mcp"</span>],
+      <span class="s">"env"</span>: { <span class="s">"HIRD_HARNESS"</span>: <span class="s">"copilot"</span> },
+      <span class="s">"tools"</span>: [<span class="s">"*"</span>]
+    }
+  }
+}</code></pre>
+
+<p>
+  <code>/mcp add</code> inside a session writes the same file.
+</p>
+
+<p>
+  Any other MCP-capable harness works the same way: run <code>hird mcp</code>
+  over stdio and set <code>HIRD_HARNESS</code> to something recognisable.
+  <code>hird register copilot --print</code> is a reasonable starting point for
+  one hird has no entry for. Whichever way it is registered, the server states
+  the queue's rules during the handshake — claim before working, heartbeat
+  before the lease runs out, declare your files, write down what you learn — so
+  agents generally behave without being coached in your prompt.
+</p>
+
+<h3>When the agent says it has no hird tools</h3>
+
+<p>
+  A skill, a prompt file or a <code>copilot-instructions.md</code> that talks
+  about <code>task_claim</code> is not a connection. It tells an agent what to
+  do with the tools; it cannot hand it any. Registering the server is a
+  separate step, and it is the one above. If the agent reports no
+  <code>task_*</code> tools, work down this list.
+</p>
+
+<p>
+  <strong>Is the server registered where that harness reads?</strong> Each
+  registration above belongs to exactly one harness. Copilot in VS Code does
+  not read <code>~/.copilot/mcp-config.json</code>, and the Copilot CLI does
+  not read <code>.vscode/mcp.json</code>. <code>hird register &lt;harness&gt;</code>
+  picks the file for you; run it again and it will say
+  <code>already registered</code> against the path it went to.
+</p>
+
+<p>
+  <strong>Can the harness spawn <code>hird</code>?</strong>
+  <code>command: "hird"</code> resolves against the harness's <code>PATH</code>,
+  not your shell's. A GUI VS Code launched from Finder or a dock has neither
+  <code>~/.cargo/bin</code> nor anything else your shell profile adds, so the
+  spawn fails and the server dies before the handshake. This is what
+  <code>hird register</code> exists to get right; in a config written by hand,
+  paste the absolute path instead:
+</p>
+
+<pre><code><span class="k">which</span> hird     <span class="c"># → /Users/you/.cargo/bin/hird</span></code></pre>
+
+<p>
+  <strong>What did the server say?</strong> Every harness keeps the stdio
+  server's output. In VS Code it is <strong>MCP: List Servers</strong> →
+  <code>hird</code> → <strong>Show Output</strong>; in Claude Code,
+  <code>claude mcp list</code>. A <code>hird</code> that starts prints nothing
+  and waits, so an empty log is the healthy case and
+  <code>command not found</code> is the usual one.
+</p>
+
+<p>
+  <strong>Is it the cloud coding agent?</strong> The Copilot coding agent on
+  github.com runs in an ephemeral container with no access to your machine.
+  hird is a local queue in a local SQLite file, so there is nothing there for
+  it to connect to — register hird in an editor or CLI that runs on the same
+  machine as the database (<code>hird db-path</code>).
+</p>
+
+<p>
+  Confirm the binary works at all before blaming the wiring: <code>hird ls</code>
+  from a terminal exercises the same database over the same code the server
+  does.
 </p>
 </section>
 

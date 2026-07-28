@@ -19,7 +19,7 @@ installed, but nothing requires it.
 | [`review.sh`](review.sh) | **No agent reviews its own work** — finishing files the review, scoped to what actually moved, and the queue refuses it to the harness that did it. |
 | [`task-body.md`](task-body.md) | A task body worth writing, for `--body-file`. |
 | [`config.toml`](config.toml) | Every configuration key, annotated, at its default. |
-| [`harness/`](harness) | Drop-in MCP registration for Claude Code, Codex CLI and VS Code. |
+| [`harness/`](harness) | MCP registration for Claude Code, Codex CLI, Copilot in VS Code and the Copilot CLI — what `hird register <harness>` writes, for reading or for pasting somewhere it does not reach. |
 | [`lib/mcp.sh`](lib/mcp.sh) | The shell helpers the scripts share — a raw MCP session in 20 lines. |
 
 ```sh

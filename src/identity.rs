@@ -159,7 +159,8 @@ fn config_dir() -> PathBuf {
         .unwrap_or_else(|| home().join(".config"))
 }
 
-fn home() -> PathBuf {
+/// The home directory, or the current one when the environment will not say.
+pub fn home() -> PathBuf {
     non_empty_env("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))

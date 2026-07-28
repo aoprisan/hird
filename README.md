@@ -96,29 +96,65 @@ Each harness runs its own `hird mcp` process. The only thing they need to
 differ on is `HIRD_HARNESS`, which is how agents and the board tell each other
 apart (`claude-code:af31`, `codex:9f2c`).
 
-**Claude Code**
+`hird register` writes that for you, into the one file the harness in question
+actually reads:
 
 ```sh
-claude mcp add hird -e HIRD_HARNESS=claude-code -- hird mcp
+hird register claude-code    # ./.mcp.json
+hird register codex          # ~/.codex/config.toml
+hird register copilot        # ./.vscode/mcp.json — Copilot in VS Code
+hird register copilot-cli    # ~/.copilot/mcp-config.json
 ```
 
-**Codex CLI** — in `~/.codex/config.toml`:
+```
+registered hird in /home/you/project/.vscode/mcp.json
+  command  /home/you/.cargo/bin/hird mcp
+  env      HIRD_HARNESS=copilot
+next: in VS Code: MCP: List Servers → hird → Start Server, then tick hird in
+      the agent-mode tools picker
+```
+
+The `command` it writes is the absolute path of the binary doing the writing,
+because that is the thing hand-written configs get wrong: a bare `hird`
+resolves against the harness's `PATH`, and a GUI editor's is not your shell's.
+
+Register as many harnesses as you run — that is the point — and run it again
+whenever you move the binary. Registering twice changes nothing and says so.
+An entry you have since edited by hand is refused rather than overwritten,
+with `--force` to say you meant it. `--print` writes nothing and shows what it
+would have written, for a config this cannot safely edit — one with comments
+in it, or a harness hird has never heard of.
+
+A second registration on a scratch database, alongside the real one:
+
+```sh
+hird register codex --name hird-scratch --db /tmp/scratch/hird.db
+```
+
+### What it writes
+
+**Claude Code** — `.mcp.json`, project-scoped, so it belongs to the checkout
+rather than to you. `claude mcp add hird -e HIRD_HARNESS=claude-code -- hird
+mcp` is the user-wide equivalent.
+
+**Codex CLI** — appended to `~/.codex/config.toml`, comments and all left
+alone:
 
 ```toml
 [mcp_servers.hird]
-command = "hird"
+command = "/home/you/.cargo/bin/hird"
 args = ["mcp"]
 env = { HIRD_HARNESS = "codex" }
 ```
 
-**Copilot / VS Code** — in `.vscode/mcp.json`:
+**Copilot in VS Code** — `.vscode/mcp.json`:
 
 ```json
 {
   "servers": {
     "hird": {
       "type": "stdio",
-      "command": "hird",
+      "command": "/home/you/.cargo/bin/hird",
       "args": ["mcp"],
       "env": { "HIRD_HARNESS": "copilot" }
     }
@@ -126,8 +162,69 @@ env = { HIRD_HARNESS = "codex" }
 }
 ```
 
-Any MCP-capable harness works the same way: run `hird mcp` over stdio and set
-`HIRD_HARNESS` to something recognisable.
+Writing this does not start it. **MCP: List Servers** → `hird` → **Start
+Server**, and tick `hird` in the tools picker of the agent-mode chat box: VS
+Code does not launch a newly written server on its own, and a stopped or
+unticked server looks exactly like one that was never registered.
+
+**Copilot CLI** — `~/.copilot/mcp-config.json`, which `/mcp add` inside a
+session also writes:
+
+```json
+{
+  "mcpServers": {
+    "hird": {
+      "type": "local",
+      "command": "/home/you/.cargo/bin/hird",
+      "args": ["mcp"],
+      "env": { "HIRD_HARNESS": "copilot" },
+      "tools": ["*"]
+    }
+  }
+}
+```
+
+Any other MCP-capable harness works the same way: run `hird mcp` over stdio and
+set `HIRD_HARNESS` to something recognisable. `hird register copilot --print`
+is a reasonable starting point for one hird has no entry for.
+
+### When the agent says it has no hird tools
+
+A skill, a prompt file or a `copilot-instructions.md` that talks about
+`task_claim` is not a connection. It tells an agent what to do with the tools;
+it cannot hand it any. Registering the server is a separate step, and it is the
+one above. If the agent reports no `task_*` tools, work down this list.
+
+**Is the server registered where that harness reads?** Each registration above
+belongs to exactly one harness. Copilot in VS Code does not read
+`~/.copilot/mcp-config.json`, and the Copilot CLI does not read
+`.vscode/mcp.json`. `hird register <harness>` picks the file for you; run it
+again and it will say `already registered` against the path it went to.
+
+**Can the harness spawn `hird`?** `command: "hird"` resolves against the
+harness's `PATH`, not your shell's. A GUI VS Code launched from Finder or a
+dock has neither `~/.cargo/bin` nor anything else your shell profile adds, so
+the spawn fails and the server dies before the handshake. This is what `hird
+register` exists to get right; in a config written by hand, paste the absolute
+path instead:
+
+```sh
+which hird     # → /Users/you/.cargo/bin/hird
+```
+
+**What did the server say?** Every harness keeps the stdio server's output.
+In VS Code it is **MCP: List Servers** → `hird` → **Show Output**; in Claude
+Code, `claude mcp list`. A `hird` that starts prints nothing and waits, so an
+empty log is the healthy case and `command not found` is the usual one.
+
+**Is it the cloud coding agent?** The Copilot coding agent on github.com runs
+in an ephemeral container with no access to your machine. hird is a local
+queue in a local SQLite file, so there is nothing there for it to connect to —
+register hird in an editor or CLI that runs on the same machine as the
+database (`hird db-path`).
+
+Confirm the binary works at all before blaming the wiring: `hird ls` from a
+terminal exercises the same database over the same code the server does.
 
 ## How the queue behaves
 
@@ -708,6 +805,7 @@ hird mem search [query] [--limit N] [--all-projects] [--include-superseded]
 hird mem standing [--shaky] [--all-projects]
 hird tui
 hird mcp
+hird register <claude-code|codex|copilot|copilot-cli> [--name <name>] [--print] [--force]
 hird db-path
 ```
 
@@ -875,7 +973,7 @@ They open real `hird mcp` sessions and send the tool calls a harness would,
 because claiming and completing are agent-side operations with no CLI verb —
 so the transcript shows exactly what "pick up task 42" looks like on the wire.
 [`examples/harness/`](examples/harness) has drop-in MCP registration for Claude
-Code, Codex CLI and VS Code.
+Code, Codex CLI, Copilot in VS Code and the Copilot CLI.
 
 ## Documentation
 

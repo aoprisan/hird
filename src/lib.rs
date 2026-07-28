@@ -28,6 +28,7 @@ pub mod identity;
 pub mod mcp;
 pub mod model;
 pub mod plan;
+pub mod register;
 pub mod repo;
 pub mod tui;
 pub mod witness;
