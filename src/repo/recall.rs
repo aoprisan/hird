@@ -115,7 +115,7 @@ impl RecallReason {
     }
 
     /// Rank: lower is a stronger reason to surface the assertion.
-    fn strength(&self) -> u8 {
+    pub(crate) fn strength(&self) -> u8 {
         match self {
             RecallReason::SameTask => 0,
             RecallReason::SameFiles { .. } => 1,
@@ -131,6 +131,14 @@ pub struct Recalled {
     pub reason: RecallReason,
     /// The task the assertion was recorded on, as a human refers to it.
     pub task_seq: Option<i64>,
+    /// Whether the code this was learned from is still the code on disk.
+    ///
+    /// Left empty here and filled in by [`crate::footing::decorate`], because
+    /// answering it means reading the working tree and this module is not
+    /// allowed to. `None` is what a project with no witness keeps.
+    pub standing: Option<crate::model::Standing>,
+    /// One sentence, when more than one agent has stated this.
+    pub corroboration: Option<String>,
 }
 
 /// Derives the memory relevant to a task. Owns no table of its own.
@@ -182,6 +190,8 @@ impl<'a> Recall<'a> {
                     assertion,
                     reason: RecallReason::SameTask,
                     task_seq: Some(seq),
+                    standing: None,
+                    corroboration: None,
                 },
                 &mut picked,
                 &mut seen,
@@ -258,6 +268,8 @@ impl<'a> Recall<'a> {
             };
             out.push(Recalled {
                 assertion,
+                standing: None,
+                corroboration: None,
                 reason: RecallReason::SameFiles {
                     pattern: mine.clone(),
                     other_pattern,
@@ -297,6 +309,8 @@ impl<'a> Recall<'a> {
                     assertion,
                     reason: RecallReason::Wording { terms: matched },
                     task_seq,
+                    standing: None,
+                    corroboration: None,
                 }
             })
             .collect())

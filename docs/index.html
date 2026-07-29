@@ -24,13 +24,16 @@
     <li class="sub"><a href="#work-the-queue">Letting agents pull</a></li>
     <li class="sub"><a href="#plan-files">The plan as a file</a></li>
     <li><a href="#harnesses">Registering a harness</a></li>
+    <li class="sub"><a href="#protocol">The protocol</a></li>
     <li><a href="#lifecycle">How a task moves</a></li>
     <li><a href="#dependencies">Dependencies</a></li>
     <li><a href="#scope">File scope and collisions</a></li>
     <li><a href="#witness">What actually happened</a></li>
     <li><a href="#split">Splitting a task</a></li>
+    <li><a href="#review">No agent reviews its own work</a></li>
     <li><a href="#memory">Memory</a></li>
     <li class="sub"><a href="#recall">Recall</a></li>
+    <li class="sub"><a href="#footing">Footing: when a fact went stale</a></li>
     <li><a href="#cli">Command line</a></li>
     <li><a href="#tui">The TUI</a></li>
     <li><a href="#mcp">MCP tools</a></li>
@@ -320,23 +323,71 @@ nothing was written; drop --dry-run to file it</code></pre>
   <code>unknown</code>.
 </p>
 
+<p>
+  <code>hird register</code> writes that for you, into the one file the harness
+  in question actually reads:
+</p>
+
+<pre><code><span class="k">hird</span> register claude-code    <span class="c"># ./.mcp.json</span>
+<span class="k">hird</span> register codex          <span class="c"># ~/.codex/config.toml</span>
+<span class="k">hird</span> register copilot        <span class="c"># ./.vscode/mcp.json — Copilot in VS Code</span>
+<span class="k">hird</span> register copilot-cli    <span class="c"># ~/.copilot/mcp-config.json</span></code></pre>
+
+<pre><code><span class="w">registered hird in /home/you/project/.vscode/mcp.json
+  command  /home/you/.cargo/bin/hird mcp
+  env      HIRD_HARNESS=copilot
+next: in VS Code: MCP: List Servers → hird → Start Server, then tick hird in
+      the agent-mode tools picker</span></code></pre>
+
+<p>
+  The <code>command</code> it writes is the absolute path of the binary doing
+  the writing, because that is the thing hand-written configs get wrong: a bare
+  <code>hird</code> resolves against the harness's <code>PATH</code>, and a GUI
+  editor's is not your shell's.
+</p>
+
+<p>
+  Register as many harnesses as you run — that is the point — and run it again
+  whenever you move the binary. Registering twice changes nothing and says so.
+  An entry you have since edited by hand is refused rather than overwritten,
+  with <code>--force</code> to say you meant it. <code>--print</code> writes
+  nothing and shows what it would have written, for a config this cannot safely
+  edit — one with comments in it, or a harness hird has never heard of.
+</p>
+
+<p>
+  A second registration on a scratch database, alongside the real one:
+</p>
+
+<pre><code><span class="k">hird</span> register codex --name hird-scratch --db /tmp/scratch/hird.db</code></pre>
+
+<h3>What it writes</h3>
+
 <h4>Claude Code</h4>
-<pre><code><span class="k">claude</span> mcp add hird -e HIRD_HARNESS=claude-code -- hird mcp</code></pre>
+<span class="filename">./.mcp.json</span>
+<p>
+  Project-scoped, so it belongs to the checkout rather than to you.
+  <code>claude mcp add hird -e HIRD_HARNESS=claude-code -- hird mcp</code> is
+  the user-wide equivalent.
+</p>
 
 <h4>Codex CLI</h4>
 <span class="filename">~/.codex/config.toml</span>
 <pre><code>[mcp_servers.hird]
-command = <span class="s">"hird"</span>
+command = <span class="s">"/home/you/.cargo/bin/hird"</span>
 args = [<span class="s">"mcp"</span>]
 env = { HIRD_HARNESS = <span class="s">"codex"</span> }</code></pre>
+<p>
+  Appended, with the comments already in the file left alone.
+</p>
 
-<h4>Copilot / VS Code</h4>
+<h4>Copilot in VS Code</h4>
 <span class="filename">.vscode/mcp.json</span>
 <pre><code>{
   <span class="s">"servers"</span>: {
     <span class="s">"hird"</span>: {
       <span class="s">"type"</span>: <span class="s">"stdio"</span>,
-      <span class="s">"command"</span>: <span class="s">"hird"</span>,
+      <span class="s">"command"</span>: <span class="s">"/home/you/.cargo/bin/hird"</span>,
       <span class="s">"args"</span>: [<span class="s">"mcp"</span>],
       <span class="s">"env"</span>: { <span class="s">"HIRD_HARNESS"</span>: <span class="s">"copilot"</span> }
     }
@@ -344,10 +395,132 @@ env = { HIRD_HARNESS = <span class="s">"codex"</span> }</code></pre>
 }</code></pre>
 
 <p>
-  Any MCP-capable harness works the same way. The server states the queue's
-  rules during the handshake — claim before working, heartbeat before the lease
-  runs out, declare your files, write down what you learn — so agents generally
-  behave without being coached in your prompt.
+  Writing this does not start it: <strong>MCP: List Servers</strong> → <code>hird</code> →
+  <strong>Start Server</strong>, and tick <code>hird</code> in the tools picker
+  of the agent-mode chat box. VS Code does not launch a newly written server on
+  its own, and a stopped or unticked server looks exactly like one that was
+  never registered.
+</p>
+
+<h4>Copilot CLI</h4>
+<span class="filename">~/.copilot/mcp-config.json</span>
+<pre><code>{
+  <span class="s">"mcpServers"</span>: {
+    <span class="s">"hird"</span>: {
+      <span class="s">"type"</span>: <span class="s">"local"</span>,
+      <span class="s">"command"</span>: <span class="s">"/home/you/.cargo/bin/hird"</span>,
+      <span class="s">"args"</span>: [<span class="s">"mcp"</span>],
+      <span class="s">"env"</span>: { <span class="s">"HIRD_HARNESS"</span>: <span class="s">"copilot"</span> },
+      <span class="s">"tools"</span>: [<span class="s">"*"</span>]
+    }
+  }
+}</code></pre>
+
+<p>
+  <code>/mcp add</code> inside a session writes the same file.
+</p>
+
+<p>
+  Any other MCP-capable harness works the same way: run <code>hird mcp</code>
+  over stdio and set <code>HIRD_HARNESS</code> to something recognisable.
+  <code>hird register copilot --print</code> is a reasonable starting point for
+  one hird has no entry for. Whichever way it is registered, the server states
+  the queue's rules when the harness first asks — claim before working, heartbeat
+  before the lease runs out, declare your files, write down what you learn — so
+  agents generally behave without being coached in your prompt.
+</p>
+
+<h3 id="protocol">The protocol</h3>
+
+<p>
+  <code>hird mcp</code> speaks MCP <strong>2026-07-28</strong>, and every
+  earlier revision back to 2024-11-05. Which one a session uses is the harness’s
+  choice, not something to configure — hird answers whichever it is asked
+  for, and says so by name when asked for one it does not have.
+</p>
+
+<p>
+  2026-07-28 removes the <code>initialize</code> handshake: a client opens with
+  <code>server/discover</code>, or simply with the request it wanted to make,
+  and carries the protocol version, its own name and its capabilities in
+  <code>_meta</code> on every one. Nothing hird does depended on that handshake
+  — it is one process per session over a pipe, which is about as
+  stateless as a session gets — so a harness on the new lifecycle and one
+  still handshaking share a queue without noticing each other’s era. The
+  one visible difference is that a request claiming 2026-07-28 without carrying
+  what 2026-07-28 requires is refused as a bad request, in a sentence naming
+  what was missing, rather than served on a guess about who sent it.
+</p>
+
+<p>
+  The revision also means a client now names itself on every call, which hird
+  uses for exactly one thing: <strong>a harness that never set
+  <code>HIRD_HARNESS</code> is filed under the name its client gives, instead of
+  <code>unknown</code></strong>. <code>HIRD_HARNESS</code> still wins wherever
+  it is set — it is the half of the identity you control, and
+  <code>hird register</code> writes it — and the name is taken once and
+  then held for the life of the session, because an actor that changed its name
+  halfway through would lose track of its own claims.
+</p>
+
+<p>
+  What hird has never used, and does not start using now, are the three
+  features this revision deprecates: no roots, no sampling, no protocol
+  logging.
+</p>
+
+<h3>When the agent says it has no hird tools</h3>
+
+<p>
+  A skill, a prompt file or a <code>copilot-instructions.md</code> that talks
+  about <code>task_claim</code> is not a connection. It tells an agent what to
+  do with the tools; it cannot hand it any. Registering the server is a
+  separate step, and it is the one above. If the agent reports no
+  <code>task_*</code> tools, work down this list.
+</p>
+
+<p>
+  <strong>Is the server registered where that harness reads?</strong> Each
+  registration above belongs to exactly one harness. Copilot in VS Code does
+  not read <code>~/.copilot/mcp-config.json</code>, and the Copilot CLI does
+  not read <code>.vscode/mcp.json</code>. <code>hird register &lt;harness&gt;</code>
+  picks the file for you; run it again and it will say
+  <code>already registered</code> against the path it went to.
+</p>
+
+<p>
+  <strong>Can the harness spawn <code>hird</code>?</strong>
+  <code>command: "hird"</code> resolves against the harness's <code>PATH</code>,
+  not your shell's. A GUI VS Code launched from Finder or a dock has neither
+  <code>~/.cargo/bin</code> nor anything else your shell profile adds, so the
+  spawn fails and the server dies before the handshake. This is what
+  <code>hird register</code> exists to get right; in a config written by hand,
+  paste the absolute path instead:
+</p>
+
+<pre><code><span class="k">which</span> hird     <span class="c"># → /Users/you/.cargo/bin/hird</span></code></pre>
+
+<p>
+  <strong>What did the server say?</strong> Every harness keeps the stdio
+  server's output. In VS Code it is <strong>MCP: List Servers</strong> →
+  <code>hird</code> → <strong>Show Output</strong>; in Claude Code,
+  <code>claude mcp list</code>. A <code>hird</code> that starts prints nothing
+  and waits, so an empty log is the healthy case and
+  <code>command not found</code> is the usual one.
+</p>
+
+<p>
+  <strong>Is it the cloud coding agent?</strong> The Copilot coding agent on
+  github.com runs in an ephemeral container with no access to your machine.
+  hird is a local queue in a local SQLite file, so there is nothing there for
+  it to connect to — register hird in an editor or CLI that runs on the same
+  machine as the database (<code>hird db-path</code>).
+</p>
+
+<p>
+  Confirm the binary works at all before blaming the wiring: <code>hird ls</code>
+  from a terminal exercises the same database over the same code the server
+  does.
 </p>
 </section>
 
@@ -616,6 +789,97 @@ codex:9f2c        #1 in_progress  Port the config loader        11m left
 </p>
 </section>
 
+<section id="review">
+<h2>No agent reviews its own work</h2>
+
+<p>
+  Every result line in the queue was written by the agent that did the work. It
+  is the last word, and nobody else ever looks. With one agent that is not a
+  choice. With three it is a waste of the only thing that makes running three
+  worth doing.
+</p>
+
+<p>
+  Every harness can review code already. None of them can tell <em>whose</em>
+  code it is looking at — a harness cannot see another harness's session, and an
+  agent handed "review this" has no way to know it wrote the thing an hour ago.
+  hird can: it is the process all of them talk to, and it wrote down who held
+  the lease.
+</p>
+
+<pre><code><span class="k">hird</span> add <span class="s">"Port the config loader"</span> --review --path src/config.rs</code></pre>
+
+<p>
+  That is the whole opt-in, and it says nothing about who or when. Codex claims
+  it, works it, and finishes the way it always does:
+</p>
+
+<pre><code>task_complete { seq: 1, result: <span class="s">"ported; env still wins over the file"</span> }
+
+{ <span class="s">"seq"</span>: 1, <span class="s">"status"</span>: <span class="s">"done"</span>, <span class="s">"changed"</span>: [<span class="s">"src/config.rs (modified)"</span>],
+  <span class="s">"review_filed"</span>: 2,
+  <span class="s">"advice"</span>: <span class="s">"this work was marked for review, so task 2 is now open for an agent
+             in another harness — you cannot take it yourself. Tell the human."</span> }</code></pre>
+
+<p>
+  Task 2 was filed by the completion. It is titled after the work, scoped to the
+  file the <a href="#witness">witness</a> saw move rather than the one anybody
+  declared, and its body carries codex's own summary marked as the thing under
+  review rather than as the brief. Then:
+</p>
+
+<pre><code>task_next {}                       <span class="c"># asked by codex</span>
+
+{ <span class="s">"idle"</span>: <span class="s">"1 task is ready, but every one of them is a review of work this
+           harness did — they need an agent in another harness. Tell the human;
+           waiting will not change it"</span>,
+  <span class="s">"recused"</span>: [{ <span class="s">"seq"</span>: 2, <span class="s">"why"</span>: <span class="s">"not whoever worked task 1 (Port the config
+                loader): that was codex:43em, so this needs another harness"</span> }] }</code></pre>
+
+<p>
+  Not "nothing to do". The queue is not idle — it is waiting for a different
+  tool, and an agent told the queue was empty would send you away from the one
+  thing that needs you. Claiming it by name is refused too, in the same
+  transaction as the compare-and-set, so there is no race to win.
+</p>
+
+<p>
+  <strong>The bar is the harness, not the session.</strong> Two Claude Code
+  windows are one model reading its own homework; a bar you could get around by
+  opening a tab would be no bar at all.
+</p>
+
+<p>
+  <strong>It is a constraint, not a scheduler.</strong> A recusal says who may
+  <em>not</em> take a task and never who must. Run one harness and the review
+  simply sits there unclaimable — which the board says plainly, because that is
+  a fact about your setup rather than something to paper over.
+</p>
+
+<p>You can set the bar by hand, and lift it:</p>
+
+<pre><code><span class="k">hird</span> recuse 7 --from 4 --reason <span class="s">"wrote the thing being checked"</span>
+<span class="k">hird</span> recuse 7 --clear</code></pre>
+
+<p>
+  And a <a href="#plan-files">plan file</a> is where the judgement belongs,
+  since which work deserves a second pair of eyes is a property of the job:
+</p>
+
+<pre><code>[[task]]
+name = <span class="s">"renderer"</span>
+title = <span class="s">"Rewrite the renderer"</span>
+paths = [<span class="s">"src/tui/**"</span>]
+review = <span class="s">true</span></code></pre>
+
+<p>
+  Nothing is filed for work the witness saw no trace of, for work that
+  <code>failed</code> — there is nothing to check, and whether the attempt is
+  worth reading is your call — or while an earlier review of the same work is
+  still open.
+</p>
+</section>
+
 <section id="memory">
 <h2>Memory</h2>
 
@@ -706,13 +970,121 @@ codex:9f2c        #1 in_progress  Port the config loader        11m left
   being told. Five facts ride along by default; set
   <code>recall_limit = 0</code> to switch it off entirely.
 </p>
+
+<h3 id="footing">Footing: a fact knows what it was learned against</h3>
+
+<p>
+  A memory that only grows eventually lies to you. Not by filling up with
+  falsehoods — you would notice those — but by filling up with sentences that
+  <em>were</em> true. A fact recorded in March about a file that has been
+  rewritten twice since arrives in July in exactly the same voice as one
+  recorded this morning, and nothing about reading it tells you which is which.
+</p>
+
+<p>
+  The sentence cannot tell you. The code can. So hird records what an assertion
+  was read off — the files behind it, and the content hash each one had at the
+  time — and every later reader is told whether that ground has moved.
+</p>
+
+<pre><code>$ <span class="k">hird</span> mem standing
+firm      the loader reads HIRD_DB before the config file
+    01J…  codex:9f2c  2h ago
+    src/config.rs
+shaky     the renderer redraws on every poll
+    01J…  claude-code:af31  3d ago
+    src/tui/view.rs
+    src/tui/view.rs has changed since this was recorded — re-read before relying on it
+
+2 anchored: 1 firm, 1 shaky</code></pre>
+
+<p>
+  Nobody curated that, and nobody told hird that <code>src/tui/view.rs</code>
+  had changed. The fact remembers which file it came from and what that file
+  said, and the file no longer says it.
+</p>
+
+<p>
+  The same word rides along everywhere a fact is served — <code>mem_search</code>
+  results, the memory browser, and the <code>recalled</code> list a claim arrives
+  with, which is the one that matters most because it lands in an agent's
+  context unasked:
+</p>
+
+<pre><code><span class="s">"recalled"</span>: [
+  { <span class="s">"content"</span>: <span class="s">"the renderer redraws on every poll"</span>,
+    <span class="s">"why"</span>: <span class="s">"learned on task 4 (Fix the renderer), working src/tui/view.rs"</span>,
+    <span class="s">"standing"</span>: <span class="s">"shaky"</span>,
+    <span class="s">"caution"</span>: <span class="s">"src/tui/view.rs has changed since this was recorded — re-read before relying on it"</span> } ]</code></pre>
+
+<p>
+  <strong>It never says a fact is false.</strong> A rename, a formatting pass and
+  a total rewrite look identical from here. <code>shaky</code> means
+  <em>unverified</em>, which is a weaker claim and a far more useful one: it is
+  exactly the set of facts where opening the file pays for itself.
+  <code>orphaned</code> — every file it was about is gone — is the strongest
+  thing hird will say, and it still stops short of a verdict.
+</p>
+
+<p>
+  Where the files come from needs nothing from the agent. A fact stored with
+  <code>task_seq</code> is anchored to the literal paths that task declared plus
+  everything the <a href="#witness">witness</a> saw it move;
+  <code>mem_store { paths: […] }</code> names them outright for a fact that
+  belongs to no task. A fact with neither stays unanchored, and hird says
+  nothing about it rather than guessing.
+</p>
+
+<h4>Saying it again is how you say you checked</h4>
+
+<p>
+  An agent that re-reads a shaky fact and finds it still true has one way to say
+  so, and should not need to know any more than that: say the fact again.
+</p>
+
+<pre><code>$ <span class="k">hird</span> mem add <span class="s">"the renderer redraws on every poll"</span> --path src/tui/view.rs
+01J…
+  already on record — affirmed, not duplicated and re-anchored</code></pre>
+
+<p>
+  No second row, no lost provenance. The original is re-anchored to today's code
+  and you are recorded as another voice for it. That kills duplicate assertions —
+  the oldest complaint about memory stores — and buys something else on the way
+  past: hird counts <em>voices</em>, not sentences, so it can say the thing no
+  single harness is positioned to say.
+</p>
+
+<pre><code>also stated by codex:9f2c, independently across 2 harnesses</code></pre>
+
+<p>
+  Two agents that cannot see each other's sessions arrived at the same fact.
+  Only the process both of them talk to can know that.
+</p>
+
+<h4>Why it stays quiet</h4>
+
+<p>
+  A task that records a fact and then keeps editing the same file would, left
+  alone, mark its own fact shaky by its own hand. Finishing a task
+  <strong>settles</strong> what it learned against the tree it is leaving behind,
+  so <code>shaky</code> keeps meaning <em>somebody else moved this</em> — which
+  is the only reading worth a warning, and a warning that fires on everything is
+  a warning nobody reads.
+</p>
+
+<p>
+  It rides on the same working-tree access as the witness and is off wherever
+  that is: no git, or <code>memory_footing = false</code>, and memory behaves
+  exactly as it did before any of this existed — no anchors, no
+  <code>standing</code> field, and the handshake does not mention it.
+</p>
 </section>
 
 <section id="cli">
 <h2>Command line</h2>
 
 <pre><code>hird add &lt;title&gt; [--body &lt;md&gt;|--body-file &lt;path&gt;] [--priority N] [--project &lt;path&gt;]
-                 [--needs &lt;seq&gt;,…] [--path &lt;glob&gt;]…
+                 [--needs &lt;seq&gt;,…] [--path &lt;glob&gt;]… [--review]
 hird ls [--status &lt;status&gt;] [--all-projects]
 hird show &lt;seq&gt;
 hird cancel &lt;seq&gt; [--reason &lt;text&gt;]
@@ -723,9 +1095,11 @@ hird plan apply &lt;file&gt; [--dry-run] [--project &lt;path&gt;]
 hird graph [--all-projects]
 hird scope &lt;seq&gt; [--path &lt;glob&gt;]… [--clear]
 hird agents [--all-projects]
+hird recuse &lt;seq&gt; --from &lt;seq&gt;,… [--reason &lt;text&gt;] | --clear
 hird recall &lt;seq&gt; [--limit N]
-hird mem add &lt;content&gt; [--tags a,b] [--task &lt;seq&gt;]
+hird mem add &lt;content&gt; [--tags a,b] [--task &lt;seq&gt;] [--path &lt;file&gt;]…
 hird mem search [query] [--limit N] [--all-projects] [--include-superseded]
+hird mem standing [--shaky] [--all-projects]
 hird tui
 hird mcp
 hird db-path</code></pre>
@@ -809,6 +1183,7 @@ hird db-path</code></pre>
 <tr><td><kbd>Enter</kbd></td><td>show the assertion and its provenance</td></tr>
 <tr><td><kbd>d</kbd></td><td>supersede it with something truer</td></tr>
 <tr><td><kbd>s</kbd></td><td>show or hide superseded assertions</td></tr>
+<tr><td><kbd>f</kbd></td><td>only the facts whose files have moved since</td></tr>
 </tbody></table></div>
 </div>
 
@@ -823,7 +1198,10 @@ hird db-path</code></pre>
 
 <p>
   Cards on the queue board carry a yellow <code>waits #1 #3</code> badge when a
-  task looks open but nobody can actually claim it yet.
+  task looks open but nobody can actually claim it yet, and a magenta
+  <code>reviews #4</code> badge when a task is somebody's
+  <a href="#review">review</a> — which decides who can take it, and is exactly
+  the thing the title cannot tell you.
 </p>
 </section>
 
@@ -836,18 +1214,18 @@ hird db-path</code></pre>
 <table>
   <thead><tr><th>Tool</th><th>Purpose</th></tr></thead>
   <tbody>
-    <tr><td><code>task_list</code></td><td>What work exists, optionally filtered by status.</td></tr>
+    <tr><td><code>task_list</code></td><td>What work exists, optionally filtered by status — marking the ones your harness cannot claim.</td></tr>
     <tr><td><code>task_get</code></td><td>One task in full: dependencies, file scope, recent history.</td></tr>
     <tr><td><code>task_next</code></td><td><strong>Be handed the next workable task, already claimed.</strong></td></tr>
-    <tr><td><code>task_claim</code></td><td><strong>Take a named task.</strong> Atomic; fails if someone else has it.</td></tr>
+    <tr><td><code>task_claim</code></td><td><strong>Take a named task.</strong> Atomic; fails if someone else has it, or if it reviews your own harness's work.</td></tr>
     <tr><td><code>task_scope</code></td><td>Say which files you will change; find out who else is in them.</td></tr>
     <tr><td><code>task_update</code></td><td>Record progress and renew the lease. Holder only.</td></tr>
     <tr><td><code>task_split</code></td><td>Break a task into pieces the other agents can work. Holder only.</td></tr>
     <tr><td><code>task_complete</code></td><td>Finish, with a summary. Holder only.</td></tr>
     <tr><td><code>task_fail</code></td><td>Give up, with a reason. Holder only.</td></tr>
     <tr><td><code>task_release</code></td><td>Hand the task back unfinished, still claimable. Holder only.</td></tr>
-    <tr><td><code>mem_store</code></td><td>Record one durable fact.</td></tr>
-    <tr><td><code>mem_search</code></td><td>Find facts recorded earlier, by anyone.</td></tr>
+    <tr><td><code>mem_store</code></td><td>Record one durable fact — or, said again word for word, confirm one.</td></tr>
+    <tr><td><code>mem_search</code></td><td>Find facts recorded earlier, by anyone, each marked with whether its code has moved since.</td></tr>
   </tbody>
 </table>
 </div>
@@ -858,7 +1236,9 @@ hird db-path</code></pre>
   reporting that a tool broke. There is deliberately no tool for filing
   arbitrary new work: agents split what they hold, and everything else is filed
   by you. <a href="#recall">Recall</a> did not need a thirteenth tool either — it
-  rides along with the claim, so an agent gets it without knowing to ask.
+  rides along with the claim — and neither did
+  <a href="#footing">footing</a>, which rides along with every fact hird serves.
+  Something an agent has to know to ask for is something it will not ask for.
 </p>
 </section>
 
@@ -898,7 +1278,12 @@ recall_limit = 5
 <span class="c"># Whether the queue watches the working tree to see what tasks actually
 # change. Needs git, goes quiet by itself where there is none, and costs
 # nothing while no task in the project holds a lease. Default true.</span>
-witness = true</code></pre>
+witness = true
+
+<span class="c"># Whether an assertion remembers the files it was learned against, so a later
+# reader is told when that code has moved. Rides on the same working-tree
+# access as `witness` and is off wherever that is. Default true.</span>
+memory_footing = true</code></pre>
 
 <p>
   Unknown keys are an error rather than a shrug, so a typo is reported instead of
@@ -913,7 +1298,7 @@ witness = true</code></pre>
 <table>
   <thead><tr><th>Variable</th><th>Meaning</th></tr></thead>
   <tbody>
-    <tr><td><code>HIRD_HARNESS</code></td><td>This session's harness name. Set it in the MCP registration.</td></tr>
+    <tr><td><code>HIRD_HARNESS</code></td><td>This session's harness name. Set it in the MCP registration. Unset, the name the harness’s client gives for itself is used instead.</td></tr>
     <tr><td><code>HIRD_PROJECT</code></td><td>Override project detection.</td></tr>
     <tr><td><code>HIRD_DB</code></td><td>Override the database path.</td></tr>
   </tbody>
@@ -964,6 +1349,18 @@ witness = true</code></pre>
     <tr>
       <td><a href="https://github.com/aoprisan/hird/blob/main/examples/witness.sh"><code>witness.sh</code></a></td>
       <td>Two agents, one checkout, one file — the <a href="#witness">witness</a> catching a lost edit while there is still time to act on it. Makes its own throwaway git repository.</td>
+    </tr>
+    <tr>
+      <td><a href="https://github.com/aoprisan/hird/blob/main/examples/footing.sh"><code>footing.sh</code></a></td>
+      <td>A fact recorded against a file, that file rewritten, and every later reader told so — plus the way back to <a href="#footing">firm</a>. Makes its own throwaway git repository.</td>
+    </tr>
+    <tr>
+      <td><a href="https://github.com/aoprisan/hird/blob/main/examples/review.sh"><code>review.sh</code></a></td>
+      <td>Work that files its own <a href="#review">review</a> when it finishes, scoped to what actually moved and barred to the harness that moved it. Makes its own throwaway git repository.</td>
+    </tr>
+    <tr>
+      <td><a href="https://github.com/aoprisan/hird/blob/main/examples/protocol.sh"><code>protocol.sh</code></a></td>
+      <td><a href="#protocol">MCP 2026-07-28</a> on the wire: <code>server/discover</code>, a task worked without ever calling <code>initialize</code>, and a harness that never set <code>HIRD_HARNESS</code> named by its own client.</td>
     </tr>
     <tr>
       <td><a href="https://github.com/aoprisan/hird/blob/main/examples/task-body.md"><code>task-body.md</code></a></td>
@@ -1021,6 +1418,33 @@ witness = true</code></pre>
   <a href="#contention">working tree confirms</a> — the file has moved, and the
   two of them disagree about what it now says — is reported to both by name,
   with the one instruction that saves the work: re-read it before you write.
+</p>
+
+<h3>Can I have one agent check another's work?</h3>
+<p>
+  That is what <a href="#review">recusal</a> is for, and hird is the only thing
+  positioned to enforce it: a harness cannot see another harness's session, so
+  an agent handed "review this" cannot tell whether it wrote it. hird recorded
+  who held the lease. Mark work <code>--review</code> and finishing files the
+  review itself, scoped to what actually moved — and the queue refuses it to the
+  harness that did the moving, in the same transaction as the claim.
+</p>
+
+<h3>Does the memory go stale?</h3>
+<p>
+  It does, and hird is the part that notices. An assertion is stored with its
+  <a href="#footing">footing</a> — the files it was read off and what they said
+  at the time — so a fact whose code has since been rewritten arrives marked
+  <code>shaky</code> instead of arriving indistinguishable from one recorded
+  this morning. hird never calls it false; a rename and a rewrite look the same
+  from here. It tells you which facts a re-read would pay for, and
+  <code>hird mem standing</code> lists them.
+</p>
+<p>
+  Nothing has to be curated. Confirming a fact is the ordinary act of stating
+  it: <code>mem_store</code> the same sentence word for word and the original is
+  re-anchored to today's code rather than duplicated, with you recorded as
+  another voice for it.
 </p>
 
 <h3>Does hird know which agent changed a file?</h3>

@@ -7,7 +7,7 @@ use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction, TransactionBehavior};
 
 use super::scope::OnConflict;
-use super::{deps, new_id, scope, ProjectScope};
+use super::{deps, new_id, recusal, scope, ProjectScope};
 use crate::error::{Error, Result};
 use crate::model::{
     fmt_ts, now_ts, Conflict, EventKind, Status, Task, TaskEvent, TaskSummary, Transition,
@@ -15,7 +15,7 @@ use crate::model::{
 
 /// Columns selected for a full [`Task`], in the order [`row_to_task`] expects.
 const TASK_COLUMNS: &str = "id, seq, project, title, body, status, priority, \
-                            claimed_by, lease_expires_at, result, created_at, updated_at";
+                            claimed_by, lease_expires_at, result, review, created_at, updated_at";
 
 /// What a lease sweep did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -54,6 +54,18 @@ pub struct Dispatch {
     pub deferred: Vec<(i64, Vec<Conflict>)>,
     /// Open tasks still waiting on unfinished dependencies.
     pub blocked: Vec<i64>,
+    /// Ready tasks this harness is barred from, and what bars it. Worth saying
+    /// out loud: a queue whose only remaining work is a review of your own
+    /// code is not an idle queue, it is a queue waiting for another harness.
+    pub recused: Vec<(i64, crate::model::Recusal)>,
+}
+
+/// A finished task, and the review its completion filed, if any.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Finished {
+    pub task: Task,
+    /// The `seq` of the review task filed for this work.
+    pub review: Option<i64>,
 }
 
 /// Repository over `tasks` and `task_events`.
@@ -470,6 +482,13 @@ impl<'a> Tasks<'a> {
                 dispatch.blocked.push(seq);
                 continue;
             }
+            // Routed around rather than handed out and then refused: an agent
+            // that asked for "whatever is workable" and got an error would
+            // reasonably conclude the queue was empty.
+            if let Some(recusal) = recusal::bars_in(&tx, &id, actor)? {
+                dispatch.recused.push((seq, recusal));
+                continue;
+            }
             if avoid_conflicts {
                 let patterns = declared_patterns(&tx, &id)?;
                 let conflicts = scope::conflicts_for(&tx, &id, &patterns)?;
@@ -570,16 +589,33 @@ impl<'a> Tasks<'a> {
     }
 
     /// Finish a held task successfully.
-    pub fn complete(&self, seq: i64, actor: &str, result: &str) -> Result<Task> {
+    ///
+    /// Returns the task and, when it was marked for review and left something
+    /// behind to look at, the review task that was filed for it.
+    pub fn complete(&self, seq: i64, actor: &str, result: &str) -> Result<Finished> {
         self.finish(seq, actor, Transition::Complete, result)
     }
 
     /// Give up on a held task.
-    pub fn fail(&self, seq: i64, actor: &str, reason: &str) -> Result<Task> {
+    pub fn fail(&self, seq: i64, actor: &str, reason: &str) -> Result<Finished> {
         self.finish(seq, actor, Transition::Fail, reason)
     }
 
-    fn finish(&self, seq: i64, actor: &str, transition: Transition, result: &str) -> Result<Task> {
+    /// Whether finishing this task should file a review of its work.
+    pub fn set_review(&self, seq: i64, review: bool, actor: &str) -> Result<()> {
+        let tx = self.immediate_tx()?;
+        set_review_in_tx(&tx, seq, review, actor)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn finish(
+        &self,
+        seq: i64,
+        actor: &str,
+        transition: Transition,
+        result: &str,
+    ) -> Result<Finished> {
         let result = result.trim();
         if result.is_empty() {
             return Err(Error::invalid(match transition {
@@ -611,9 +647,19 @@ impl<'a> Tasks<'a> {
             _ => EventKind::Failed,
         };
         insert_event(&tx, &task.id, &now, actor, kind, result)?;
+        // Work marked for review puts itself in front of somebody else the
+        // moment it is finished, because a review a human has to remember to
+        // file is a review that does not happen. Only on `complete`: failed
+        // work has nothing to check, and a review of it would be the human's
+        // call, not the queue's.
+        let review = if transition == Transition::Complete {
+            recusal::file_review(&tx, &task, actor, result)?
+        } else {
+            None
+        };
         let task = fetch_task_by_seq(&tx, seq)?.expect("finished row exists");
         tx.commit()?;
-        Ok(task)
+        Ok(Finished { task, review })
     }
 
     // ------------------------------------------------------------ human path
@@ -768,6 +814,38 @@ fn release_in_tx(
     Ok(fetch_task_by_seq(tx, task.seq)?.expect("released row exists"))
 }
 
+/// Mark or unmark a task for review, recording the change in its history.
+///
+/// Idempotent, and quiet when nothing changes: a plan applied twice must not
+/// write a second event saying the same thing.
+pub(crate) fn set_review_in_tx(
+    tx: &Transaction<'_>,
+    seq: i64,
+    review: bool,
+    actor: &str,
+) -> Result<()> {
+    let id = task_id_for_seq(tx, seq)?;
+    let changed = tx.execute(
+        "UPDATE tasks SET review = ?1 WHERE id = ?2 AND review <> ?1",
+        params![i64::from(review), id],
+    )?;
+    if changed > 0 {
+        insert_event(
+            tx,
+            &id,
+            &now_ts(),
+            actor,
+            EventKind::Reviewed,
+            if review {
+                "marked for review by another harness"
+            } else {
+                "no longer marked for review"
+            },
+        )?;
+    }
+    Ok(())
+}
+
 pub(crate) fn insert_dep(
     tx: &Transaction<'_>,
     task_id: &str,
@@ -810,6 +888,16 @@ fn claim_in_tx(
     let blockers = deps::unmet_blockers(tx, &id)?;
     if !blockers.is_empty() {
         return Err(Error::Blocked { seq, blockers });
+    }
+    // Checked in the same transaction as the compare-and-set, so a review
+    // cannot be taken by its own author through a race. Nothing is written on
+    // the way to this refusal, so a rejected claim leaves no trace.
+    if let Some(recusal) = recusal::bars_in(tx, &id, actor)? {
+        return Err(Error::Recused {
+            seq,
+            recusal,
+            actor: actor.to_string(),
+        });
     }
 
     let changed = tx.execute(
@@ -929,8 +1017,9 @@ fn row_to_task(row: &Row<'_>) -> rusqlite::Result<Task> {
         claimed_by: row.get(7)?,
         lease_expires_at: row.get(8)?,
         result: row.get(9)?,
-        created_at: row.get(10)?,
-        updated_at: row.get(11)?,
+        review: row.get::<_, i64>(10)? == 1,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
     })
 }
 
@@ -1130,11 +1219,12 @@ mod tests {
         let db = db();
         let seq = seed(&db, "t");
         db.tasks().claim(seq, "a:1", TTL).unwrap();
-        let task = db.tasks().complete(seq, "a:1", "shipped").unwrap();
-        assert_eq!(task.status, Status::Done);
-        assert_eq!(task.result.as_deref(), Some("shipped"));
-        assert!(task.claimed_by.is_none());
-        assert!(task.lease_expires_at.is_none());
+        let finished = db.tasks().complete(seq, "a:1", "shipped").unwrap();
+        assert_eq!(finished.task.status, Status::Done);
+        assert_eq!(finished.task.result.as_deref(), Some("shipped"));
+        assert!(finished.task.claimed_by.is_none());
+        assert!(finished.task.lease_expires_at.is_none());
+        assert_eq!(finished.review, None, "nothing asked for one");
     }
 
     #[test]
@@ -1142,9 +1232,9 @@ mod tests {
         let db = db();
         let seq = seed(&db, "t");
         db.tasks().claim(seq, "a:1", TTL).unwrap();
-        let task = db.tasks().fail(seq, "a:1", "upstream is down").unwrap();
-        assert_eq!(task.status, Status::Failed);
-        assert_eq!(task.result.as_deref(), Some("upstream is down"));
+        let finished = db.tasks().fail(seq, "a:1", "upstream is down").unwrap();
+        assert_eq!(finished.task.status, Status::Failed);
+        assert_eq!(finished.task.result.as_deref(), Some("upstream is down"));
     }
 
     #[test]

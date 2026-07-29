@@ -114,6 +114,23 @@ pub fn contention_style() -> Style {
         .add_modifier(Modifier::BOLD | Modifier::SLOW_BLINK)
 }
 
+/// How much an assertion's footing has moved, at a glance.
+///
+/// Graded rather than binary, and deliberately quieter than
+/// [`contention_style`]: a shaky fact is something to check before you rely on
+/// it, not something happening to you right now.
+pub fn standing_style(standing: &crate::model::Standing) -> Style {
+    use crate::model::Standing;
+    match standing {
+        Standing::Firm { .. } => Style::default().fg(Color::Green),
+        Standing::Unanchored => dim_style(),
+        Standing::Shaky { .. } => Style::default().fg(Color::Yellow),
+        Standing::Orphaned { .. } => Style::default()
+            .fg(Color::LightRed)
+            .add_modifier(Modifier::BOLD),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

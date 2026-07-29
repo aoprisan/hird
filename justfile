@@ -58,6 +58,9 @@ examples: build
     ./examples/swarm-plan.sh
     ./examples/plan-file.sh
     ./examples/witness.sh
+    ./examples/footing.sh
+    ./examples/review.sh
+    ./examples/protocol.sh
 
 # Where this machine's database lives.
 db-path:
@@ -83,6 +86,12 @@ demo:
     # (tests/**) shows recall carrying this fact across, with its provenance.
     "$bin" mem add "Integration tests need HIRD_DB set or they touch the real database" \
         --tags testing --task 1 >/dev/null
+    # Anchored to files that really exist in this checkout, so the Memory tab
+    # has a footing to show — `f` there filters to whatever has moved since.
+    "$bin" mem add "The witness only fingerprints what git already calls dirty" \
+        --tags witness --path src/witness.rs >/dev/null
+    "$bin" mem add "Every migration is numbered and applied on open" \
+        --tags schema --path src/db.rs >/dev/null
     echo "demo database: $db"
     "$bin" tui
 

@@ -313,12 +313,52 @@ fn an_unknown_harness_still_gets_a_usable_identity() {
     let sandbox = Sandbox::new();
     let seq: i64 = sandbox.run(&["add", "t"]).trim().parse().unwrap();
 
-    // HIRD_HARNESS is removed by Sandbox::command; start without re-adding it.
-    let mut session = McpSession::start_unnamed(&sandbox);
+    // Neither HIRD_HARNESS (removed by Sandbox::command) nor a client willing
+    // to name itself. There is nothing left to go on, so the board says so.
+    let mut session = McpSession::start_anonymous(&sandbox);
 
     let claimed = session.call("task_claim", json!({"seq": seq})).unwrap();
     assert!(
         claimed["holder"].as_str().unwrap().starts_with("unknown:"),
+        "{}",
+        claimed["holder"]
+    );
+    session.shutdown();
+}
+
+/// A harness configured by hand, without `hird register`, still lands on the
+/// board under its own name: the client says who it is, and hird listens.
+#[test]
+fn a_harness_that_set_no_variable_is_named_by_its_client() {
+    let sandbox = Sandbox::new();
+    let seq: i64 = sandbox.run(&["add", "t"]).trim().parse().unwrap();
+
+    let mut session = McpSession::start_unnamed(&sandbox);
+
+    let claimed = session.call("task_claim", json!({"seq": seq})).unwrap();
+    let holder = claimed["holder"].as_str().unwrap();
+    assert!(
+        holder.starts_with(&format!("{}:", support::CLIENT_NAME)),
+        "{holder}"
+    );
+    session.shutdown();
+}
+
+/// `HIRD_HARNESS` is what the human wrote into their config; a client cannot
+/// talk its way out of it by calling itself something else.
+#[test]
+fn the_configured_harness_name_outranks_the_clients_own() {
+    let sandbox = Sandbox::new();
+    let seq: i64 = sandbox.run(&["add", "t"]).trim().parse().unwrap();
+
+    let mut session = McpSession::start(&sandbox, "claude-code");
+
+    let claimed = session.call("task_claim", json!({"seq": seq})).unwrap();
+    assert!(
+        claimed["holder"]
+            .as_str()
+            .unwrap()
+            .starts_with("claude-code:"),
         "{}",
         claimed["holder"]
     );
@@ -698,4 +738,605 @@ fn the_witness_can_be_switched_off_in_the_configuration() {
     assert!(update.get("changed").is_none(), "{update}");
 
     codex.shutdown();
+}
+
+// ------------------------------------------------- the footing under a fact
+
+/// The failure this feature exists for, end to end and over the wire.
+///
+/// One agent learns something about a file and writes it down. Somebody else
+/// rewrites that file. A third agent picks up work in the same territory and is
+/// handed the fact — and, because hird recorded what the fact was read off, is
+/// told in the same breath that the ground under it has moved. Without this the
+/// third agent gets a confident sentence about code that no longer exists, with
+/// nothing in the payload to suggest it should look.
+#[test]
+fn a_fact_arrives_marked_shaky_once_its_file_has_been_rewritten() {
+    let sandbox = Sandbox::new();
+    sandbox.write_file("src/config.rs", "fn load() { env_first() }\n");
+    sandbox.git_init();
+    sandbox.run(&["add", "port the config loader", "--path", "src/config.rs"]);
+    sandbox.run(&["add", "audit the config loader", "--path", "src/config.rs"]);
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex
+        .call("task_claim", json!({"seq": 1, "paths": ["src/config.rs"]}))
+        .unwrap();
+    let stored = codex
+        .call(
+            "mem_store",
+            json!({
+                "content": "the loader reads the env var before the file",
+                "task_seq": 1,
+            }),
+        )
+        .unwrap();
+    assert_eq!(stored["anchored_to"], json!(["src/config.rs"]));
+    codex
+        .call("task_complete", json!({"seq": 1, "result": "ported"}))
+        .unwrap();
+
+    // While the fact is on file, the file it describes still says what it said.
+    let firm = codex
+        .call("mem_search", json!({"query": "loader"}))
+        .unwrap();
+    assert_eq!(firm["assertions"][0]["standing"], "firm");
+
+    // Somebody rewrites it.
+    sandbox.write_file("src/config.rs", "fn load() { file_first() }\n");
+
+    let shaky = codex
+        .call("mem_search", json!({"query": "loader"}))
+        .unwrap();
+    assert_eq!(shaky["assertions"][0]["standing"], "shaky");
+    let footing = shaky["assertions"][0]["footing"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(footing.contains("src/config.rs"), "{footing}");
+    assert!(footing.contains("re-read"), "{footing}");
+
+    // And the next agent to work those files is told without having to ask.
+    let mut claude = McpSession::start(&sandbox, "claude-code");
+    let claim = claude
+        .call("task_claim", json!({"seq": 2, "paths": ["src/config.rs"]}))
+        .unwrap();
+    let recalled = &claim["recalled"][0];
+    assert_eq!(
+        recalled["content"],
+        "the loader reads the env var before the file"
+    );
+    assert_eq!(recalled["standing"], "shaky");
+    assert!(
+        recalled["caution"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("re-read"),
+        "{recalled}"
+    );
+
+    codex.shutdown();
+    claude.shutdown();
+}
+
+/// The way back. An agent that checks a shaky fact and finds it still true has
+/// only one way to say so — say it again — and saying it again must not fork
+/// the memory. It re-anchors the original and records a second voice, and
+/// because the two agents are in different harnesses hird can say that.
+#[test]
+fn restating_a_shaky_fact_makes_it_firm_again_and_records_a_second_voice() {
+    let sandbox = Sandbox::new();
+    sandbox.write_file("src/config.rs", "fn load() { env_first() }\n");
+    sandbox.git_init();
+    sandbox.run(&["add", "port the loader", "--path", "src/config.rs"]);
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex
+        .call("task_claim", json!({"seq": 1, "paths": ["src/config.rs"]}))
+        .unwrap();
+    let first = codex
+        .call(
+            "mem_store",
+            json!({"content": "env beats the config file", "task_seq": 1}),
+        )
+        .unwrap();
+    let id = first["id"].as_str().unwrap().to_string();
+    assert_eq!(first["affirmed"], json!(null), "nothing to affirm yet");
+    codex
+        .call("task_complete", json!({"seq": 1, "result": "ported"}))
+        .unwrap();
+
+    sandbox.write_file("src/config.rs", "fn load() { env_first(); /* tidied */ }\n");
+    let shaky = codex.call("mem_search", json!({"query": "env"})).unwrap();
+    assert_eq!(shaky["assertions"][0]["standing"], "shaky");
+
+    // A different harness reads the file, finds the fact still holds, says so.
+    let mut claude = McpSession::start(&sandbox, "claude-code");
+    let again = claude
+        .call(
+            "mem_store",
+            json!({"content": "env beats the config file", "paths": ["src/config.rs"]}),
+        )
+        .unwrap();
+    assert_eq!(again["affirmed"], true);
+    assert_eq!(again["id"], id, "one fact, not two");
+    let voices = again["corroboration"].as_str().unwrap_or_default();
+    assert!(
+        voices.contains("independently across 2 harnesses"),
+        "{voices}"
+    );
+
+    let firm = claude.call("mem_search", json!({"query": "env"})).unwrap();
+    assert_eq!(firm["count"], 1);
+    assert_eq!(firm["assertions"][0]["standing"], "firm");
+
+    codex.shutdown();
+    claude.shutdown();
+}
+
+/// A task that records a fact and then keeps editing the same file would, left
+/// alone, mark its own fact shaky by its own hand. Finishing settles it against
+/// the tree the task is leaving behind, so `shaky` keeps meaning "somebody else
+/// moved this" — which is the only reading worth a warning.
+#[test]
+fn a_task_settles_its_own_facts_when_it_finishes() {
+    let sandbox = Sandbox::new();
+    sandbox.write_file("src/config.rs", "fn load() {}\n");
+    sandbox.git_init();
+    sandbox.run(&["add", "port the loader", "--path", "src/config.rs"]);
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex
+        .call("task_claim", json!({"seq": 1, "paths": ["src/config.rs"]}))
+        .unwrap();
+    codex
+        .call(
+            "mem_store",
+            json!({"content": "the loader has one entry point", "task_seq": 1}),
+        )
+        .unwrap();
+    // The agent carries on working, as agents do.
+    sandbox.write_file("src/config.rs", "fn load() { /* now with a body */ }\n");
+    let midway = codex
+        .call("mem_search", json!({"query": "loader"}))
+        .unwrap();
+    assert_eq!(midway["assertions"][0]["standing"], "shaky");
+
+    codex
+        .call("task_complete", json!({"seq": 1, "result": "ported"}))
+        .unwrap();
+    let after = codex
+        .call("mem_search", json!({"query": "loader"}))
+        .unwrap();
+    assert_eq!(
+        after["assertions"][0]["standing"], "firm",
+        "the task's own edits are not somebody else's drift"
+    );
+
+    codex.shutdown();
+}
+
+/// Outside git, and with the footing switched off, memory answers exactly as it
+/// did before any of this existed — and the handshake does not promise a model
+/// a `standing` field that nothing will ever set.
+#[test]
+fn memory_without_a_footing_says_nothing_about_standing() {
+    for (label, setup) in [("no git", false), ("switched off", true)] {
+        let sandbox = Sandbox::new();
+        if setup {
+            sandbox.git_init();
+            sandbox.write_config("memory_footing = false\n");
+        }
+        sandbox.write_file("src/config.rs", "fn load() {}\n");
+        sandbox.run(&["add", "port the loader", "--path", "src/config.rs"]);
+
+        let mut codex = McpSession::start(&sandbox, "codex");
+        let instructions = codex.request(
+            "initialize",
+            json!({
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "integration-test", "version": "0"},
+            }),
+        )["result"]["instructions"]
+            .as_str()
+            .expect("instructions")
+            .to_string();
+        assert!(
+            !instructions.contains("standing"),
+            "{label}: a model must not be told about a field nothing will populate"
+        );
+
+        codex
+            .call("task_claim", json!({"seq": 1, "paths": ["src/config.rs"]}))
+            .unwrap();
+        let stored = codex
+            .call(
+                "mem_store",
+                json!({"content": "the loader has one entry point", "task_seq": 1}),
+            )
+            .unwrap();
+        assert!(stored.get("anchored_to").is_none(), "{label}: {stored}");
+        sandbox.write_file("src/config.rs", "fn load() { changed() }\n");
+        let found = codex
+            .call("mem_search", json!({"query": "loader"}))
+            .unwrap();
+        assert_eq!(found["count"], 1, "{label}");
+        assert!(
+            found["assertions"][0].get("standing").is_none(),
+            "{label}: {found}"
+        );
+
+        codex.shutdown();
+    }
+}
+
+// ------------------------------------------------- no agent reviews its own work
+
+/// The whole point of running three models on one codebase, made to happen by
+/// itself: work marked for review finishes, files its own review scoped to
+/// exactly what moved, and the agent that wrote it is refused — not by
+/// convention, by the queue, in the same transaction as the claim.
+#[test]
+fn work_marked_for_review_is_handed_to_a_different_harness() {
+    let sandbox = Sandbox::new();
+    sandbox.write_file("src/config.rs", "fn load() {}\n");
+    sandbox.git_init();
+    sandbox.run(&[
+        "add",
+        "Port the config loader",
+        "--review",
+        "--path",
+        "src/config.rs",
+    ]);
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex
+        .call("task_claim", json!({"seq": 1, "paths": ["src/config.rs"]}))
+        .unwrap();
+    sandbox.write_file("src/config.rs", "fn load() { ported() }\n");
+    let done = codex
+        .call(
+            "task_complete",
+            json!({"seq": 1, "result": "ported it; env still wins"}),
+        )
+        .unwrap();
+    let review = done["review_filed"].as_i64().expect("a review was filed");
+    assert!(
+        done["advice"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("another harness"),
+        "{done}"
+    );
+
+    // Codex cannot take it, and is told why in a sentence it can relay.
+    let refused = codex
+        .call("task_claim", json!({"seq": review}))
+        .unwrap_err();
+    assert!(refused.contains("codex"), "{refused}");
+    assert!(refused.contains("a different harness"), "{refused}");
+
+    // And the list says so too, rather than showing it as available work.
+    let listed = codex.call("task_list", json!({"status": "open"})).unwrap();
+    assert!(
+        listed["tasks"][0]["recused_from_you"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("another harness"),
+        "{listed}"
+    );
+
+    // Nor by asking for "whatever is workable" — dispatch routes around it
+    // rather than handing out something it will then refuse.
+    let next = codex.call("task_next", json!({})).unwrap();
+    assert!(next.get("claimed").is_none(), "{next}");
+    assert_eq!(next["recused"][0]["seq"], review);
+    assert!(
+        next["idle"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("another harness"),
+        "{next}"
+    );
+
+    // Claude Code can, and arrives knowing what to read and what not to trust.
+    let mut claude = McpSession::start(&sandbox, "claude-code");
+    let claimed = claude.call("task_claim", json!({"seq": review})).unwrap();
+    assert_eq!(claimed["title"], "Review: Port the config loader");
+    assert_eq!(claimed["paths"], json!(["src/config.rs"]));
+    let body = claimed["body"].as_str().unwrap_or_default();
+    assert!(body.contains("ported it; env still wins"), "{body}");
+    assert!(body.contains("src/config.rs (modified)"), "{body}");
+    assert!(body.contains("not the summary"), "{body}");
+
+    codex.shutdown();
+    claude.shutdown();
+}
+
+/// A queue whose only remaining work is a review of your own code is not an
+/// idle queue. Saying "nothing to do" would send the human away from the one
+/// thing that needs them.
+#[test]
+fn a_recused_queue_says_it_needs_another_harness_rather_than_nothing() {
+    let sandbox = Sandbox::new();
+    sandbox.write_file("src/config.rs", "fn load() {}\n");
+    sandbox.git_init();
+    sandbox.run(&[
+        "add",
+        "Port the loader",
+        "--review",
+        "--path",
+        "src/config.rs",
+    ]);
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex.call("task_next", json!({})).unwrap();
+    sandbox.write_file("src/config.rs", "fn load() { ported() }\n");
+    codex
+        .call("task_complete", json!({"seq": 1, "result": "ported"}))
+        .unwrap();
+
+    let next = codex.call("task_next", json!({})).unwrap();
+    let idle = next["idle"].as_str().unwrap_or_default();
+    assert!(idle.contains("review of work this harness did"), "{idle}");
+    assert!(idle.contains("waiting will not change it"), "{idle}");
+
+    codex.shutdown();
+}
+
+/// Nothing is filed for work nobody asked to have reviewed, so a queue that
+/// never uses the flag behaves exactly as it did before any of this existed.
+#[test]
+fn unreviewed_work_finishes_the_way_it_always_did() {
+    let sandbox = Sandbox::new();
+    sandbox.write_file("src/config.rs", "fn load() {}\n");
+    sandbox.git_init();
+    sandbox.run(&["add", "Port the loader", "--path", "src/config.rs"]);
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex.call("task_claim", json!({"seq": 1})).unwrap();
+    sandbox.write_file("src/config.rs", "fn load() { ported() }\n");
+    let done = codex
+        .call("task_complete", json!({"seq": 1, "result": "ported"}))
+        .unwrap();
+    assert!(done.get("review_filed").is_none(), "{done}");
+    assert_eq!(sandbox.run(&["ls"]).lines().count(), 1);
+
+    codex.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// MCP 2026-07-28: the stateless lifecycle.
+//
+// There is no `initialize` and no session to hold state in. A client asks the
+// server to describe itself with `server/discover`, then sends requests that
+// each carry the protocol version and its own name in `_meta`. hird is one
+// process per session over stdio, so nothing about it depended on the
+// handshake; these tests are here to keep it that way.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn discovery_answers_without_a_handshake_and_offers_the_current_spec() {
+    let sandbox = Sandbox::new();
+    let mut session = McpSession::start_stateless(&sandbox, Some("claude-code"));
+
+    let response = session.request("server/discover", json!({}));
+    let result = &response["result"];
+    assert_eq!(result["serverInfo"]["name"], "hird");
+    assert!(result["capabilities"]["tools"].is_object());
+
+    let versions: Vec<&str> = result["supportedVersions"]
+        .as_array()
+        .expect("supportedVersions")
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(
+        versions.contains(&"2026-07-28"),
+        "discovery does not offer the current spec: {versions:?}"
+    );
+    // The versions hird's own tests and docs assume still keep working.
+    assert!(versions.contains(&"2025-11-25"), "{versions:?}");
+    assert!(versions.contains(&"2025-06-18"), "{versions:?}");
+
+    // The queue's rules reach a client that never calls `initialize`.
+    let instructions = result["instructions"].as_str().expect("instructions");
+    for expected in ["task_claim", "task_update", "mem_store", "seq"] {
+        assert!(
+            instructions.contains(expected),
+            "instructions omit {expected}"
+        );
+    }
+
+    // Those instructions name this project and are shaped by this machine's
+    // config, so they are nobody else's to reuse.
+    assert_eq!(result["cacheScope"], "private");
+    assert_eq!(result["ttlMs"], 0);
+
+    session.shutdown();
+}
+
+#[test]
+fn a_stateless_client_can_work_a_task_end_to_end() {
+    let sandbox = Sandbox::new();
+    sandbox.write_file("src/config.rs", "fn load() {}\n");
+    sandbox.git_init();
+    let seq: i64 = sandbox
+        .run(&["add", "Port the loader", "--path", "src/config.rs"])
+        .trim()
+        .parse()
+        .unwrap();
+
+    let mut session = McpSession::start_stateless(&sandbox, Some("claude-code"));
+
+    let listed = session.call("task_list", json!({})).unwrap();
+    assert_eq!(listed["count"], 1);
+
+    let claimed = session.call("task_claim", json!({"seq": seq})).unwrap();
+    assert!(
+        claimed["holder"]
+            .as_str()
+            .unwrap()
+            .starts_with("claude-code:"),
+        "{}",
+        claimed["holder"]
+    );
+
+    session
+        .call(
+            "task_scope",
+            json!({"seq": seq, "paths": ["src/config.rs"]}),
+        )
+        .unwrap();
+    session
+        .call(
+            "task_update",
+            json!({"seq": seq, "note": "porting", "status": "in_progress"}),
+        )
+        .unwrap();
+    sandbox.write_file("src/config.rs", "fn load() { ported() }\n");
+    session
+        .call("task_complete", json!({"seq": seq, "result": "ported"}))
+        .unwrap();
+
+    assert!(sandbox
+        .run(&["ls", "--status", "done"])
+        .contains("Port the loader"));
+    session.shutdown();
+}
+
+/// The point of the stateless lifecycle for hird: `clientInfo` arrives on
+/// every request, so a harness that never set `HIRD_HARNESS` is still somebody.
+#[test]
+fn a_stateless_client_names_itself_on_every_request() {
+    let sandbox = Sandbox::new();
+    let seq: i64 = sandbox.run(&["add", "t"]).trim().parse().unwrap();
+
+    let mut session = McpSession::start_stateless_as(&sandbox, "codex-cli");
+
+    let claimed = session.call("task_claim", json!({"seq": seq})).unwrap();
+    assert!(
+        claimed["holder"]
+            .as_str()
+            .unwrap()
+            .starts_with("codex-cli:"),
+        "{}",
+        claimed["holder"]
+    );
+    session.shutdown();
+}
+
+/// Two harnesses on one queue is the whole design, and it has to survive one
+/// of them being on the new lifecycle and the other on the old one.
+#[test]
+fn a_stateless_agent_and_a_handshaking_one_share_one_queue() {
+    let sandbox = Sandbox::new();
+    sandbox.git_init();
+    sandbox.run(&["add", "port the config loader", "--path", "src/config.rs"]);
+    sandbox.run(&["add", "rewrite the renderer", "--path", "src/tui/**"]);
+
+    let mut modern = McpSession::start_stateless(&sandbox, Some("claude-code"));
+    let mut legacy = McpSession::start(&sandbox, "codex");
+
+    let first = modern.call("task_next", json!({})).unwrap();
+    let second = legacy.call("task_next", json!({})).unwrap();
+
+    let a = first["claimed"]["claimed"]
+        .as_i64()
+        .expect("the stateless agent got work");
+    let b = second["claimed"]["claimed"]
+        .as_i64()
+        .expect("the handshaking agent got work");
+    assert_ne!(a, b, "both harnesses were handed task {a}");
+    assert!(
+        first["claimed"]["holder"]
+            .as_str()
+            .unwrap()
+            .starts_with("claude-code:"),
+        "{first}"
+    );
+    assert!(
+        second["claimed"]["holder"]
+            .as_str()
+            .unwrap()
+            .starts_with("codex:"),
+        "{second}"
+    );
+
+    // And the loser of a race is told who won, across the lifecycle divide.
+    let refused = legacy
+        .call("task_claim", json!({"seq": a}))
+        .expect_err("claiming a held task");
+    assert!(refused.contains("claude-code:"), "{refused}");
+
+    modern.shutdown();
+    legacy.shutdown();
+}
+
+/// A request that cannot open a connection is answered rather than dropped.
+///
+/// The SDK's own response to an unopenable first message is to close the
+/// transport, which reaches the harness as "the hird server crashed". It did
+/// not crash, and a request with an id is owed an answer that says so.
+#[test]
+fn an_opening_request_that_cannot_open_anything_is_answered() {
+    let sandbox = Sandbox::new();
+    let mut session = McpSession::start_raw(&sandbox);
+
+    // Declares the current spec but carries none of what it requires.
+    let response = session.request_verbatim(
+        "tools/list",
+        json!({"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28"}}),
+    );
+    let error = response.get("error").unwrap_or_else(|| {
+        panic!("a request missing its required metadata was served: {response}")
+    });
+    assert_eq!(error["code"], -32600);
+    let message = error["message"].as_str().unwrap_or_default();
+    for expected in ["initialize", "clientInfo", "_meta"] {
+        assert!(message.contains(expected), "{message}");
+    }
+
+    // And hird stands down rather than serving a session it never opened,
+    // saying the same thing to the human reading the harness's log.
+    let stderr = session.wait_for_exit();
+    assert!(stderr.contains("clientInfo"), "{stderr}");
+}
+
+/// A version hird does not implement is refused by name, rather than being
+/// quietly served as something else.
+#[test]
+fn a_request_declaring_an_unknown_version_is_refused() {
+    let sandbox = Sandbox::new();
+    let mut session = McpSession::start_stateless(&sandbox, Some("claude-code"));
+
+    // Open the connection properly first; this is about a later request.
+    session.call("task_list", json!({})).unwrap();
+
+    let response = session.request_verbatim(
+        "tools/list",
+        json!({"_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2099-01-01",
+            "io.modelcontextprotocol/clientInfo": {"name": "from-the-future", "version": "0"},
+            "io.modelcontextprotocol/clientCapabilities": {},
+        }}),
+    );
+    let error = response
+        .get("error")
+        .unwrap_or_else(|| panic!("an unknown protocol version was served: {response}"));
+    assert_eq!(error["code"], -32022, "{error}");
+    assert_eq!(error["data"]["requested"], "2099-01-01", "{error}");
+    let supported: Vec<&str> = error["data"]["supported"]
+        .as_array()
+        .expect("the refusal names what is supported")
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(supported.contains(&"2026-07-28"), "{supported:?}");
+
+    // The connection survives one bad request: the next good one still works.
+    let listed = session.call("task_list", json!({})).unwrap();
+    assert_eq!(listed["count"], 0);
+
+    session.shutdown();
 }

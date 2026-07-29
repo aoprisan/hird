@@ -1,0 +1,12 @@
+{
+  "//": "What `hird register copilot-cli` writes. Register hird with the Copilot CLI. Merge this into ~/.copilot/mcp-config.json — `/mcp add` inside a session writes the same file. HIRD_HARNESS is how the board tells this session apart (copilot:1a4f); leave it unset and the agent shows up as `unknown`. `hird` must be on the PATH the CLI inherits — if `task_*` tools do not appear, put the absolute path from `which hird` here.",
+  "mcpServers": {
+    "hird": {
+      "type": "local",
+      "command": "hird",
+      "args": ["mcp"],
+      "env": { "HIRD_HARNESS": "copilot" },
+      "tools": ["*"]
+    }
+  }
+}

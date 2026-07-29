@@ -306,7 +306,11 @@ impl Witness {
 
     /// A hash standing for the current content of `path`, or `""` if it is not
     /// there. Oversized files are fingerprinted by their metadata instead.
-    fn fingerprint(&self, path: &str) -> String {
+    ///
+    /// Public because [`crate::footing`] asks the same question of a handful of
+    /// named files without wanting a `git status` first: an assertion's footing
+    /// is a short list somebody already wrote down, not a discovery problem.
+    pub fn fingerprint(&self, path: &str) -> String {
         let full = self.root.join(path);
         let Ok(meta) = std::fs::metadata(&full) else {
             return String::new();

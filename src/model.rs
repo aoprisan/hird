@@ -214,6 +214,10 @@ pub enum EventKind {
     DepRemoved,
     /// The task's declared file scope changed.
     Scoped,
+    /// The task was recused from another one's worker, or the bar was lifted.
+    Recused,
+    /// A review of this task's work was filed, or this task is that review.
+    Reviewed,
     /// The witness saw the working tree change under this task.
     Witnessed,
 }
@@ -235,6 +239,8 @@ impl EventKind {
             EventKind::DepAdded => "dep_added",
             EventKind::DepRemoved => "dep_removed",
             EventKind::Scoped => "scoped",
+            EventKind::Recused => "recused",
+            EventKind::Reviewed => "reviewed",
             EventKind::Witnessed => "witnessed",
         }
     }
@@ -265,6 +271,8 @@ impl FromStr for EventKind {
             "dep_added" => Ok(EventKind::DepAdded),
             "dep_removed" => Ok(EventKind::DepRemoved),
             "scoped" => Ok(EventKind::Scoped),
+            "recused" => Ok(EventKind::Recused),
+            "reviewed" => Ok(EventKind::Reviewed),
             "witnessed" => Ok(EventKind::Witnessed),
             other => Err(format!("unknown event kind {other:?}")),
         }
@@ -284,6 +292,9 @@ pub struct Task {
     pub claimed_by: Option<String>,
     pub lease_expires_at: Option<String>,
     pub result: Option<String>,
+    /// Whether finishing this task should put its work in front of another
+    /// harness. See [`Recusal`] and DESIGN.md §15.
+    pub review: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -523,6 +534,249 @@ fn short_time(ts: &str) -> String {
     }
 }
 
+/// A task whose worker is barred from working another one.
+///
+/// Carries who that is, so a refusal can name them without a second lookup —
+/// the same reason [`Blocker`] carries a title.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Recusal {
+    pub from_seq: i64,
+    pub from_title: String,
+    /// Why the bar exists, in the words of whoever filed it.
+    pub reason: String,
+    /// Whoever last held the task being recused from, if anybody has. `None`
+    /// means the work has not been done yet, so the recusal bars nobody — a
+    /// constraint waiting for something to constrain.
+    pub worker: Option<String>,
+}
+
+impl Recusal {
+    /// One sentence, aimed at a model that has to relay it to a human.
+    pub fn describe(&self) -> String {
+        let what = format!(
+            "task {} ({})",
+            self.from_seq,
+            crate::fmt::truncate(&self.from_title, 40)
+        );
+        let why = if self.reason.is_empty() {
+            String::new()
+        } else {
+            format!(" — {}", self.reason)
+        };
+        match &self.worker {
+            Some(worker) => format!(
+                "not whoever worked {what}: that was {worker}, so this needs another harness{why}"
+            ),
+            None => format!("not whoever works {what}; nobody has yet{why}"),
+        }
+    }
+}
+
+/// One file an assertion was learned against, and what that file said then.
+///
+/// An assertion is a statement *about code*, and code moves. The anchor is the
+/// receipt: this is the file the claim was read off, and this is the version of
+/// it that was open at the time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Anchor {
+    /// Project-relative path.
+    pub path: String,
+    /// Content hash when the anchor was taken; empty if the file was already
+    /// absent, which is a fact worth keeping as much as any other.
+    pub hash: String,
+    pub at: String,
+}
+
+/// A file an assertion stands on that is no longer what it was.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Shift {
+    pub path: String,
+    /// The file is not merely different, it is not there.
+    pub gone: bool,
+}
+
+/// How much the ground under an assertion has moved since it was recorded.
+///
+/// This is the one question every agent-memory store fails to answer and every
+/// one of them needs to: a fact recorded six weeks ago about a file that has
+/// been rewritten twice since is not a fact any more, and nothing about the
+/// sentence itself gives that away. hird can answer it because the witness
+/// already fingerprints files, so an assertion can be stored alongside the
+/// version of the code it was read off.
+///
+/// Note what it deliberately is not: a verdict. A file changing does not make
+/// an assertion false — a rename, a formatting pass and a rewrite all look
+/// identical from here. It makes it *unverified*, which is a different and much
+/// more useful thing to be told, because it is exactly the set of facts worth
+/// spending a re-read on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "standing")]
+pub enum Standing {
+    /// No files were ever recorded, so there is nothing to check it against.
+    Unanchored,
+    /// Every file it was recorded against still says what it said.
+    Firm { paths: Vec<String> },
+    /// At least one of them does not.
+    Shaky {
+        moved: Vec<Shift>,
+        firm: Vec<String>,
+    },
+    /// All of them are gone.
+    Orphaned { paths: Vec<String> },
+}
+
+impl Standing {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Standing::Unanchored => "unanchored",
+            Standing::Firm { .. } => "firm",
+            Standing::Shaky { .. } => "shaky",
+            Standing::Orphaned { .. } => "orphaned",
+        }
+    }
+
+    /// Every file this standing was decided from, in order.
+    pub fn paths(&self) -> Vec<&str> {
+        match self {
+            Standing::Unanchored => Vec::new(),
+            Standing::Firm { paths } | Standing::Orphaned { paths } => {
+                paths.iter().map(String::as_str).collect()
+            }
+            Standing::Shaky { moved, firm } => moved
+                .iter()
+                .map(|s| s.path.as_str())
+                .chain(firm.iter().map(String::as_str))
+                .collect(),
+        }
+    }
+
+    /// Is this worth re-reading the code over?
+    pub fn needs_checking(&self) -> bool {
+        matches!(self, Standing::Shaky { .. } | Standing::Orphaned { .. })
+    }
+
+    /// How much to trust it, lowest first. Used to order recall, where the
+    /// budget is small and a verified fact should outrank a suspect one.
+    pub fn rank(&self) -> u8 {
+        match self {
+            Standing::Firm { .. } => 0,
+            Standing::Unanchored => 1,
+            Standing::Shaky { .. } => 2,
+            Standing::Orphaned { .. } => 3,
+        }
+    }
+
+    /// One sentence, aimed at a model deciding whether to trust the assertion.
+    ///
+    /// `None` for an unanchored assertion: hird has nothing to say about it,
+    /// and saying so on every row would be noise wearing the clothes of a
+    /// warning.
+    pub fn describe(&self) -> Option<String> {
+        match self {
+            Standing::Unanchored => None,
+            Standing::Firm { paths } => Some(match paths.as_slice() {
+                [one] => format!("{one} is unchanged since this was recorded"),
+                many => format!(
+                    "all {} files this was recorded against are unchanged",
+                    many.len()
+                ),
+            }),
+            Standing::Shaky { moved, .. } => Some(format!(
+                "{} since this was recorded — re-read before relying on it",
+                describe_shifts(moved)
+            )),
+            Standing::Orphaned { paths } => Some(match paths.as_slice() {
+                [one] => {
+                    format!("{one} no longer exists — this was recorded about a file that has gone")
+                }
+                many => format!(
+                    "all {} files this was recorded against have been deleted",
+                    many.len()
+                ),
+            }),
+        }
+    }
+}
+
+/// `src/config.rs has changed`, `src/a.rs is gone and 2 others have changed`.
+fn describe_shifts(moved: &[Shift]) -> String {
+    let verb = |s: &Shift| if s.gone { "is gone" } else { "has changed" };
+    match moved {
+        [] => "nothing has changed".to_string(),
+        [one] => format!("{} {}", one.path, verb(one)),
+        [first, rest @ ..] => {
+            let others = rest.len();
+            let tail = match (others == 1, rest.iter().all(|s| s.gone)) {
+                (true, true) => "is gone",
+                (true, false) => "has changed",
+                (false, true) => "are gone",
+                (false, false) => "have changed",
+            };
+            format!(
+                "{} {} and {others} other{} {tail}",
+                first.path,
+                verb(first),
+                if others == 1 { "" } else { "s" },
+            )
+        }
+    }
+}
+
+/// Everyone who has stated an assertion, counting whoever recorded it first.
+///
+/// Two agents in one harness saying the same thing is repetition; two agents in
+/// *different* harnesses saying it independently is corroboration, and hird is
+/// the only thing in the room that can tell the difference, because it is the
+/// only thing both of them talk to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Voices {
+    /// Actors, the agent that first recorded the assertion first.
+    pub actors: Vec<String>,
+}
+
+impl Voices {
+    /// The distinct harnesses among them, in first-seen order.
+    pub fn harnesses(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::new();
+        for actor in &self.actors {
+            let harness = crate::identity::actor_harness(actor);
+            if !out.contains(&harness) {
+                out.push(harness);
+            }
+        }
+        out
+    }
+
+    /// One sentence, or `None` when only one voice has ever said it — which is
+    /// the ordinary case and not worth a line.
+    ///
+    /// Names them rather than counting them, because who confirmed a fact is
+    /// most of what the count was standing in for, and a reader can weigh
+    /// `codex:9f2c` against `cli` for themselves. Long lists are cut off with a
+    /// tally rather than truncated silently.
+    pub fn describe(&self) -> Option<String> {
+        let [_first, others @ ..] = self.actors.as_slice() else {
+            return None;
+        };
+        if others.is_empty() {
+            return None;
+        }
+        const NAMED: usize = 3;
+        let shown: Vec<&str> = others.iter().take(NAMED).map(String::as_str).collect();
+        let mut sentence = format!("also stated by {}", shown.join(", "));
+        if others.len() > shown.len() {
+            sentence.push_str(&format!(" and {} more", others.len() - shown.len()));
+        }
+        // The claim worth making loudest: not that several sessions agree, but
+        // that sessions which cannot see each other agree.
+        let harnesses = self.harnesses().len();
+        if harnesses > 1 {
+            sentence.push_str(&format!(", independently across {harnesses} harnesses"));
+        }
+        Some(sentence)
+    }
+}
+
 /// One durable factual claim recorded by an agent or a human.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Assertion {
@@ -646,6 +900,109 @@ mod tests {
         assert!(early < late);
         assert_eq!(early.len(), late.len());
         assert_eq!(parse_ts(&early).unwrap().timestamp(), 1_700_000_000);
+    }
+
+    /// The sentence a shaky assertion carries is the whole product: it has to
+    /// name the file, say what happened to it, and say what to do — without
+    /// ever claiming the assertion is false, which hird cannot know.
+    #[test]
+    fn a_shaky_standing_names_the_file_and_stops_short_of_a_verdict() {
+        let one = Standing::Shaky {
+            moved: vec![Shift {
+                path: "src/config.rs".into(),
+                gone: false,
+            }],
+            firm: vec![],
+        };
+        assert_eq!(
+            one.describe().unwrap(),
+            "src/config.rs has changed since this was recorded — re-read before relying on it"
+        );
+        for word in ["wrong", "false", "stale", "invalid"] {
+            assert!(!one.describe().unwrap().contains(word), "{word}");
+        }
+
+        let several = Standing::Shaky {
+            moved: vec![
+                Shift {
+                    path: "src/a.rs".into(),
+                    gone: true,
+                },
+                Shift {
+                    path: "src/b.rs".into(),
+                    gone: false,
+                },
+            ],
+            firm: vec!["src/c.rs".into()],
+        };
+        assert!(
+            several
+                .describe()
+                .unwrap()
+                .starts_with("src/a.rs is gone and 1 other has changed"),
+            "{:?}",
+            several.describe()
+        );
+    }
+
+    #[test]
+    fn standings_report_every_path_they_were_decided_from() {
+        let shaky = Standing::Shaky {
+            moved: vec![Shift {
+                path: "a".into(),
+                gone: false,
+            }],
+            firm: vec!["b".into()],
+        };
+        assert_eq!(shaky.paths(), vec!["a", "b"]);
+        assert!(Standing::Unanchored.paths().is_empty());
+        assert_eq!(
+            Standing::Firm {
+                paths: vec!["a".into()]
+            }
+            .paths(),
+            vec!["a"]
+        );
+    }
+
+    /// One agent saying something is provenance. Two agents in two harnesses
+    /// saying it independently is the strongest signal hird can produce, and it
+    /// is the one nothing else in the room is positioned to see.
+    #[test]
+    fn corroboration_is_only_worth_a_sentence_when_it_crosses_agents() {
+        let alone = Voices {
+            actors: vec!["codex:9f2c".into()],
+        };
+        assert!(alone.describe().is_none());
+
+        let same_harness = Voices {
+            actors: vec!["codex:9f2c".into(), "codex:1a2b".into()],
+        };
+        assert_eq!(
+            same_harness.describe().unwrap(),
+            "also stated by codex:1a2b",
+            "two sessions of one harness are not independent confirmation"
+        );
+        assert_eq!(same_harness.harnesses(), vec!["codex"]);
+
+        let across = Voices {
+            actors: vec![
+                "codex:9f2c".into(),
+                "claude-code:af31".into(),
+                "copilot:77".into(),
+            ],
+        };
+        assert_eq!(
+            across.describe().unwrap(),
+            "also stated by claude-code:af31, copilot:77, independently across 3 harnesses"
+        );
+
+        // A long list is cut off with a tally, never silently truncated.
+        let many = Voices {
+            actors: (0..6).map(|i| format!("codex:{i}")).collect(),
+        };
+        let sentence = many.describe().unwrap();
+        assert!(sentence.contains("and 2 more"), "{sentence}");
     }
 
     #[test]

@@ -58,3 +58,20 @@ recall_limit = 5
 # while no task in the project holds a lease: with nobody to measure, git is
 # never invoked at all.
 witness = true
+
+# Whether an assertion remembers what it was learned against.
+#
+# On, storing a fact records the files behind it and the content hash each of
+# them had at that moment. Every later reader — a search, a claim's recall, the
+# memory browser — is told whether that ground has since moved, so a fact
+# recorded against code that has been rewritten twice arrives marked `shaky`
+# instead of arriving looking exactly like one recorded this morning.
+#
+# It never says a fact is false; a rename and a rewrite look the same from here.
+# It says which facts are worth a re-read, which is the useful half. Confirming
+# one costs nothing extra: restate it and hird re-anchors it to the tree as it
+# stands and records you as another voice for it.
+#
+# Rides on the same working-tree access as `witness` and is off wherever that
+# is; this switch is for keeping the witness while giving up the footing.
+memory_footing = true

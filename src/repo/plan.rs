@@ -166,6 +166,11 @@ impl<'a> Plans<'a> {
                 .conflicts
                 .extend(declare_in_tx(&tx, *seq, &fresh, actor, OnConflict::Report)?);
         }
+        for (task, _, seq) in &placed {
+            if task.review {
+                super::tasks::set_review_in_tx(&tx, *seq, true, actor)?;
+            }
+        }
         for (task, id, seq) in &placed {
             for need in &task.needs {
                 let Some((_, needed_id, needed_seq)) =

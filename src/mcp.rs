@@ -3,28 +3,53 @@
 //! One process per harness session, speaking JSON-RPC over stdio. Every tool
 //! result is compact JSON; every error is a sentence the model can relay to the
 //! human verbatim.
+//!
+//! Both lifecycles are served. A client may handshake with `initialize`, or —
+//! from MCP 2026-07-28, which has no handshake — open with `server/discover` or
+//! with the request it wanted to make, carrying the protocol version, its own
+//! name and its capabilities in `_meta` on each one. Nothing below depends on
+//! which: the session is a process, the identity and the project scope are read
+//! from the environment when it starts, and there is no protocol-level session
+//! state to keep either way.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Mutex;
 
+use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
-use rmcp::{tool, tool_handler, tool_router, ServerHandler, ServiceExt};
+use rmcp::model::{
+    CacheScope, CallToolRequestParams, CallToolResponse, DiscoverResult, ErrorCode, Implementation,
+    ServerCapabilities, ServerInfo,
+};
+use rmcp::service::RequestContext;
+use rmcp::{tool, tool_handler, tool_router, ErrorData, RoleServer, ServerHandler, ServiceExt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::db::Db;
 use crate::error::Error;
+
+use crate::footing;
 use crate::identity::{self, AgentId};
 use crate::model::{
-    Assertion, Blocker, Conflict, Contention, Observed, Status, Task, TaskEvent, TaskSummary,
+    Assertion, Blocker, Conflict, Contention, Observed, Recusal, Standing, Status, Task, TaskEvent,
+    TaskSummary,
 };
 use crate::repo::{Claim, Dispatch, MemoryQuery, NewAssertion, ProjectScope, Recalled, Subtask};
 use crate::witness::{self, Witness};
 
 /// Number of trailing events `task_get` returns.
 const EVENT_WINDOW: usize = 20;
+
+/// What a 2026-07-28 client must put in `_meta` to open a connection without
+/// an `initialize` handshake, said the way the client's author would fix it.
+const SELF_CONTAINED: &str =
+    "a connection now opens either with an `initialize` request or with a \
+     self-contained one, and a self-contained request carries \
+     io.modelcontextprotocol/protocolVersion, io.modelcontextprotocol/clientInfo and \
+     io.modelcontextprotocol/clientCapabilities in its `params._meta`";
 
 /// Serve the MCP protocol on stdio until the client disconnects.
 pub async fn serve(db_path: &Path, config: Config) -> anyhow::Result<()> {
@@ -35,9 +60,46 @@ pub async fn serve(db_path: &Path, config: Config) -> anyhow::Result<()> {
         identity::resolve_project(&cwd),
         config,
     );
-    let running = server.serve(rmcp::transport::stdio()).await?;
+    let running = match server.serve(rmcp::transport::stdio()).await {
+        Ok(running) => running,
+        Err(rmcp::service::ServerInitializeError::ExpectedInitializeRequest(opener)) => {
+            refuse_opener(opener.as_ref());
+            anyhow::bail!("this connection was never opened: {SELF_CONTAINED}");
+        }
+        Err(other) => return Err(other.into()),
+    };
     running.waiting().await?;
     Ok(())
+}
+
+/// Answer an opening message that could not open anything.
+///
+/// The SDK hands back the offending message and drops the transport, which
+/// would leave the client reading a closed pipe and reporting that hird
+/// crashed. It did not crash; the request was malformed, and a request with an
+/// id is owed an answer saying so. Written straight to stdout because on this
+/// transport that is what the connection is. Best-effort: a client that has
+/// already hung up is exactly the case where there is nothing left to say.
+fn refuse_opener(opener: Option<&rmcp::model::ClientJsonRpcMessage>) {
+    use std::io::Write;
+
+    let Some(rmcp::model::JsonRpcMessage::Request(request)) = opener else {
+        return;
+    };
+    let response = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": request.id,
+        "error": {
+            "code": ErrorCode::INVALID_REQUEST.0,
+            "message": format!("this request cannot open a connection: {SELF_CONTAINED}"),
+        },
+    });
+    let Ok(line) = serde_json::to_string(&response) else {
+        return;
+    };
+    let mut stdout = std::io::stdout().lock();
+    let _ = writeln!(stdout, "{line}");
+    let _ = stdout.flush();
 }
 
 /// The MCP server state for one harness session.
@@ -118,6 +180,23 @@ impl HirdMcp {
             }
         }
         evidence
+    }
+
+    /// The witness memory may read the tree through, if the configuration
+    /// lets it. Narrower than `self.witness` by one flag.
+    fn footing(&self) -> Option<&Witness> {
+        self.config.footing(self.witness.as_ref())
+    }
+
+    /// The memory relevant to a task, each fact carrying whether the code it
+    /// was learned from still says what it said.
+    ///
+    /// Recall is a courtesy on top of the real answer, so it never turns a
+    /// successful claim into an error: a failure here costs the agent some
+    /// context, while propagating it would cost it the task it just took.
+    fn recall(&self, db: &Db, seq: i64, limit: usize) -> Vec<Recalled> {
+        let recalled = db.recall().for_task(seq, limit).unwrap_or_default();
+        footing::decorate(db, self.footing(), recalled)
     }
 
     /// Start watching the tree on behalf of a task this session just claimed.
@@ -202,6 +281,14 @@ impl HirdMcp {
              Tasks can depend on other tasks. A task whose dependencies are unfinished \
              cannot be claimed, and the refusal names what it is waiting for.\n\
              \n\
+             Some tasks are reviews, and a review is barred to the harness whose work it \
+             reviews — including this one. If a claim comes back saying the task is recused, \
+             that is not a race you can retry: relay it to the human, who needs to point a \
+             different tool at it. When a task you finish was marked for review, the answer \
+             names the review it filed; say that number out loud too. You are not being \
+             distrusted, you are being read by somebody who was not in the room, which is \
+             the whole reason the human is running more than one of us.\n\
+             \n\
              Memory: `mem_store` durable facts you learn — where something lives, why a \
              decision was made, what a command is — one assertion per call, in plain prose \
              that will still make sense to a different agent next week. Pass `task_seq` when \
@@ -213,14 +300,37 @@ impl HirdMcp {
              from. Read those before you start; they are the reason to declare your paths \
              early, because file scope is how the queue knows what to hand you. They are \
              assertions, not gospel: if one turns out to be wrong, `mem_store` the truth.\n\
+             {footing}\
              {witness}\n\
              Everything is scoped to the current project ({project}) unless you pass \
              `all_projects: true`.",
             ttl = self.config.lease_ttl_minutes,
             heartbeat = self.heartbeat_minutes(),
             project = self.project,
+            footing = self.footing_instructions(),
             witness = self.witness_instructions(),
         )
+    }
+
+    /// The paragraph about memory's footing, or nothing where there is none.
+    ///
+    /// Left out for the same reason as the witness paragraph: a model told to
+    /// read a `standing` field that nothing will ever populate has been handed
+    /// a rule it cannot use and a reason to doubt the ones it can.
+    fn footing_instructions(&self) -> &'static str {
+        if self.footing().is_none() {
+            return "";
+        }
+        "\nHow much to trust a fact: assertions carry a `standing`, because hird records \
+         which files each one was read off and what those files said at the time. `firm` \
+         means the code has not moved since; `shaky` means it has, so the fact is \
+         unverified rather than wrong — re-read the file before you act on it; `orphaned` \
+         means the file is gone. Nothing marks a fact false; that is your call after \
+         looking. When you check a shaky fact and it still holds, `mem_store` it again \
+         word for word: that does not duplicate it, it re-anchors it to today's code and \
+         records you as another voice for it, and the next agent gets it marked firm. When \
+         it does not hold, `mem_store` the truth instead. Pass `paths` (or `task_seq`) so \
+         what you record gets a footing of its own.\n"
     }
 
     /// The paragraph about the witness, or nothing at all where there is none.
@@ -367,6 +477,13 @@ pub struct MemStoreArgs {
     /// The task you learned this while working, if any.
     #[serde(default)]
     pub task_seq: Option<i64>,
+    /// The files this fact is about, as literal paths relative to the project
+    /// root, e.g. ["src/config.rs"]. hird records what they say right now, so
+    /// a later reader can be told if the code has moved under this fact.
+    /// Leave it off when you passed `task_seq` — the files that task is in are
+    /// used instead.
+    #[serde(default)]
+    pub paths: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -412,10 +529,20 @@ struct TaskRow {
     /// cannot be claimed yet.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     blocked_by: Vec<i64>,
+    /// Set when this task is a review of work *you* did, so you cannot claim
+    /// it however open it looks. Same reason `blocked_by` is here: a list that
+    /// shows unclaimable work as available is lying to whoever reads it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recused_from_you: Option<String>,
 }
 
 impl TaskRow {
-    fn from_summary(summary: TaskSummary, show_project: bool, blocked_by: Vec<i64>) -> TaskRow {
+    fn from_summary(
+        summary: TaskSummary,
+        show_project: bool,
+        blocked_by: Vec<i64>,
+        recused: Option<Recusal>,
+    ) -> TaskRow {
         TaskRow {
             seq: summary.seq,
             title: summary.title,
@@ -425,6 +552,7 @@ impl TaskRow {
             updated_at: summary.updated_at,
             project: show_project.then_some(summary.project),
             blocked_by,
+            recused_from_you: recused.map(|r| r.describe()),
         }
     }
 }
@@ -457,6 +585,12 @@ struct TaskDetail {
     /// Overlaps between those files and work other agents hold right now.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     overlaps: Vec<String>,
+    /// Who cannot claim this task, and why. Present on reviews.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    recused_from: Vec<String>,
+    /// True when finishing this task will file a review of what it changed.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    review_on_finish: bool,
     /// What earlier work in the same territory learned. Read before exploring.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     recalled: Vec<RecallRow>,
@@ -492,6 +626,7 @@ struct TaskContext {
     blocks: Vec<i64>,
     paths: Vec<String>,
     conflicts: Vec<Conflict>,
+    recusals: Vec<Recusal>,
     recalled: Vec<Recalled>,
     witness: Evidence,
     events: Vec<TaskEvent>,
@@ -520,7 +655,9 @@ impl TaskDetail {
             blocks: context.blocks,
             paths: context.paths,
             overlaps: describe_all(&context.conflicts),
-            recalled: context.recalled.into_iter().map(RecallRow::from).collect(),
+            recused_from: context.recusals.iter().map(Recusal::describe).collect(),
+            review_on_finish: task.review,
+            recalled: recall_rows(context.recalled),
             witness: context.witness,
             events: context.events.into_iter().map(EventRow::from).collect(),
         }
@@ -568,10 +705,21 @@ struct RecallRow {
     /// Pass to `mem_search` results or quote to the human; assertions are
     /// never edited, so an id stays valid.
     id: String,
+    /// `firm`, `shaky` or `orphaned`: whether the code this was learned from is
+    /// still the code on disk. Absent means hird has no footing for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    standing: Option<&'static str>,
+    /// Present only when there is something to do about it — the files have
+    /// moved, or the agent that wrote this is not the only one who has said it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    caution: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    corroboration: Option<String>,
 }
 
-impl From<Recalled> for RecallRow {
-    fn from(r: Recalled) -> RecallRow {
+impl RecallRow {
+    fn new(r: Recalled) -> RecallRow {
+        let standing = r.standing.filter(|s| *s != Standing::Unanchored);
         RecallRow {
             why: r.reason.describe(),
             content: r.assertion.content,
@@ -579,12 +727,21 @@ impl From<Recalled> for RecallRow {
             task_seq: r.task_seq,
             created_at: r.assertion.created_at,
             id: r.assertion.id,
+            standing: standing.as_ref().map(|s| s.as_str()),
+            // Only the standings worth acting on carry their sentence here. A
+            // claim's recall is the smallest budget in hird and it lands in an
+            // agent's context unasked; "this file is unchanged" spent on all
+            // five rows would crowd out the one row that says otherwise.
+            caution: standing
+                .filter(Standing::needs_checking)
+                .and_then(|s| s.describe()),
+            corroboration: r.corroboration,
         }
     }
 }
 
 fn recall_rows(recalled: Vec<Recalled>) -> Vec<RecallRow> {
-    recalled.into_iter().map(RecallRow::from).collect()
+    recalled.into_iter().map(RecallRow::new).collect()
 }
 
 #[derive(Debug, Serialize)]
@@ -662,12 +819,23 @@ struct NextResult {
     /// Ready tasks passed over because another agent is in their files.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     deferred: Vec<DeferredRow>,
+    /// Ready tasks this harness is barred from, and why. Usually a review of
+    /// work this harness did: say so to the human, because the task is waiting
+    /// for a different tool and not for time to pass.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    recused: Vec<RecusedRow>,
 }
 
 #[derive(Debug, Serialize)]
 struct DeferredRow {
     seq: i64,
     overlaps: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct RecusedRow {
+    seq: i64,
+    why: String,
 }
 
 impl NextResult {
@@ -692,26 +860,51 @@ impl NextResult {
                     overlaps: describe_all(&conflicts),
                 })
                 .collect(),
+            recused: dispatch
+                .recused
+                .into_iter()
+                .map(|(seq, recusal)| RecusedRow {
+                    seq,
+                    why: recusal.describe(),
+                })
+                .collect(),
         }
     }
 }
 
 /// Why the queue had nothing to hand out, in the terms the agent can act on.
 fn idle_reason(dispatch: &Dispatch) -> String {
+    // Named first when it is the only thing left, because it is the only one of
+    // the three that waiting will not fix: a review of this harness's own work
+    // stays unclaimable until somebody opens a different tool.
+    let recused = dispatch.recused.len();
+    if recused > 0 && dispatch.blocked.is_empty() && dispatch.deferred.is_empty() {
+        return format!(
+            "{recused} task{} ready, but every one of them is a review of work this harness \
+             did — they need an agent in another harness. Tell the human; waiting will not \
+             change it",
+            plural(recused, " is", "s are")
+        );
+    }
+    let tail = if recused > 0 {
+        format!(", and {recused} that this harness is recused from (they need another harness)")
+    } else {
+        String::new()
+    };
     match (dispatch.blocked.len(), dispatch.deferred.len()) {
-        (0, 0) => "nothing is open in this project; the queue is empty".to_string(),
+        (0, 0) => format!("nothing is open in this project; the queue is empty{tail}"),
         (0, n) => format!(
             "{n} task{} ready, but every one of them touches files another agent is \
-             working right now; try again once they finish",
+             working right now; try again once they finish{tail}",
             plural(n, " is", "s are")
         ),
         (n, 0) => format!(
-            "{n} task{} open, but all of them are waiting on unfinished dependencies",
+            "{n} task{} open, but all of them are waiting on unfinished dependencies{tail}",
             plural(n, " is", "s are")
         ),
         (blocked, deferred) => format!(
             "nothing is workable: {blocked} task{} waiting on dependencies and \
-             {deferred} overlapping files another agent is in",
+             {deferred} overlapping files another agent is in{tail}",
             plural(blocked, " is", "s are")
         ),
     }
@@ -844,18 +1037,40 @@ struct FinishResult {
     /// as `result` — that is the agent's own account of itself.
     #[serde(flatten)]
     witness: Evidence,
+    /// The review task this completion filed, if the work was marked for one.
+    /// It is scoped to the files that moved and recused from your harness, so
+    /// another agent will pick it up. Tell the human its number.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review_filed: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     advice: Option<String>,
 }
 
 impl FinishResult {
-    fn new(seq: i64, status: Status, result: String, witness: Evidence) -> FinishResult {
+    fn new(
+        seq: i64,
+        status: Status,
+        result: String,
+        witness: Evidence,
+        review_filed: Option<i64>,
+    ) -> FinishResult {
+        // A filed review outranks the witness's advice: it is the thing the
+        // agent has to say out loud, and it is about to stop being this
+        // agent's business entirely.
+        let advice = match review_filed {
+            Some(review) => Some(format!(
+                "this work was marked for review, so task {review} is now open for an agent in \
+                 another harness — you cannot take it yourself. Tell the human."
+            )),
+            None => witness.advice(),
+        };
         FinishResult {
             seq,
             status,
             result,
-            advice: witness.advice(),
+            advice,
             witness,
+            review_filed,
         }
     }
 }
@@ -871,6 +1086,18 @@ struct MemStoreResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     task_seq: Option<i64>,
     created_at: String,
+    /// True when this exact sentence was already on file. Nothing was
+    /// duplicated: the original assertion keeps its id and its author, you have
+    /// been recorded as another voice for it, and its footing has been re-taken
+    /// against the code as it stands now.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    affirmed: bool,
+    /// The files this fact is now on record as having been read off.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    anchored_to: Vec<String>,
+    /// Who has stated it, if more than one agent has.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    corroboration: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -894,11 +1121,20 @@ struct AssertionRow {
     project: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     superseded: bool,
+    /// `firm`, `shaky` or `orphaned` — how the files this was learned against
+    /// compare with the ones on disk right now. Absent means hird has no
+    /// footing for it and is not guessing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    standing: Option<&'static str>,
+    /// The same, as a sentence you can relay.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    footing: Option<String>,
 }
 
 impl AssertionRow {
-    fn new(a: Assertion, show_project: bool) -> AssertionRow {
+    fn new(a: Assertion, show_project: bool, standing: Option<&Standing>) -> AssertionRow {
         let tags = a.tag_list().into_iter().map(str::to_string).collect();
+        let standing = standing.filter(|s| **s != Standing::Unanchored);
         AssertionRow {
             id: a.id,
             tags,
@@ -907,6 +1143,8 @@ impl AssertionRow {
             created_at: a.created_at,
             project: show_project.then_some(a.project),
             superseded: a.superseded_by.is_some(),
+            standing: standing.map(Standing::as_str),
+            footing: standing.and_then(Standing::describe),
         }
     }
 }
@@ -933,16 +1171,38 @@ impl HirdMcp {
         let scope = self.scope(args.all_projects);
         let show_project = scope.is_all();
 
-        let (released, tasks, unmet) = self.with_db(|db| {
+        let actor = self.actor();
+        let (released, tasks, unmet, recused) = self.with_db(|db| {
             let released = db
                 .tasks()
                 .sweep_leases()
                 .map(|s| s.expired)
                 .unwrap_or_default();
+            let listed = db.tasks().list(&scope, status);
+            // Which of these this session is barred from. Only the open ones
+            // are worth asking about: a claimed or finished task's claimability
+            // is not the reader's question.
+            let recused: BTreeMap<i64, Recusal> = listed
+                .as_ref()
+                .map(|tasks| {
+                    tasks
+                        .iter()
+                        .filter(|t| t.status == Status::Open)
+                        .filter_map(|t| {
+                            db.recusals()
+                                .bars(t.seq, &actor)
+                                .ok()
+                                .flatten()
+                                .map(|r| (t.seq, r))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             (
                 released,
-                db.tasks().list(&scope, status),
+                listed,
                 db.deps().unmet_map(&scope).unwrap_or_default(),
+                recused,
             )
         });
         let tasks = tasks.map_err(stringify)?;
@@ -955,7 +1215,8 @@ impl HirdMcp {
                 .into_iter()
                 .map(|t| {
                     let blocked = unmet.get(&t.seq).cloned().unwrap_or_default();
-                    TaskRow::from_summary(t, show_project, blocked)
+                    let barred = recused.get(&t.seq).cloned();
+                    TaskRow::from_summary(t, show_project, blocked, barred)
                 })
                 .collect(),
             released,
@@ -981,7 +1242,8 @@ impl HirdMcp {
                         .collect(),
                     paths: db.scopes().for_task(args.seq)?,
                     conflicts,
-                    recalled: recall(db, args.seq, recall_limit),
+                    recusals: db.recusals().for_task(args.seq)?,
+                    recalled: self.recall(db, args.seq, recall_limit),
                     witness: self.evidence(db, args.seq),
                     events: db.tasks().events(&task.id, EVENT_WINDOW)?,
                 },
@@ -1014,7 +1276,7 @@ impl HirdMcp {
                 // that moves from here is inside its window and everything
                 // already dirty is not.
                 self.begin_witnessing(db, args.seq);
-                Ok::<_, Error>((claim, recall(db, args.seq, recall_limit)))
+                Ok::<_, Error>((claim, self.recall(db, args.seq, recall_limit)))
             })
             .map_err(stringify)?;
 
@@ -1044,7 +1306,7 @@ impl HirdMcp {
                 let recalled = match &dispatch.claim {
                     Some(claim) => {
                         self.begin_witnessing(db, claim.task.seq);
-                        recall(db, claim.task.seq, recall_limit)
+                        self.recall(db, claim.task.seq, recall_limit)
                     }
                     None => Vec::new(),
                 };
@@ -1187,6 +1449,8 @@ impl HirdMcp {
             task.status,
             args.reason.trim().to_string(),
             evidence,
+            // Releasing is not finishing, so nothing is filed to review.
+            None,
         ))
     }
 
@@ -1249,15 +1513,20 @@ impl HirdMcp {
                 // Last look, taken while the task is still live so its
                 // footprint is complete and any contention is still true.
                 let evidence = self.witnessed(db, args.seq);
+                // And the last word on what this task learned: its facts are
+                // statements about the tree it is leaving behind, not the one
+                // it found halfway through its own edits.
+                footing::settle(db, self.footing(), args.seq);
                 let task = db.tasks().complete(args.seq, &actor, &args.result)?;
                 Ok::<_, Error>((task, evidence))
             })
             .map_err(stringify)?;
         json(&FinishResult::new(
-            task.seq,
-            task.status,
-            task.result.unwrap_or_default(),
+            task.task.seq,
+            task.task.status,
+            task.task.result.unwrap_or_default(),
             evidence,
+            task.review,
         ))
     }
 
@@ -1271,15 +1540,17 @@ impl HirdMcp {
         let (task, evidence) = self
             .with_db(|db| {
                 let evidence = self.witnessed(db, args.seq);
+                footing::settle(db, self.footing(), args.seq);
                 let task = db.tasks().fail(args.seq, &actor, &args.reason)?;
                 Ok::<_, Error>((task, evidence))
             })
             .map_err(stringify)?;
         json(&FinishResult::new(
-            task.seq,
-            task.status,
-            task.result.unwrap_or_default(),
+            task.task.seq,
+            task.task.status,
+            task.task.result.unwrap_or_default(),
             evidence,
+            task.review,
         ))
     }
 
@@ -1290,18 +1561,30 @@ impl HirdMcp {
         Parameters(args): Parameters<MemStoreArgs>,
     ) -> Result<String, String> {
         let actor = self.actor();
-        let assertion = self
+        let (recorded, anchored, corroboration) = self
             .with_db(|db| {
-                db.memory().store(NewAssertion {
+                let recorded = db.memory().record(NewAssertion {
                     project: &self.project,
                     content: &args.content,
                     tags: args.tags.as_deref().unwrap_or(""),
                     actor: &actor,
                     task_seq: args.task_seq,
-                })
+                })?;
+                // Anchoring runs on both paths, and that is the whole
+                // re-grounding loop: an agent that rediscovers a fact says it
+                // again, and saying it again is what re-takes its footing
+                // against the code as it stands today.
+                let ground = footing::ground(db, args.task_seq, args.paths.as_deref());
+                let anchored =
+                    footing::anchor(db, self.footing(), &recorded.assertion().id, &ground)
+                        .unwrap_or_default();
+                let corroboration = footing::corroboration(db, recorded.assertion());
+                Ok::<_, Error>((recorded, anchored, corroboration))
             })
             .map_err(stringify)?;
 
+        let affirmed = recorded.was_affirmed();
+        let assertion = recorded.into_assertion();
         let tags = assertion
             .tag_list()
             .into_iter()
@@ -1315,6 +1598,9 @@ impl HirdMcp {
             actor: assertion.actor,
             task_seq: args.task_seq,
             created_at: assertion.created_at,
+            affirmed,
+            anchored_to: anchored.into_iter().map(|a| a.path).collect(),
+            corroboration,
         })
     }
 
@@ -1330,8 +1616,13 @@ impl HirdMcp {
             .limit(args.limit.unwrap_or(20).clamp(1, 200))
             .include_superseded(args.include_superseded.unwrap_or(false));
 
-        let hits = self
-            .with_db(|db| db.memory().search(&query))
+        let (hits, standings) = self
+            .with_db(|db| {
+                let hits = db.memory().search(&query)?;
+                let ids: Vec<String> = hits.iter().map(|a| a.id.clone()).collect();
+                let standings = footing::standings(db, self.footing(), &self.project, &ids);
+                Ok::<_, Error>((hits, standings))
+            })
             .map_err(stringify)?;
 
         json(&MemSearchResult {
@@ -1341,7 +1632,10 @@ impl HirdMcp {
             count: hits.len(),
             assertions: hits
                 .into_iter()
-                .map(|a| AssertionRow::new(a, show_project))
+                .map(|a| {
+                    let standing = standings.get(&a.id).cloned();
+                    AssertionRow::new(a, show_project, standing.as_ref())
+                })
                 .collect(),
         })
     }
@@ -1357,15 +1651,45 @@ impl ServerHandler for HirdMcp {
             )
             .with_instructions(self.instructions())
     }
-}
 
-/// The memory relevant to a task, or nothing.
-///
-/// Recall is a courtesy on top of the real answer, so it never turns a
-/// successful claim into an error: a failure here costs the agent some context,
-/// while propagating it would cost it the task it just took.
-fn recall(db: &Db, seq: i64, limit: usize) -> Vec<Recalled> {
-    db.recall().for_task(seq, limit).unwrap_or_default()
+    /// Every call is a chance to learn who is calling.
+    ///
+    /// Written out rather than left to `#[tool_handler]` for one reason: under
+    /// the 2026-07-28 lifecycle there is no `initialize`, so this is where a
+    /// client's name for itself arrives. It is offered to the identity, which
+    /// keeps it only if the environment left the harness unnamed. Nothing here
+    /// can fail the call — a session whose client will not say who it is works
+    /// exactly as it did before, filed as `unknown`.
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        if let Some(client) = context.client_info() {
+            self.agent.name_from_client(&client.name);
+        }
+        Self::tool_router()
+            .call(ToolCallContext::new(self, request, context))
+            .await
+    }
+
+    /// What `server/discover` answers, for clients that never call `initialize`.
+    ///
+    /// The default answer is right and this states why, so that a later SDK
+    /// default cannot quietly change it: these instructions name this project
+    /// and are shaped by this machine's configuration, so they are nobody
+    /// else's to reuse. Private, and stale the moment they are read.
+    async fn discover(
+        &self,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<DiscoverResult, ErrorData> {
+        Ok(DiscoverResult::from_server_info(
+            self.supported_protocol_versions().into_owned(),
+            self.get_info(),
+        )
+        .with_ttl_ms(0)
+        .with_cache_scope(CacheScope::Private))
+    }
 }
 
 /// Render a payload as compact JSON.
@@ -1636,6 +1960,7 @@ mod tests {
                 content: "the lexer lives in src/lex.rs".into(),
                 tags: Some(" parser , code ".into()),
                 task_seq: Some(seq),
+                paths: None,
             }))
             .await,
         );
@@ -1653,6 +1978,7 @@ mod tests {
                 content: "x".into(),
                 tags: None,
                 task_seq: Some(404),
+                paths: None,
             }))
             .await
             .unwrap_err();
@@ -1666,6 +1992,7 @@ mod tests {
             content: "the lexer lives in src/lex.rs".into(),
             tags: None,
             task_seq: None,
+            paths: None,
         }))
         .await
         .unwrap();
@@ -1695,6 +2022,7 @@ mod tests {
                 content: format!("fact {i} about widgets"),
                 tags: None,
                 task_seq: None,
+                paths: None,
             }))
             .await
             .unwrap();
