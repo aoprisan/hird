@@ -11,7 +11,7 @@ use super::app::{AgentRow, App, Column, Mode, Readiness, Screen};
 use super::theme;
 use crate::fmt;
 use crate::identity::actor_harness;
-use crate::model::{Assertion, Standing, Status, TaskSummary};
+use crate::model::{Assertion, Standing, Status, TaskSummary, Verdict};
 use crate::repo::Recalled;
 
 /// Draw the whole screen.
@@ -128,6 +128,7 @@ fn render_column(frame: &mut Frame, area: Rect, app: &App, column: Column, now: 
                 now,
                 app.blocked_by(task.seq),
                 app.reviews.get(&task.seq).copied(),
+                app.verdicts.get(&task.seq).copied(),
             ))
         })
         .collect();
@@ -152,6 +153,7 @@ fn task_card(
     now: DateTime<Utc>,
     blocked_by: &[i64],
     reviews: Option<i64>,
+    verdict: Option<Verdict>,
 ) -> Text<'static> {
     let marker = match task.priority {
         p if p > 0 => Span::styled(format!("▲{p} "), Style::default().yellow()),
@@ -220,6 +222,26 @@ fn task_card(
             format!("reviews #{reviewed}"),
             Style::default().magenta(),
         ));
+    }
+    // The verdict, where it still describes the card: `done` with an upheld
+    // verdict has been read and signed for by another harness, and `open`
+    // with a sent-back one is a round of rework, not fresh work. Any other
+    // combination means a human moved the task since, and the badge would be
+    // telling yesterday's story.
+    match verdict {
+        Some(Verdict::Upheld) if task.status == Status::Done => {
+            if !badges.is_empty() {
+                badges.push(Span::raw("  "));
+            }
+            badges.push(Span::styled("upheld", Style::default().green()));
+        }
+        Some(Verdict::SentBack) if task.status == Status::Open => {
+            if !badges.is_empty() {
+                badges.push(Span::raw("  "));
+            }
+            badges.push(Span::styled("sent back", Style::default().yellow()));
+        }
+        _ => {}
     }
     if !badges.is_empty() {
         let mut line = vec![Span::raw("   ")];
@@ -807,6 +829,30 @@ fn render_task_detail(
         lines.push(Line::from(vec![
             Span::styled("recused    ", Style::default().magenta()),
             Span::styled(recusal.describe(), Style::default().magenta()),
+        ]));
+    }
+    if let Some(latest) = readiness.verdicts.last() {
+        let style = match latest.verdict {
+            Verdict::Upheld => Style::default().green(),
+            Verdict::SentBack => Style::default().yellow(),
+        };
+        let rounds = if readiness.verdicts.len() > 1 {
+            format!(", verdict {} on this work", readiness.verdicts.len())
+        } else {
+            String::new()
+        };
+        lines.push(Line::from(vec![
+            Span::styled("verdict    ", theme::focus_style()),
+            Span::styled(format!("{}{rounds}", latest.describe()), style),
+        ]));
+    }
+    for delivered in &readiness.delivered {
+        lines.push(Line::from(vec![
+            Span::styled("verdict    ", theme::focus_style()),
+            Span::raw(format!(
+                "{} on task {}, delivered by this review",
+                delivered.verdict, delivered.task_seq
+            )),
         ]));
     }
     for conflict in &readiness.conflicts {

@@ -265,7 +265,7 @@ stdio transport. Instructions string (returned from `server/discover`, and from 
 | `task_scope` | `seq`, `paths` | **(v1.1)** Holder-only. Declare files; answer with overlaps and what to do. |
 | `task_update` | `seq`, `status?` (`in_progress` only), `note` | Holder-only. Appends `note`/`status` event, renews lease. |
 | `task_split` | `seq`, `subtasks`, `sequential?` | **(v1.1)** Holder-only. File the pieces, make this task wait for them, release it. |
-| `task_complete` | `seq`, `result` | Holder-only. → `done`, clears lease, stores result. |
+| `task_complete` | `seq`, `result`, `verdict?` **(v1.7)** | Holder-only. → `done`, clears lease, stores result. On a review, `verdict` is required and acted on (§16). |
 | `task_fail` | `seq`, `reason` | Holder-only. → `failed`, clears lease, stores reason. |
 | `task_release` | `seq`, `reason` | **(v1.1)** Holder-only. → `open`, clears lease, keeps the task claimable. |
 | `mem_store` | `content`, `tags?`, `task_seq?` | Insert assertion with actor + project provenance. |
@@ -895,3 +895,89 @@ one task nobody can claim. That is reported rather than papered over — a
 `task_next` whose only remaining candidates are recused says so in as many
 words, because "nothing is open" would send the human away from the one thing
 that needs them, and the fix is to open a different tool rather than to wait.
+
+## 16. (v1.7) The verdict — the review closes its own loop
+
+§15 got the work in front of a second harness. It did not listen to the answer.
+A review ended in prose — a `result` line saying, somewhere in its own words,
+whether the work was any good — and then the loop dangled: a human had to read
+the review, decide that "the error path drops the lock" means *broken*, find
+the task it reviewed, reopen it, and carry the findings across by hand. Every
+other hand-off in hird files itself, on the observation that something an agent
+has to remember to do is something that does not happen. The one hand-off
+carrying the judgment was the one left manual.
+
+So a review ends in a **verdict**, enforced where the review ends:
+`task_complete` on a task that has recusal edges requires one, and refuses one
+everywhere else. Both refusals teach, because the agent reading them is
+mid-completion with nobody to ask. The two verdicts name their own
+consequences:
+
+- **`upheld`** — the work stands. The judged task stays `done`, an event lands
+  in its trail, and every surface (`task_list`, `task_get`, `hird show`, the
+  TUI) can now distinguish *done* from *done, and seen to be done* by a harness
+  that provably did not do it.
+- **`sent_back`** — the work does not stand. In the same transaction as the
+  review's completion, the judged task reopens with the reviewer's findings
+  appended to its brief, so the next claimant — its author included — is handed
+  exactly what must change without knowing to ask. The task still carries
+  `review = 1`, so finishing it again files a fresh review (§15's "previous
+  review still unfinished" guard has just cleared), and the loop runs round
+  after round until a review upholds.
+
+### Migration 7
+
+```sql
+CREATE TABLE task_verdicts (
+  id        TEXT PRIMARY KEY,
+  review_id TEXT NOT NULL REFERENCES tasks(id),
+  task_id   TEXT NOT NULL REFERENCES tasks(id),
+  verdict   TEXT NOT NULL CHECK (verdict IN ('upheld','sent_back')),
+  worker    TEXT NOT NULL DEFAULT '',   -- whose work was judged, at that moment
+  reviewer  TEXT NOT NULL,
+  at        TEXT NOT NULL,
+  CHECK (review_id <> task_id)
+);
+```
+
+Append-only, like the event trail: a task sent back and redone accumulates one
+row per round, which is what keeps the record honest about how many rounds
+there were. `worker` is resolved at delivery time by the same trail-reading
+`worker_of` recusal uses, so the name on a verdict does not move when the
+reopened task is later picked up by somebody else.
+
+### One invariant bends, knowingly
+
+"Terminal statuses only leave via a human reopen" was written when nothing but
+a human could be trusted to judge finished work. The recusal edge is what
+changed that: a `sent_back` comes from a harness the queue *proves* did not do
+the work, which is precisely the trust the human reopen was standing in for.
+The status machine itself is untouched — `done → open` via `Reopen` was always
+an edge; what changed is who may drive it. The human keeps the last word they
+always had, and the queue never overrules them: a verdict that lands on work a
+human already reopened, cancelled, or that failed since, goes on the record and
+does nothing else. Only work sitting exactly where the completion left it —
+`done` — is moved.
+
+### The record
+
+Because every verdict is delivered on the record — who judged, whose work,
+which round — the queue accumulates the one measurement it is uniquely placed
+to take: whose work survives a reading by a different model. `hird record`
+aggregates delivered verdicts per harness, both sides: verdicts received on its
+work (with a first-pass count over distinct tasks — the verdict that measures
+the work as delivered, before any rework), and verdicts handed out as a
+reviewer.
+
+It is a report, not a scheduler. Nothing routes work by it — dispatch does not
+read it, `task_next` does not prefer a harness by it — because the moment the
+queue starts steering work toward whoever scores well, agents are being graded
+by a table they can see and the table stops measuring anything. Reading it is
+the human's job, and what to do about a harness that ships rework is exactly
+the kind of call hird leaves to people.
+
+### Still twelve tools
+
+The verdict is a parameter on `task_complete`, not a thirteenth tool; the
+record is a CLI report off a table that writes itself. The MCP surface §6
+froze stays frozen.

@@ -294,9 +294,11 @@ fn review_body(
     }
     out.push_str(
         "\nRead the code, not the summary — the summary is what is under review. \
-         Complete this task with what you found, and `mem_store` anything durable. \
-         If the work is wrong, say so in the result and file the fix rather than \
-         making it here.\n",
+         Complete this task with what you found and a verdict: `upheld` if the work \
+         stands, `sent_back` if it does not. Sending it back reopens the work with \
+         your findings appended to its brief, so write the result as instructions \
+         for whoever redoes it — they will not see your session. Do not fix the \
+         work here either way, and `mem_store` anything durable you learn.\n",
     );
     out
 }
@@ -630,7 +632,12 @@ mod tests {
         // Once it has been dealt with, the next completion files a fresh one.
         db.tasks().claim(review, "claude-code:af31", TTL).unwrap();
         db.tasks()
-            .complete(review, "claude-code:af31", "looks right")
+            .complete_with(
+                review,
+                "claude-code:af31",
+                "looks right",
+                Some(crate::model::Verdict::Upheld),
+            )
             .unwrap();
         db.tasks().reopen(seq, "cli", "one more thing").unwrap();
         db.tasks().claim(seq, "codex:9f2c", TTL).unwrap();

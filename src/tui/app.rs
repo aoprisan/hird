@@ -11,7 +11,9 @@ use crate::config::Config;
 use crate::db::Db;
 use crate::glob;
 use crate::identity::ACTOR_TUI;
-use crate::model::{Assertion, Blocker, Conflict, Standing, Status, Task, TaskEvent, TaskSummary};
+use crate::model::{
+    Assertion, Blocker, Conflict, Standing, Status, Task, TaskEvent, TaskSummary, Verdict,
+};
 use crate::repo::{dispatch_waves, MemoryQuery, ProjectScope, Recalled};
 
 /// How often the database is re-read.
@@ -92,6 +94,10 @@ pub struct Readiness {
     pub conflicts: Vec<Conflict>,
     /// Harnesses this task is barred from, already written out.
     pub recusals: Vec<crate::model::Recusal>,
+    /// Verdicts delivered on this task's work, oldest first.
+    pub verdicts: Vec<crate::model::VerdictRecord>,
+    /// Verdicts this task delivered, when it is a completed review.
+    pub delivered: Vec<crate::model::VerdictRecord>,
 }
 
 /// A column of the kanban board.
@@ -204,6 +210,9 @@ pub struct App {
     /// Task numbers that are somebody's review, so the board can say so
     /// without opening each card.
     pub reviews: BTreeMap<i64, i64>,
+    /// Task number to the newest verdict delivered on its work, so the board
+    /// can tell "done" from "done, and seen to be done by another harness".
+    pub verdicts: BTreeMap<i64, Verdict>,
 
     // Swarm screen.
     pub agents: Vec<AgentRow>,
@@ -261,6 +270,7 @@ impl App {
             selected: [0; 4],
             unmet: BTreeMap::new(),
             reviews: BTreeMap::new(),
+            verdicts: BTreeMap::new(),
             agents: Vec::new(),
             waves: Vec::new(),
             swarm_selected: 0,
@@ -353,6 +363,7 @@ impl App {
         self.counts = db.tasks().counts(&scope)?;
         self.unmet = db.deps().unmet_map(&scope)?;
         self.reviews = db.recusals().reviews(&scope)?;
+        self.verdicts = db.verdicts().standing(&scope)?;
         self.waves = dispatch_waves(&self.tasks, &db.deps().edges(&scope)?);
         self.look(db);
         self.agents = agent_rows(
@@ -822,6 +833,8 @@ impl App {
             paths: db.scopes().for_task(seq)?,
             conflicts,
             recusals: db.recusals().for_task(seq)?,
+            verdicts: db.verdicts().for_task(seq)?,
+            delivered: db.verdicts().of_review(seq)?,
         };
         // Only what came from elsewhere: `learned` already holds this task's
         // own assertions, listed under their own heading.

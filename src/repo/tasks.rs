@@ -60,12 +60,15 @@ pub struct Dispatch {
     pub recused: Vec<(i64, crate::model::Recusal)>,
 }
 
-/// A finished task, and the review its completion filed, if any.
+/// A finished task, and everything its completion set in motion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finished {
     pub task: Task,
     /// The `seq` of the review task filed for this work.
     pub review: Option<i64>,
+    /// When the finished task was itself a review: the verdicts it delivered,
+    /// one per task it judged, each saying what the queue did about it.
+    pub verdicts: Vec<super::verdict::Delivered>,
 }
 
 /// Repository over `tasks` and `task_events`.
@@ -591,14 +594,32 @@ impl<'a> Tasks<'a> {
     /// Finish a held task successfully.
     ///
     /// Returns the task and, when it was marked for review and left something
-    /// behind to look at, the review task that was filed for it.
+    /// behind to look at, the review task that was filed for it. Refused when
+    /// the task is a review — a review must end in a verdict, via
+    /// [`Tasks::complete_with`].
     pub fn complete(&self, seq: i64, actor: &str, result: &str) -> Result<Finished> {
-        self.finish(seq, actor, Transition::Complete, result)
+        self.complete_with(seq, actor, result, None)
+    }
+
+    /// Finish a held task, delivering a verdict when the task is a review.
+    ///
+    /// A task with recusal edges is a review of the tasks it is recused from,
+    /// and completing it requires a verdict; a task without any must not
+    /// carry one. `sent_back` reopens the judged work with `result` — the
+    /// findings — appended to its brief, all in this same transaction.
+    pub fn complete_with(
+        &self,
+        seq: i64,
+        actor: &str,
+        result: &str,
+        verdict: Option<crate::model::Verdict>,
+    ) -> Result<Finished> {
+        self.finish(seq, actor, Transition::Complete, result, verdict)
     }
 
     /// Give up on a held task.
     pub fn fail(&self, seq: i64, actor: &str, reason: &str) -> Result<Finished> {
-        self.finish(seq, actor, Transition::Fail, reason)
+        self.finish(seq, actor, Transition::Fail, reason, None)
     }
 
     /// Whether finishing this task should file a review of its work.
@@ -615,6 +636,7 @@ impl<'a> Tasks<'a> {
         actor: &str,
         transition: Transition,
         result: &str,
+        verdict: Option<crate::model::Verdict>,
     ) -> Result<Finished> {
         let result = result.trim();
         if result.is_empty() {
@@ -647,6 +669,16 @@ impl<'a> Tasks<'a> {
             _ => EventKind::Failed,
         };
         insert_event(&tx, &task.id, &now, actor, kind, result)?;
+        // A completing review delivers its verdict — or is refused for not
+        // carrying one — inside this same transaction, so a verdict cannot
+        // land without its review going done, nor the reverse. Only on
+        // `complete`: failing a review means the reading did not happen, and
+        // work nobody has judged stays exactly as it was.
+        let verdicts = if transition == Transition::Complete {
+            super::verdict::deliver_in_tx(&tx, &task, verdict, actor, result)?
+        } else {
+            Vec::new()
+        };
         // Work marked for review puts itself in front of somebody else the
         // moment it is finished, because a review a human has to remember to
         // file is a review that does not happen. Only on `complete`: failed
@@ -659,7 +691,11 @@ impl<'a> Tasks<'a> {
         };
         let task = fetch_task_by_seq(&tx, seq)?.expect("finished row exists");
         tx.commit()?;
-        Ok(Finished { task, review })
+        Ok(Finished {
+            task,
+            review,
+            verdicts,
+        })
     }
 
     // ------------------------------------------------------------ human path

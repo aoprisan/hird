@@ -31,6 +31,7 @@
     <li><a href="#witness">What actually happened</a></li>
     <li><a href="#split">Splitting a task</a></li>
     <li><a href="#review">No agent reviews its own work</a></li>
+    <li><a href="#verdict">The review closes its own loop</a></li>
     <li><a href="#memory">Memory</a></li>
     <li class="sub"><a href="#recall">Recall</a></li>
     <li class="sub"><a href="#footing">Footing: when a fact went stale</a></li>
@@ -901,6 +902,76 @@ review = <span class="s">true</span></code></pre>
 </p>
 </section>
 
+<section id="verdict">
+<h2>The review closes its own loop</h2>
+
+<p>
+  Getting the work in front of a second harness is half the job. The other half
+  used to be yours: read the review, decide "the error path drops the lock"
+  means <em>broken</em>, find the task it reviewed, reopen it, paste the
+  findings somewhere. Every other hand-off in hird files itself; the one
+  carrying the judgment was left by hand.
+</p>
+
+<p>
+  So a review ends in a <strong>verdict</strong>, and completing one without it
+  is refused — the refusal says what the two verdicts are and what each will
+  do:
+</p>
+
+<pre><code>task_complete { <span class="s">"seq"</span>: 2, <span class="s">"result"</span>: <span class="s">"the file path still wins when both are
+                set; invert the precedence in load()"</span>,
+                <span class="s">"verdict"</span>: <span class="s">"sent_back"</span> }
+
+{ <span class="s">"seq"</span>: 2, <span class="s">"status"</span>: <span class="s">"done"</span>,
+  <span class="s">"verdicts"</span>: [<span class="s">"task 1 sent back — open again with your findings appended to
+                its brief"</span>],
+  <span class="s">"advice"</span>: <span class="s">"the work you sent back is open again carrying your findings; any
+             agent — its author included — may pick it up, and completing it
+             will file a fresh review. Tell the human the verdict."</span> }</code></pre>
+
+<p>
+  <code>sent_back</code> acts in the same transaction as the completion: the
+  judged work reopens with the findings appended to its brief, so the next
+  agent to claim it — its author included — is handed exactly what must change
+  without knowing to ask. The work still carries its review flag, so finishing
+  it again files a fresh review, recused the same way, and the loop runs round
+  after round until a review says <code>upheld</code>. Upholding is a
+  signature: the card now reads <em>done, and seen to be done</em> by a harness
+  that provably did not do the work.
+</p>
+
+<p>
+  You keep the last word you always had. A <code>sent_back</code> that lands on
+  work you already reopened or cancelled goes on the record and moves nothing —
+  the queue never overrules a human. You just stop being the loop's courier.
+</p>
+
+<p>
+  And because every verdict is delivered on the record — who judged, whose
+  work, which round — the queue accumulates the one measurement it is uniquely
+  placed to take:
+</p>
+
+<pre><code><span class="k">$ hird</span> record
+as worker       judged  upheld  sent back  first pass
+claude-code          3       3          0        2/2
+codex                2       1          1        0/1
+
+as reviewer     upheld  sent back
+claude-code          1          1
+codex                3          0</code></pre>
+
+<p>
+  That is whose work survives a reading by a different model, per harness, off
+  delivered verdicts and nothing else. It is a report, not a scheduler: nothing
+  routes work by it — the moment the queue started steering tasks toward
+  whoever scores well, agents would be graded by a table they can see, and the
+  table would stop measuring anything. What to do about a harness that ships
+  rework stays your call, made over a table instead of a hunch.
+</p>
+</section>
+
 <section id="memory">
 <h2>Memory</h2>
 
@@ -1117,6 +1188,7 @@ hird graph [--all-projects]
 hird scope &lt;seq&gt; [--path &lt;glob&gt;]… [--clear]
 hird agents [--all-projects]
 hird recuse &lt;seq&gt; --from &lt;seq&gt;,… [--reason &lt;text&gt;] | --clear
+hird record [--all-projects]
 hird recall &lt;seq&gt; [--limit N]
 hird mem add &lt;content&gt; [--tags a,b] [--task &lt;seq&gt;] [--path &lt;file&gt;]…
 hird mem search [query] [--limit N] [--all-projects] [--include-superseded]
@@ -1138,6 +1210,7 @@ hird db-path</code></pre>
     <tr><td><code>graph</code></td><td>The plan as dispatch waves: workable now, and what each later wave waits for.</td></tr>
     <tr><td><code>scope</code></td><td>Show or set the files a task is expected to touch. Warns about overlaps.</td></tr>
     <tr><td><code>agents</code></td><td>Who is working what, with a <code>!!</code> line wherever two agents are in the same files.</td></tr>
+    <tr><td><code>record</code></td><td>Each harness's track record under <a href="#verdict">review</a>: work upheld, work sent back, first-pass rate, and the verdicts it has handed out.</td></tr>
     <tr><td><code>recall</code></td><td>What earlier work already learned about a task, and why it is relevant — the same thing an agent is handed when it claims it.</td></tr>
     <tr><td><code>mem</code></td><td>Record and search assertions.</td></tr>
     <tr><td><code>tui</code></td><td>The live board.</td></tr>
@@ -1222,7 +1295,10 @@ hird db-path</code></pre>
   task looks open but nobody can actually claim it yet, and a magenta
   <code>reviews #4</code> badge when a task is somebody's
   <a href="#review">review</a> — which decides who can take it, and is exactly
-  the thing the title cannot tell you.
+  the thing the title cannot tell you. <a href="#verdict">Verdicts</a> mark the
+  cards they judged: a green <code>upheld</code> on done work a review signed
+  off, a yellow <code>sent back</code> on work that is open again because one
+  did not.
 </p>
 </section>
 
@@ -1242,7 +1318,7 @@ hird db-path</code></pre>
     <tr><td><code>task_scope</code></td><td>Say which files you will change; find out who else is in them.</td></tr>
     <tr><td><code>task_update</code></td><td>Record progress and renew the lease. Holder only.</td></tr>
     <tr><td><code>task_split</code></td><td>Break a task into pieces the other agents can work. Holder only.</td></tr>
-    <tr><td><code>task_complete</code></td><td>Finish, with a summary. Holder only.</td></tr>
+    <tr><td><code>task_complete</code></td><td>Finish, with a summary — and on a review, a <a href="#verdict">verdict</a>. Holder only.</td></tr>
     <tr><td><code>task_fail</code></td><td>Give up, with a reason. Holder only.</td></tr>
     <tr><td><code>task_release</code></td><td>Hand the task back unfinished, still claimable. Holder only.</td></tr>
     <tr><td><code>mem_store</code></td><td>Record one durable fact — or, said again word for word, confirm one.</td></tr>
@@ -1259,7 +1335,9 @@ hird db-path</code></pre>
   by you. <a href="#recall">Recall</a> did not need a thirteenth tool either — it
   rides along with the claim — and neither did
   <a href="#footing">footing</a>, which rides along with every fact hird serves.
-  Something an agent has to know to ask for is something it will not ask for.
+  The <a href="#verdict">verdict</a> is a parameter on <code>task_complete</code>,
+  not a thirteenth tool. Something an agent has to know to ask for is something
+  it will not ask for.
 </p>
 </section>
 
@@ -1378,6 +1456,10 @@ memory_footing = true</code></pre>
     <tr>
       <td><a href="https://github.com/aoprisan/hird/blob/main/examples/review.sh"><code>review.sh</code></a></td>
       <td>Work that files its own <a href="#review">review</a> when it finishes, scoped to what actually moved and barred to the harness that moved it. Makes its own throwaway git repository.</td>
+    </tr>
+    <tr>
+      <td><a href="https://github.com/aoprisan/hird/blob/main/examples/verdict.sh"><code>verdict.sh</code></a></td>
+      <td>The <a href="#verdict">sent-back loop</a>: a verdict reopens the work carrying the findings, the redo files a fresh review, and <code>hird record</code> keeps score. Makes its own throwaway git repository.</td>
     </tr>
     <tr>
       <td><a href="https://github.com/aoprisan/hird/blob/main/examples/protocol.sh"><code>protocol.sh</code></a></td>

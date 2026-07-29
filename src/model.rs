@@ -64,7 +64,8 @@ impl Status {
         }
     }
 
-    /// Terminal statuses can only leave via a human `reopen`.
+    /// Terminal statuses can only leave via `reopen` — a human's, or the one a
+    /// review's `sent_back` verdict performs on the work it judged.
     pub fn is_terminal(self) -> bool {
         matches!(self, Status::Done | Status::Failed | Status::Cancelled)
     }
@@ -84,7 +85,7 @@ impl Status {
     ///   ▲                │                    │        └─fail────► failed
     ///   │                └── lease expiry ────┘
     ///   │                └──── release ───────┘
-    ///   └──────── reopen (human) ◄── done|failed|cancelled
+    ///   └── reopen (human, or a review's sent_back) ◄── done|failed|cancelled
     /// open ──cancel (human)──► cancelled
     /// ```
     ///
@@ -570,6 +571,111 @@ impl Recusal {
             None => format!("not whoever works {what}; nobody has yet{why}"),
         }
     }
+}
+
+/// What a review concluded about the work it reviewed.
+///
+/// A review's `result` is prose; the verdict is the one bit of it the queue
+/// can act on. `Upheld` means the work stands — done, and seen to be done by a
+/// harness that did not do it. `SentBack` means it does not, and names its own
+/// consequence: the work returns to the pool carrying the reviewer's findings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Verdict {
+    Upheld,
+    SentBack,
+}
+
+impl Verdict {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Verdict::Upheld => "upheld",
+            Verdict::SentBack => "sent_back",
+        }
+    }
+}
+
+impl fmt::Display for Verdict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(self.as_str())
+    }
+}
+
+impl FromStr for Verdict {
+    type Err = UnknownVerdict;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim() {
+            "upheld" | "uphold" | "approve" | "approved" => Ok(Verdict::Upheld),
+            "sent_back" | "sent-back" | "send_back" | "send-back" | "needs_work" | "needs-work" => {
+                Ok(Verdict::SentBack)
+            }
+            other => Err(UnknownVerdict(other.to_string())),
+        }
+    }
+}
+
+#[derive(Debug, Clone, thiserror::Error)]
+#[error(
+    "unknown verdict {0:?}: say \"upheld\" if the work stands, or \"sent_back\" to return it \
+     to the pool carrying your findings"
+)]
+pub struct UnknownVerdict(pub String);
+
+/// One verdict, as delivered: which review said it, about whose work.
+///
+/// Append-only, like the event trail — a work task sent back and redone
+/// accumulates one of these per round, which is what makes the record honest
+/// about how many rounds there were.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerdictRecord {
+    pub review_seq: i64,
+    pub task_seq: i64,
+    pub verdict: Verdict,
+    /// Whoever's work was judged: the holder of record when the verdict
+    /// landed. Empty when nobody had worked the task.
+    pub worker: String,
+    /// Whoever delivered it.
+    pub reviewer: String,
+    pub at: String,
+}
+
+impl VerdictRecord {
+    /// One sentence, the way the board and `task_get` say it.
+    pub fn describe(&self) -> String {
+        match self.verdict {
+            Verdict::Upheld => format!(
+                "upheld by {} (review {})",
+                crate::identity::actor_harness(&self.reviewer),
+                self.review_seq
+            ),
+            Verdict::SentBack => format!(
+                "sent back by {} (review {})",
+                crate::identity::actor_harness(&self.reviewer),
+                self.review_seq
+            ),
+        }
+    }
+}
+
+/// One harness's standing in the verdict record, both as worker and reviewer.
+///
+/// Derived entirely from delivered verdicts, so it measures the one thing the
+/// queue can measure: whose work survives a reading by a different model.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessRecord {
+    pub harness: String,
+    /// Verdicts received on this harness's work, across every round.
+    pub judged: i64,
+    pub upheld: i64,
+    pub sent_back: i64,
+    /// Distinct tasks judged, and how many of them were upheld on the first
+    /// verdict — before any round of rework.
+    pub tasks_judged: i64,
+    pub first_pass: i64,
+    /// Verdicts this harness has delivered as a reviewer.
+    pub upheld_given: i64,
+    pub sent_back_given: i64,
 }
 
 /// One file an assertion was learned against, and what that file said then.
