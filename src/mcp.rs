@@ -35,9 +35,11 @@ use crate::footing;
 use crate::identity::{self, AgentId};
 use crate::model::{
     Assertion, Blocker, Conflict, Contention, Observed, Recusal, Standing, Status, Task, TaskEvent,
-    TaskSummary,
+    TaskSummary, Verdict, VerdictRecord,
 };
-use crate::repo::{Claim, Dispatch, MemoryQuery, NewAssertion, ProjectScope, Recalled, Subtask};
+use crate::repo::{
+    Claim, Delivered, Dispatch, MemoryQuery, NewAssertion, ProjectScope, Recalled, Subtask,
+};
 use crate::witness::{self, Witness};
 
 /// Number of trailing events `task_get` returns.
@@ -289,6 +291,14 @@ impl HirdMcp {
              distrusted, you are being read by somebody who was not in the room, which is \
              the whole reason the human is running more than one of us.\n\
              \n\
+             A review ends in a verdict, not just prose: `task_complete` on a review \
+             requires `verdict` — \"upheld\" if the work stands, \"sent_back\" if it does \
+             not. Sending work back acts immediately: the queue reopens it with your \
+             findings appended to its brief, any agent (its author included) may pick it \
+             up, and completing it again files a fresh review — so write the result as \
+             instructions for whoever redoes it. Upholding is a signature: the board marks \
+             the work upheld on your harness's word, on the record.\n\
+             \n\
              Memory: `mem_store` durable facts you learn — where something lives, why a \
              decision was made, what a command is — one assertion per call, in plain prose \
              that will still make sense to a different agent next week. Pass `task_seq` when \
@@ -455,8 +465,16 @@ pub struct TaskUpdateArgs {
 pub struct TaskCompleteArgs {
     /// The task number.
     pub seq: i64,
-    /// A summary of what was done, for the human reading the board.
+    /// A summary of what was done, for the human reading the board. On a
+    /// review, this is your findings — written for whoever redoes the work if
+    /// you send it back.
     pub result: String,
+    /// Required when the task is a review, refused when it is not.
+    /// "upheld" — the work stands. "sent_back" — the work is reopened with
+    /// your findings appended to its brief, and a fresh review will be filed
+    /// when it is completed again.
+    #[serde(default)]
+    pub verdict: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -534,6 +552,11 @@ struct TaskRow {
     /// shows unclaimable work as available is lying to whoever reads it.
     #[serde(skip_serializing_if = "Option::is_none")]
     recused_from_you: Option<String>,
+    /// True on `done` work a review has upheld: finished, and seen to be
+    /// finished by a harness that did not do it. Done without this just means
+    /// nobody has judged it — or a round of review is still under way.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    upheld: bool,
 }
 
 impl TaskRow {
@@ -542,10 +565,12 @@ impl TaskRow {
         show_project: bool,
         blocked_by: Vec<i64>,
         recused: Option<Recusal>,
+        verdict: Option<Verdict>,
     ) -> TaskRow {
         TaskRow {
             seq: summary.seq,
             title: summary.title,
+            upheld: summary.status == Status::Done && verdict == Some(Verdict::Upheld),
             status: summary.status,
             holder: summary.claimed_by,
             priority: summary.priority,
@@ -591,6 +616,14 @@ struct TaskDetail {
     /// True when finishing this task will file a review of what it changed.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     review_on_finish: bool,
+    /// The newest verdict delivered on this task's work, when a review has
+    /// judged it: who upheld it or sent it back, and after how many rounds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verdict: Option<String>,
+    /// When this task is a review that has been completed: what it concluded,
+    /// per task it judged.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    verdicts_delivered: Vec<String>,
     /// What earlier work in the same territory learned. Read before exploring.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     recalled: Vec<RecallRow>,
@@ -627,6 +660,10 @@ struct TaskContext {
     paths: Vec<String>,
     conflicts: Vec<Conflict>,
     recusals: Vec<Recusal>,
+    /// Verdicts delivered on this task's work, oldest first.
+    verdicts: Vec<VerdictRecord>,
+    /// Verdicts this task delivered, when it is a completed review.
+    delivered: Vec<VerdictRecord>,
     recalled: Vec<Recalled>,
     witness: Evidence,
     events: Vec<TaskEvent>,
@@ -657,6 +694,12 @@ impl TaskDetail {
             overlaps: describe_all(&context.conflicts),
             recused_from: context.recusals.iter().map(Recusal::describe).collect(),
             review_on_finish: task.review,
+            verdict: verdict_sentence(&context.verdicts),
+            verdicts_delivered: context
+                .delivered
+                .iter()
+                .map(|v| format!("task {}: {}", v.task_seq, v.verdict))
+                .collect(),
             recalled: recall_rows(context.recalled),
             witness: context.witness,
             events: context.events.into_iter().map(EventRow::from).collect(),
@@ -667,6 +710,22 @@ impl TaskDetail {
 /// Conflicts as the sentences a model can relay without rewording them.
 fn describe_all(conflicts: &[Conflict]) -> Vec<String> {
     conflicts.iter().map(Conflict::describe).collect()
+}
+
+/// The newest verdict on a task's work as one sentence, with the round count
+/// when there has been more than one — "sent back once already" is exactly the
+/// context the next reader of this task needs.
+fn verdict_sentence(verdicts: &[VerdictRecord]) -> Option<String> {
+    let latest = verdicts.last()?;
+    Some(if verdicts.len() > 1 {
+        format!(
+            "{}, verdict {} on this work",
+            latest.describe(),
+            verdicts.len()
+        )
+    } else {
+        latest.describe()
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -1042,6 +1101,10 @@ struct FinishResult {
     /// another agent will pick it up. Tell the human its number.
     #[serde(skip_serializing_if = "Option::is_none")]
     review_filed: Option<i64>,
+    /// When the finished task was a review: what your verdict did, per task
+    /// judged. Relay these sentences to the human as they stand.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    verdicts: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     advice: Option<String>,
 }
@@ -1053,16 +1116,27 @@ impl FinishResult {
         result: String,
         witness: Evidence,
         review_filed: Option<i64>,
+        delivered: &[Delivered],
     ) -> FinishResult {
         // A filed review outranks the witness's advice: it is the thing the
         // agent has to say out loud, and it is about to stop being this
-        // agent's business entirely.
-        let advice = match review_filed {
-            Some(review) => Some(format!(
+        // agent's business entirely. A delivered verdict outranks the witness
+        // for the same reason: the queue already acted on it.
+        let advice = match (review_filed, delivered) {
+            (Some(review), _) => Some(format!(
                 "this work was marked for review, so task {review} is now open for an agent in \
                  another harness — you cannot take it yourself. Tell the human."
             )),
-            None => witness.advice(),
+            (None, [.., _]) if delivered.iter().any(|d| d.reopened) => Some(
+                "the work you sent back is open again carrying your findings; any agent — \
+                 its author included — may pick it up, and completing it will file a fresh \
+                 review. Tell the human the verdict."
+                    .to_string(),
+            ),
+            (None, [.., _]) => Some(
+                "your verdict is on the record. Tell the human what you concluded.".to_string(),
+            ),
+            (None, []) => witness.advice(),
         };
         FinishResult {
             seq,
@@ -1071,6 +1145,7 @@ impl FinishResult {
             advice,
             witness,
             review_filed,
+            verdicts: delivered.iter().map(Delivered::describe).collect(),
         }
     }
 }
@@ -1172,7 +1247,7 @@ impl HirdMcp {
         let show_project = scope.is_all();
 
         let actor = self.actor();
-        let (released, tasks, unmet, recused) = self.with_db(|db| {
+        let (released, tasks, unmet, recused, standing) = self.with_db(|db| {
             let released = db
                 .tasks()
                 .sweep_leases()
@@ -1203,6 +1278,7 @@ impl HirdMcp {
                 listed,
                 db.deps().unmet_map(&scope).unwrap_or_default(),
                 recused,
+                db.verdicts().standing(&scope).unwrap_or_default(),
             )
         });
         let tasks = tasks.map_err(stringify)?;
@@ -1216,7 +1292,8 @@ impl HirdMcp {
                 .map(|t| {
                     let blocked = unmet.get(&t.seq).cloned().unwrap_or_default();
                     let barred = recused.get(&t.seq).cloned();
-                    TaskRow::from_summary(t, show_project, blocked, barred)
+                    let verdict = standing.get(&t.seq).copied();
+                    TaskRow::from_summary(t, show_project, blocked, barred, verdict)
                 })
                 .collect(),
             released,
@@ -1243,6 +1320,8 @@ impl HirdMcp {
                     paths: db.scopes().for_task(args.seq)?,
                     conflicts,
                     recusals: db.recusals().for_task(args.seq)?,
+                    verdicts: db.verdicts().for_task(args.seq)?,
+                    delivered: db.verdicts().of_review(args.seq)?,
                     recalled: self.recall(db, args.seq, recall_limit),
                     witness: self.evidence(db, args.seq),
                     events: db.tasks().events(&task.id, EVENT_WINDOW)?,
@@ -1451,6 +1530,7 @@ impl HirdMcp {
             evidence,
             // Releasing is not finishing, so nothing is filed to review.
             None,
+            &[],
         ))
     }
 
@@ -1501,12 +1581,22 @@ impl HirdMcp {
         })
     }
 
-    /// Finish a task you hold, with a summary of what was done.
+    /// Finish a task you hold, with a summary of what was done. A review must
+    /// also carry a verdict: upheld, or sent_back.
     #[tool(name = "task_complete")]
     async fn task_complete(
         &self,
         Parameters(args): Parameters<TaskCompleteArgs>,
     ) -> Result<String, String> {
+        let verdict = match args
+            .verdict
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            Some(raw) => Some(raw.parse::<Verdict>().map_err(|e| e.to_string())?),
+            None => None,
+        };
         let actor = self.actor();
         let (task, evidence) = self
             .with_db(|db| {
@@ -1517,7 +1607,9 @@ impl HirdMcp {
                 // statements about the tree it is leaving behind, not the one
                 // it found halfway through its own edits.
                 footing::settle(db, self.footing(), args.seq);
-                let task = db.tasks().complete(args.seq, &actor, &args.result)?;
+                let task = db
+                    .tasks()
+                    .complete_with(args.seq, &actor, &args.result, verdict)?;
                 Ok::<_, Error>((task, evidence))
             })
             .map_err(stringify)?;
@@ -1527,6 +1619,7 @@ impl HirdMcp {
             task.task.result.unwrap_or_default(),
             evidence,
             task.review,
+            &task.verdicts,
         ))
     }
 
@@ -1551,6 +1644,7 @@ impl HirdMcp {
             task.task.result.unwrap_or_default(),
             evidence,
             task.review,
+            &task.verdicts,
         ))
     }
 
@@ -1926,6 +2020,7 @@ mod tests {
             s.task_complete(Parameters(TaskCompleteArgs {
                 seq,
                 result: "r".into(),
+                verdict: None,
             }))
             .await
             .unwrap_err(),
@@ -1949,6 +2044,7 @@ mod tests {
             s.task_complete(Parameters(TaskCompleteArgs {
                 seq: done,
                 result: "merged".into(),
+                verdict: None,
             }))
             .await,
         );
@@ -1966,6 +2062,134 @@ mod tests {
         );
         assert_eq!(out["status"], "failed");
         assert_eq!(out["result"], "no credentials");
+    }
+
+    /// Work another harness finished and this one reviews: the completion is
+    /// refused until it carries a verdict, and `sent_back` puts the work back
+    /// on the board carrying the findings.
+    async fn reviewed_work(s: &HirdMcp) -> (i64, i64) {
+        let seq = seed(s, "port the loader", "keep the precedence");
+        let review = s
+            .with_db(|db| {
+                db.tasks().set_review(seq, true, "cli")?;
+                db.scopes().declare(
+                    seq,
+                    &["src/loader.rs".to_string()],
+                    "cli",
+                    crate::repo::OnConflict::Report,
+                )?;
+                db.tasks()
+                    .claim(seq, "codex:9f2c", Config::default().lease_ttl())?;
+                db.tasks().complete(seq, "codex:9f2c", "ported")
+            })
+            .unwrap()
+            .review
+            .expect("a review was filed");
+        s.task_claim(Parameters(just(review))).await.unwrap();
+        (seq, review)
+    }
+
+    #[tokio::test]
+    async fn a_review_must_end_in_a_verdict_and_sent_back_reopens_the_work() {
+        let s = server();
+        let (seq, review) = reviewed_work(&s).await;
+
+        let err = s
+            .task_complete(Parameters(TaskCompleteArgs {
+                seq: review,
+                result: "the empty case is missed".into(),
+                verdict: None,
+            }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("upheld"), "{err}");
+        assert!(err.contains("sent_back"), "{err}");
+
+        let out = parse(
+            s.task_complete(Parameters(TaskCompleteArgs {
+                seq: review,
+                result: "the empty case is missed; handle it in parse()".into(),
+                verdict: Some("sent_back".into()),
+            }))
+            .await,
+        );
+        assert_eq!(out["status"], "done");
+        assert!(
+            out["verdicts"][0].as_str().unwrap().contains("sent back"),
+            "{out}"
+        );
+        assert!(
+            out["advice"].as_str().unwrap().contains("findings"),
+            "{out}"
+        );
+
+        let detail = parse(s.task_get(Parameters(SeqArgs { seq })).await);
+        assert_eq!(detail["status"], "open");
+        assert!(
+            detail["body"].as_str().unwrap().contains("empty case"),
+            "the findings travel in the brief: {detail}"
+        );
+        assert!(
+            detail["verdict"]
+                .as_str()
+                .unwrap()
+                .contains("sent back by claude-code"),
+            "{detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_upheld_verdict_marks_the_work_on_the_board() {
+        let s = server();
+        let (seq, review) = reviewed_work(&s).await;
+        parse(
+            s.task_complete(Parameters(TaskCompleteArgs {
+                seq: review,
+                result: "read it; it holds".into(),
+                verdict: Some("upheld".into()),
+            }))
+            .await,
+        );
+
+        let list = parse(
+            s.task_list(Parameters(TaskListArgs {
+                status: None,
+                all_projects: None,
+            }))
+            .await,
+        );
+        let row = list["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["seq"] == seq)
+            .unwrap();
+        assert_eq!(row["upheld"], true, "{row}");
+
+        let detail = parse(s.task_get(Parameters(SeqArgs { seq: review })).await);
+        assert!(
+            detail["verdicts_delivered"][0]
+                .as_str()
+                .unwrap()
+                .contains("upheld"),
+            "{detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_verdict_on_ordinary_work_is_refused() {
+        let s = server();
+        let seq = seed(&s, "t", "");
+        s.task_claim(Parameters(just(seq))).await.unwrap();
+        let err = s
+            .task_complete(Parameters(TaskCompleteArgs {
+                seq,
+                result: "done".into(),
+                verdict: Some("upheld".into()),
+            }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("not a review"), "{err}");
     }
 
     #[tokio::test]

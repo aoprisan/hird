@@ -992,6 +992,111 @@ fn a_reviewed_task_shows_who_cannot_take_the_review() {
     assert!(review.contains("files     src/config.rs"), "{review}");
 }
 
+/// The loop closes without the human carrying anything: the review's verdict
+/// sends the work back, the findings arrive in the brief, the redo files a
+/// fresh review, and the record keeps score on both sides.
+#[test]
+fn a_sent_back_verdict_reopens_the_work_and_the_record_keeps_score() {
+    let sandbox = Sandbox::new();
+    sandbox.write_file("src/config.rs", "fn load() {}\n");
+    sandbox.git_init();
+    sandbox.run(&[
+        "add",
+        "Port the loader",
+        "--review",
+        "--path",
+        "src/config.rs",
+    ]);
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex.claim(1);
+    sandbox.write_file("src/config.rs", "fn load() { ported() }\n");
+    codex
+        .call(
+            "task_complete",
+            serde_json::json!({"seq": 1, "result": "ported"}),
+        )
+        .unwrap();
+    codex.shutdown();
+
+    let mut claude = McpSession::start(&sandbox, "claude-code");
+    claude.claim(2);
+    // Prose alone does not finish a review; the refusal says what will.
+    let err = claude
+        .call(
+            "task_complete",
+            serde_json::json!({"seq": 2, "result": "broken"}),
+        )
+        .unwrap_err();
+    assert!(err.contains("verdict"), "{err}");
+    assert!(err.contains("sent_back"), "{err}");
+    let out = claude
+        .call(
+            "task_complete",
+            serde_json::json!({
+                "seq": 2,
+                "result": "misses the empty case; handle it in load()",
+                "verdict": "sent_back"
+            }),
+        )
+        .unwrap();
+    assert!(
+        out["verdicts"][0].as_str().unwrap().contains("sent back"),
+        "{out}"
+    );
+    claude.shutdown();
+
+    // The work is open again, and the findings travelled in the brief.
+    let shown = sandbox.run(&["show", "1"]);
+    assert!(shown.contains("status    open"), "{shown}");
+    assert!(
+        shown.contains("Sent back by review 2 (claude-code)"),
+        "{shown}"
+    );
+    assert!(shown.contains("misses the empty case"), "{shown}");
+    assert!(
+        shown.contains("verdict   sent back by claude-code (review 2)"),
+        "{shown}"
+    );
+
+    // The author redoes their own work; finishing files a fresh review.
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex.claim(1);
+    sandbox.write_file("src/config.rs", "fn load() { ported_fully() }\n");
+    codex
+        .call(
+            "task_complete",
+            serde_json::json!({"seq": 1, "result": "empty case handled"}),
+        )
+        .unwrap();
+    codex.shutdown();
+    assert!(
+        sandbox
+            .run(&["ls"])
+            .matches("Review: Port the loader")
+            .count()
+            >= 2,
+        "a fresh review for round two"
+    );
+
+    // And the record kept score, on both sides of the verdict.
+    let record = sandbox.run(&["record"]);
+    assert!(record.contains("as worker"), "{record}");
+    assert!(record.contains("codex"), "{record}");
+    assert!(record.contains("as reviewer"), "{record}");
+    assert!(record.contains("claude-code"), "{record}");
+}
+
+/// Nothing on the record reads as an invitation, not an error.
+#[test]
+fn the_record_with_no_verdicts_says_how_to_get_some() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["add", "t"]);
+    let record = sandbox.run(&["record"]);
+    assert!(record.contains("no verdicts on record"), "{record}");
+    assert!(record.contains("--review"), "{record}");
+}
+
 /// The bar is a first-class thing a human can set and lift, not something only
 /// the review machinery can produce.
 #[test]

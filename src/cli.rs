@@ -91,6 +91,13 @@ pub enum Command {
     /// This is what makes a review a review: the queue refuses the claim from
     /// the harness that did the work, and dispatch routes around it.
     Recuse(RecuseArgs),
+    /// Show each harness's track record under review: verdicts received on
+    /// its work, its first-pass rate, and the verdicts it has handed out.
+    ///
+    /// Derived entirely from delivered verdicts, so it measures the one thing
+    /// the queue can measure — whose work survives a reading by a different
+    /// model. A report, not a scheduler: nothing routes work by it.
+    Record(ScopeFilterArgs),
     /// Show what earlier work already learned about a task, and why it is
     /// relevant. This is what an agent is handed when it claims the task.
     Recall {
@@ -376,6 +383,7 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
             agents(&db, &scope_of(&project, &config, args.all_projects), out)
         }
         Command::Recuse(args) => recuse(&db, args, out),
+        Command::Record(args) => record(&db, &scope_of(&project, &config, args.all_projects), out),
     }
 }
 
@@ -685,6 +693,57 @@ fn recuse(db: &Db, args: &RecuseArgs, out: &mut impl Write) -> anyhow::Result<()
     }
     for recusal in &recusals {
         writeln!(out, "{}", recusal.describe())?;
+    }
+    Ok(())
+}
+
+/// `hird record`: each harness's standing in the verdict record.
+fn record(db: &Db, scope: &ProjectScope, out: &mut impl Write) -> anyhow::Result<()> {
+    let records = db.verdicts().record(scope)?;
+    let workers: Vec<_> = records.iter().filter(|r| r.judged > 0).collect();
+    let reviewers: Vec<_> = records
+        .iter()
+        .filter(|r| r.upheld_given + r.sent_back_given > 0)
+        .collect();
+    if workers.is_empty() && reviewers.is_empty() {
+        writeln!(
+            out,
+            "no verdicts on record — file work with `hird add --review` and the reviews \
+             that finishing it files will deliver them"
+        )?;
+        return Ok(());
+    }
+    if !workers.is_empty() {
+        writeln!(
+            out,
+            "{:<14} {:>7} {:>7} {:>10} {:>11}",
+            "as worker", "judged", "upheld", "sent back", "first pass"
+        )?;
+        for r in workers {
+            writeln!(
+                out,
+                "{:<14} {:>7} {:>7} {:>10} {:>11}",
+                r.harness,
+                r.judged,
+                r.upheld,
+                r.sent_back,
+                format!("{}/{}", r.first_pass, r.tasks_judged)
+            )?;
+        }
+    }
+    if !reviewers.is_empty() {
+        writeln!(
+            out,
+            "\n{:<14} {:>7} {:>10}",
+            "as reviewer", "upheld", "sent back"
+        )?;
+        for r in reviewers {
+            writeln!(
+                out,
+                "{:<14} {:>7} {:>10}",
+                r.harness, r.upheld_given, r.sent_back_given
+            )?;
+        }
     }
     Ok(())
 }
@@ -1023,6 +1082,24 @@ fn show(db: &Db, seq: i64, config: &Config, out: &mut impl Write) -> anyhow::Res
     }
     for recusal in db.recusals().for_task(seq)? {
         writeln!(out, "recused   {}", recusal.describe())?;
+    }
+    // Two sides of the same table: what reviews concluded about this work,
+    // and — when this task is itself a review — what it concluded.
+    let judged = db.verdicts().for_task(seq)?;
+    if let Some(latest) = judged.last() {
+        let rounds = if judged.len() > 1 {
+            format!(", verdict {} on this work", judged.len())
+        } else {
+            String::new()
+        };
+        writeln!(out, "verdict   {}{rounds}", latest.describe())?;
+    }
+    for delivered in db.verdicts().of_review(seq)? {
+        writeln!(
+            out,
+            "verdict   {} on task {}, delivered by this review",
+            delivered.verdict, delivered.task_seq
+        )?;
     }
     for conflict in &conflicts {
         writeln!(out, "overlap   {}", conflict.describe())?;

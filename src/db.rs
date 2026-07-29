@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 use rusqlite::Connection;
 
 use crate::error::Result;
-use crate::repo::{Deps, Footings, Memory, Plans, Recall, Recusals, Scopes, Tasks, Witnessed};
+use crate::repo::{
+    Deps, Footings, Memory, Plans, Recall, Recusals, Scopes, Tasks, Verdicts, Witnessed,
+};
 
 /// Numbered migrations, applied in order and recorded in `meta.schema_version`.
 const MIGRATIONS: &[&str] = &[
@@ -178,6 +180,26 @@ CREATE INDEX idx_task_recusals_from ON task_recusals(from_task_id);
 -- 1 when finishing this task should put its work in front of somebody else.
 ALTER TABLE tasks ADD COLUMN review INTEGER NOT NULL DEFAULT 0;
 "#,
+    // 7 — the verdict: what a review concluded, on the record, acted on
+    r#"
+CREATE TABLE task_verdicts (
+  id        TEXT PRIMARY KEY,
+  -- The review that delivered the verdict.
+  review_id TEXT NOT NULL REFERENCES tasks(id),
+  -- The work it judged.
+  task_id   TEXT NOT NULL REFERENCES tasks(id),
+  verdict   TEXT NOT NULL CHECK (verdict IN ('upheld','sent_back')),
+  -- Whoever's work was judged: the holder of record when the verdict landed.
+  worker    TEXT NOT NULL DEFAULT '',
+  -- Whoever delivered it.
+  reviewer  TEXT NOT NULL,
+  at        TEXT NOT NULL,
+  CHECK (review_id <> task_id)
+);
+
+CREATE INDEX idx_task_verdicts_task ON task_verdicts(task_id);
+CREATE INDEX idx_task_verdicts_review ON task_verdicts(review_id);
+"#,
 ];
 
 /// An open connection to the hird database.
@@ -275,6 +297,11 @@ impl Db {
     /// Who must not work a task, because of what they already worked.
     pub fn recusals(&self) -> Recusals<'_> {
         Recusals::new(&self.conn)
+    }
+
+    /// What reviews concluded, and what the queue did about it.
+    pub fn verdicts(&self) -> Verdicts<'_> {
+        Verdicts::new(&self.conn)
     }
 
     /// The memory relevant to a task, derived from the other three.

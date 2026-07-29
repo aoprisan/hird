@@ -11,6 +11,7 @@ mod recall;
 mod recusal;
 mod scope;
 mod tasks;
+mod verdict;
 mod witness;
 
 pub use deps::{dispatch_waves, Deps};
@@ -21,6 +22,7 @@ pub use recall::{Recall, RecallReason, Recalled};
 pub use recusal::Recusals;
 pub use scope::{OnConflict, Scopes};
 pub use tasks::{Claim, Dispatch, Finished, Subtask, SweepOutcome, Tasks};
+pub use verdict::{Delivered, Verdicts};
 pub use witness::{Baseline, Witnessed};
 
 /// Pattern validation, shared with the plan format so a plan file is refused
