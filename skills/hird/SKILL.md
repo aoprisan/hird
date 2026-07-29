@@ -34,6 +34,12 @@ agents and a human may be using it at the same time.
 
 - Call `task_complete` with a useful result summary after the requested work is
   implemented and verified.
+- If the task is a review (it is recused from the work it judges),
+  `task_complete` also requires a `verdict`: `"upheld"` if the work stands, or
+  `"sent_back"` to reopen the judged work with your findings appended to its
+  brief. When sending back, write the result as instructions for whoever
+  redoes the work — they will not see your session. Do not fix reviewed work
+  inside the review.
 - Call `task_fail` only when the task itself failed.
 - Call `task_release` when you cannot continue but the task remains valid.
 - If one task is really several independently workable jobs, call `task_split`

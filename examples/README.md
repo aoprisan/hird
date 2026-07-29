@@ -17,6 +17,7 @@ installed, but nothing requires it.
 | [`witness.sh`](witness.sh) | **What actually happened** — two agents, one checkout, one file, and the warning that arrives while there is still time to act on it. |
 | [`footing.sh`](footing.sh) | **Memory that knows when it went stale** — a fact recorded against a file, that file rewritten, and every later reader told so without anybody curating anything. |
 | [`review.sh`](review.sh) | **No agent reviews its own work** — finishing files the review, scoped to what actually moved, and the queue refuses it to the harness that did it. |
+| [`verdict.sh`](verdict.sh) | **The review closes its own loop** — a `sent_back` verdict reopens the work carrying the findings, the redo files a fresh review, and `hird record` keeps score per harness. |
 | [`protocol.sh`](protocol.sh) | **MCP 2026-07-28 on the wire** — `server/discover`, a task worked without ever calling `initialize`, and a harness that never set `HIRD_HARNESS` named by its own client. |
 | [`task-body.md`](task-body.md) | A task body worth writing, for `--body-file`. |
 | [`config.toml`](config.toml) | Every configuration key, annotated, at its default. |
@@ -30,6 +31,7 @@ installed, but nothing requires it.
 ./examples/witness.sh          # needs git; makes its own throwaway repository
 ./examples/footing.sh          # likewise
 ./examples/review.sh           # likewise
+./examples/verdict.sh          # likewise
 ./examples/protocol.sh         # needs neither
 ```
 
@@ -49,7 +51,7 @@ next session in the script is handed something else.
 a session on MCP 2026-07-28, which has no handshake at all, and every request
 carries in `_meta` what `initialize` used to say once.
 
-`witness.sh`, `footing.sh` and `review.sh` need more than that. To show two agents taking turns in one file
+`witness.sh`, `footing.sh`, `review.sh` and `verdict.sh` need more than that. To show two agents taking turns in one file
 it has to keep both sessions open and edit the tree *between* their calls, so it
 uses `session_open` / `session_call` instead: a pair of fifos per session, and
 every call waiting for its own answer. A heredoc will not do it — a script

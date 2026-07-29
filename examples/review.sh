@@ -76,8 +76,17 @@ session_open claude claude-code
 # rather than as the brief; and the original brief underneath it.
 session_call claude 1 task_claim "{\"seq\": $((port + 1))}"
 
+say "prose alone does not finish a review"
+
+# A review ends in a verdict — the one bit of it the queue can act on. The
+# refusal says what the two verdicts are and what each will do.
 session_call claude 2 task_complete \
     "{\"seq\": $((port + 1)), \"result\": \"read src/config.rs; precedence is as claimed\"}"
+
+say "upheld: the work stands, on the record"
+
+session_call claude 3 task_complete \
+    "{\"seq\": $((port + 1)), \"result\": \"read src/config.rs; precedence is as claimed\", \"verdict\": \"upheld\"}"
 session_close claude
 
 say "hird show — the review, and what it was recused from"
@@ -103,6 +112,10 @@ Nothing here is a scheduler. A recusal says who may *not* take a task and never
 who must. Run only one harness and the review simply sits there unclaimable —
 which the board says plainly, because that is a fact about your setup and not
 something to paper over.
+
+And the review ended in a verdict, not just prose: the work is now marked
+upheld on claude-code's word. The other verdict — sent_back — is where the
+loop closes without you carrying anything: ./examples/verdict.sh
 
 By hand:                        HIRD_DB=$HIRD_DB $HIRD_BIN recuse <seq> --from <seq>
 In a plan file:                 review = true               (see plan.toml)

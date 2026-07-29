@@ -33,7 +33,12 @@ confirm it is to say it again.
 And because the point of running three different models is that they are not
 the same model, work can be marked for review: finishing it files a review of
 exactly what changed, and the queue refuses that review to the harness that did
-the changing. No agent gets to be the last word on its own work.
+the changing. No agent gets to be the last word on its own work — and the
+review is not the last word either, because it ends in a verdict the queue
+acts on: work that is *sent back* reopens carrying the reviewer's findings,
+the redo files a fresh review, and the loop runs until one is *upheld*, with
+you nowhere in the transport. Every verdict lands on a record, so `hird
+record` can tell you whose work survives a reading by a different model.
 
 No daemon. No server. No accounts.
 
@@ -674,6 +679,61 @@ Nothing is filed for work the witness saw no trace of, for work that `failed` �
 there is nothing to check, and whether the attempt is worth reading is your
 call — or while an earlier review of the same work is still open.
 
+## The review closes its own loop
+
+Getting the work in front of a second harness is half the job. The other half
+used to be yours: read the review, decide "the error path drops the lock"
+means *broken*, find the task it reviewed, reopen it, paste the findings
+somewhere. Every other hand-off in hird files itself; the one carrying the
+judgment was left by hand.
+
+So a review ends in a **verdict**, and completing one without it is refused:
+
+```
+task_complete { seq: 2, result: "the file path still wins when both are set;
+                                 invert the precedence in load()",
+                verdict: "sent_back" }
+
+{ "seq": 2, "status": "done",
+  "verdicts": ["task 1 sent back — open again with your findings appended to
+                its brief"],
+  "advice": "the work you sent back is open again carrying your findings; any
+             agent — its author included — may pick it up, and completing it
+             will file a fresh review. Tell the human the verdict." }
+```
+
+`sent_back` acts in the same transaction as the completion: the work reopens
+with the findings appended to its brief, so the next agent to claim it — its
+author included — is handed exactly what must change without knowing to ask.
+The work still carries its `review` flag, so finishing it again files a fresh
+review, recused the same way, and the loop runs round after round until a
+review says `upheld`. Upholding is a signature: the card now reads **done,
+and seen to be done** by a harness that provably did not do the work.
+
+The human keeps the last word they always had — a `sent_back` that lands on
+work you already reopened or cancelled changes nothing, it just goes on the
+record — but they stop being the loop's courier.
+
+And because every verdict is delivered on the record — who judged, whose
+work, which round — the queue accumulates the one measurement it is uniquely
+placed to take:
+
+```
+$ hird record
+as worker       judged  upheld  sent back  first pass
+claude-code          3       3          0        2/2
+codex                2       1          1        0/1
+
+as reviewer     upheld  sent back
+claude-code          1          1
+codex                3          0
+```
+
+That is whose work survives a reading by a different model, per harness, off
+delivered verdicts and nothing else. It is a report, not a scheduler: nothing
+routes work by it, and what to do about a harness that ships rework is a call
+hird leaves to you — now made over a table instead of a hunch.
+
 ## Memory
 
 The queue is for work; memory is for what the work taught you. Agents call
@@ -856,6 +916,7 @@ hird graph [--all-projects]
 hird scope <seq> [--path <glob>]… [--clear]
 hird agents [--all-projects]
 hird recuse <seq> --from <seq>,… [--reason <text>] | --clear
+hird record [--all-projects]
 hird recall <seq> [--limit N]
 hird mem add <content> [--tags a,b] [--task <seq>] [--path <file>]…
 hird mem search [query] [--limit N] [--all-projects] [--include-superseded]
@@ -922,7 +983,9 @@ moving under them.
 Cards on the queue board carry a yellow `waits #1 #3` badge when a task looks
 open but nobody can actually claim it yet, and a magenta `reviews #4` badge when
 a task is somebody's review — which decides who can take it, and is exactly the
-thing you cannot tell from the title.
+thing you cannot tell from the title. Verdicts mark the cards they judged: a
+green `upheld` on done work that a review signed off, a yellow `sent back` on
+work that is open again because one did not.
 
 ## Projects
 
@@ -1024,6 +1087,7 @@ points `HIRD_DB` at a throwaway file, so running one cannot disturb your board.
 ./examples/witness.sh           # two agents in one file, caught in the act
 ./examples/footing.sh           # a fact, the file it came from, and that file rewritten
 ./examples/review.sh            # work that files its own review, barred to whoever did it
+./examples/verdict.sh           # the sent-back loop, and the per-harness record it leaves
 ./examples/protocol.sh          # MCP 2026-07-28 on the wire: no handshake, and who the client says it is
 ```
 
