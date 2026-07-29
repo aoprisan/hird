@@ -87,7 +87,10 @@ fn path_contains(dir: &Path, path_var: Option<&std::ffi::OsStr>) -> bool {
 
 fn skill_paths(home: &Path) -> [(&'static str, PathBuf); 3] {
     [
-        ("Codex", home.join(".agents/skills/hird/SKILL.md")),
+        (
+            "Codex and OpenCode",
+            home.join(".agents/skills/hird/SKILL.md"),
+        ),
         ("Claude Code", home.join(".claude/skills/hird/SKILL.md")),
         ("GitHub Copilot", home.join(".copilot/skills/hird/SKILL.md")),
     ]
@@ -187,12 +190,15 @@ mod tests {
     }
 
     #[test]
-    fn skill_targets_cover_codex_claude_code_and_copilot() {
+    fn skill_targets_cover_codex_claude_code_copilot_and_opencode() {
         let home = Path::new("/home/developer");
         assert_eq!(
             skill_paths(home),
             [
-                ("Codex", home.join(".agents/skills/hird/SKILL.md")),
+                (
+                    "Codex and OpenCode",
+                    home.join(".agents/skills/hird/SKILL.md"),
+                ),
                 ("Claude Code", home.join(".claude/skills/hird/SKILL.md"),),
                 ("GitHub Copilot", home.join(".copilot/skills/hird/SKILL.md"),),
             ]

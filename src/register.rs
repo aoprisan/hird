@@ -32,6 +32,9 @@ pub enum Harness {
     Copilot,
     /// The Copilot CLI — in `~/.copilot/mcp-config.json`.
     CopilotCli,
+    /// OpenCode — in `${XDG_CONFIG_HOME:-~/.config}/opencode/opencode.json`.
+    #[value(name = "opencode")]
+    OpenCode,
 }
 
 /// How a harness's config file is shaped.
@@ -54,6 +57,7 @@ impl Harness {
             Harness::ClaudeCode => "claude-code",
             Harness::Codex => "codex",
             Harness::Copilot | Harness::CopilotCli => "copilot",
+            Harness::OpenCode => "opencode",
         }
     }
 
@@ -64,6 +68,7 @@ impl Harness {
             Harness::Codex => "the Codex CLI",
             Harness::Copilot => "Copilot in VS Code",
             Harness::CopilotCli => "the Copilot CLI",
+            Harness::OpenCode => "OpenCode",
         }
     }
 
@@ -76,6 +81,16 @@ impl Harness {
             Harness::Codex => identity::home().join(".codex").join("config.toml"),
             Harness::Copilot => cwd.join(".vscode").join("mcp.json"),
             Harness::CopilotCli => identity::home().join(".copilot").join("mcp-config.json"),
+            Harness::OpenCode => {
+                let dir = identity::config_dir().join("opencode");
+                let json = dir.join("opencode.json");
+                let jsonc = dir.join("opencode.jsonc");
+                if json.exists() || !jsonc.exists() {
+                    json
+                } else {
+                    jsonc
+                }
+            }
         }
     }
 
@@ -87,6 +102,7 @@ impl Harness {
             Harness::Copilot => Shape::Json {
                 container: "servers",
             },
+            Harness::OpenCode => Shape::Json { container: "mcp" },
             Harness::Codex => Shape::Toml,
         }
     }
@@ -103,6 +119,7 @@ impl Harness {
                  agent-mode tools picker"
             }
             Harness::CopilotCli => "restart the Copilot CLI; `/mcp` confirms it",
+            Harness::OpenCode => "restart OpenCode; `opencode mcp list` confirms it",
         }
     }
 }
@@ -140,6 +157,17 @@ impl Registration {
 
     /// This entry as JSON, in the dialect `harness` expects.
     fn as_json(&self, harness: Harness) -> Json {
+        if harness == Harness::OpenCode {
+            let command: Vec<&str> = std::iter::once(self.command.as_str())
+                .chain(self.args.iter().map(String::as_str))
+                .collect();
+            return json!({
+                "type": "local",
+                "command": command,
+                "environment": self.env,
+            });
+        }
+
         let mut entry = Map::new();
         // VS Code and the Copilot CLI both discriminate on a `type`, and
         // disagree about what to call a subprocess speaking stdio.
@@ -455,6 +483,7 @@ mod tests {
         // bar has to see them as one harness.
         assert_eq!(Harness::Copilot.harness_name(), "copilot");
         assert_eq!(Harness::CopilotCli.harness_name(), "copilot");
+        assert_eq!(Harness::OpenCode.harness_name(), "opencode");
     }
 
     #[test]
@@ -489,6 +518,13 @@ mod tests {
         // a parse error, not a hint.
         let claude = reg("hird").as_json(Harness::ClaudeCode);
         assert!(claude.get("type").is_none());
+
+        let opencode = reg("hird").as_json(Harness::OpenCode);
+        assert_eq!(opencode["type"], json!("local"));
+        assert_eq!(opencode["command"], json!(["/opt/bin/hird", "mcp"]));
+        assert_eq!(opencode["environment"], json!({ "HIRD_HARNESS": "codex" }));
+        assert!(opencode.get("args").is_none());
+        assert!(opencode.get("env").is_none());
     }
 
     #[test]

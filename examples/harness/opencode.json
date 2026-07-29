@@ -1,0 +1,12 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "hird": {
+      "type": "local",
+      "command": ["hird", "mcp"],
+      "environment": {
+        "HIRD_HARNESS": "opencode"
+      }
+    }
+  }
+}

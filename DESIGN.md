@@ -315,6 +315,8 @@ used, so the deprecation window is not a migration for hird.
 - Claude Code: `claude mcp add hird -e HIRD_HARNESS=claude-code -- hird mcp`
 - Codex CLI: entry in `~/.codex/config.toml` `[mcp_servers.hird]` with `command = "hird"`, `args = ["mcp"]`, `env = { HIRD_HARNESS = "codex" }`
 - Copilot / VS Code: `.vscode/mcp.json` stdio server, `HIRD_HARNESS=copilot`.
+- OpenCode: `${XDG_CONFIG_HOME:-~/.config}/opencode/opencode.json` local server
+  under `mcp.hird`, `HIRD_HARNESS=opencode`.
 
 ## 7. CLI
 
@@ -332,9 +334,10 @@ hird agents [--all-projects]             # (v1.1) who is working what, and overl
 hird mem add <content> [--tags a,b] / hird mem search <query>
 hird tui
 hird mcp
+hird register <claude-code|codex|copilot|copilot-cli|opencode>
 hird db-path
 hird --install                         # copy this binary to ~/.local/bin/hird
-hird --install-skill                   # install the skill for Codex, Claude and Copilot
+hird --install-skill                   # install the skill for Codex, Claude, Copilot and OpenCode
 ```
 Human CLI actions record events with `actor='cli'`.
 

@@ -252,6 +252,65 @@ fn help_and_version_work_without_a_database() {
 }
 
 #[test]
+fn register_opencode_preserves_the_global_config_and_is_idempotent() {
+    let sandbox = Sandbox::new();
+    let path = sandbox.dir.path().join("config/opencode/opencode.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        r#"{"theme":"system","mcp":{"other":{"type":"remote","url":"https://example.test/mcp"}}}"#,
+    )
+    .unwrap();
+
+    let registered = sandbox.run(&["register", "opencode"]);
+    assert!(registered.contains("added hird"), "{registered}");
+    assert!(
+        registered.contains(&path.to_string_lossy().to_string()),
+        "{registered}"
+    );
+    assert!(registered.contains("HIRD_HARNESS=opencode"), "{registered}");
+
+    let config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(config["theme"], serde_json::json!("system"));
+    assert_eq!(
+        config["mcp"]["other"]["url"],
+        serde_json::json!("https://example.test/mcp")
+    );
+    assert_eq!(config["mcp"]["hird"]["type"], serde_json::json!("local"));
+    assert_eq!(
+        config["mcp"]["hird"]["command"][1],
+        serde_json::json!("mcp")
+    );
+    assert!(config["mcp"]["hird"]["command"][0]
+        .as_str()
+        .is_some_and(|command| std::path::Path::new(command).is_absolute()));
+    assert_eq!(
+        config["mcp"]["hird"]["environment"]["HIRD_HARNESS"],
+        serde_json::json!("opencode")
+    );
+    assert!(!sandbox.db().exists());
+
+    let repeated = sandbox.run(&["register", "opencode"]);
+    assert!(repeated.contains("already registered"), "{repeated}");
+}
+
+#[test]
+fn register_opencode_uses_an_existing_jsonc_file_without_overwriting_comments() {
+    let sandbox = Sandbox::new();
+    let path = sandbox.dir.path().join("config/opencode/opencode.jsonc");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let original = "{\n  // keep my OpenCode settings\n  \"theme\": \"system\"\n}\n";
+    std::fs::write(&path, original).unwrap();
+
+    let err = sandbox.run_failing(&["register", "opencode"]);
+    assert!(err.contains("--print"), "{err}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    assert!(!path.with_extension("json").exists());
+    assert!(!sandbox.db().exists());
+}
+
+#[test]
 fn install_skill_writes_the_bundled_global_skill_without_opening_the_database() {
     let sandbox = Sandbox::new();
     let installed = sandbox.run(&["--install-skill"]);

@@ -67,9 +67,10 @@ No daemon. No server. No accounts.
 This builds the Rust release binary and copies that standalone snapshot to
 `~/.local/bin/hird`, then removes the release build artifacts. Re-run the
 script after upgrading the source.
-`--install-skill` installs the bundled, agent-portable skill for Codex
-(`~/.agents/skills/hird`), Claude Code (`~/.claude/skills/hird`), and GitHub
-Copilot (`~/.copilot/skills/hird`). It is optional and can be run separately.
+`--install-skill` installs the bundled, agent-portable skill for Codex and
+OpenCode (`~/.agents/skills/hird`), Claude Code (`~/.claude/skills/hird`), and
+GitHub Copilot (`~/.copilot/skills/hird`). It is optional and can be run
+separately.
 Start new agent sessions after installing the skill.
 
 Needs a Rust toolchain. SQLite is compiled in — there is nothing else to
@@ -112,6 +113,7 @@ hird register claude-code    # ./.mcp.json
 hird register codex          # ~/.codex/config.toml
 hird register copilot        # ./.vscode/mcp.json — Copilot in VS Code
 hird register copilot-cli    # ~/.copilot/mcp-config.json
+hird register opencode       # ~/.config/opencode/opencode.json
 ```
 
 ```
@@ -191,6 +193,25 @@ session also writes:
   }
 }
 ```
+
+**OpenCode** — `${XDG_CONFIG_HOME:-~/.config}/opencode/opencode.json`:
+
+```json
+{
+  "mcp": {
+    "hird": {
+      "type": "local",
+      "command": ["/home/you/.cargo/bin/hird", "mcp"],
+      "environment": { "HIRD_HARNESS": "opencode" }
+    }
+  }
+}
+```
+
+If `opencode.jsonc` already exists and `opencode.json` does not, hird uses the
+JSONC path. A file containing comments is left untouched; `--print` renders
+the block to merge by hand. Restart OpenCode after registering, and
+`opencode mcp list` confirms the connection.
 
 Any other MCP-capable harness works the same way: run `hird mcp` over stdio and
 set `HIRD_HARNESS` to something recognisable. `hird register copilot --print`
@@ -841,7 +862,7 @@ hird mem search [query] [--limit N] [--all-projects] [--include-superseded]
 hird mem standing [--shaky] [--all-projects]
 hird tui
 hird mcp
-hird register <claude-code|codex|copilot|copilot-cli> [--name <name>] [--print] [--force]
+hird register <claude-code|codex|copilot|copilot-cli|opencode> [--name <name>] [--print] [--force]
 hird db-path
 ```
 

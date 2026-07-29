@@ -20,7 +20,7 @@ installed, but nothing requires it.
 | [`protocol.sh`](protocol.sh) | **MCP 2026-07-28 on the wire** — `server/discover`, a task worked without ever calling `initialize`, and a harness that never set `HIRD_HARNESS` named by its own client. |
 | [`task-body.md`](task-body.md) | A task body worth writing, for `--body-file`. |
 | [`config.toml`](config.toml) | Every configuration key, annotated, at its default. |
-| [`harness/`](harness) | MCP registration for Claude Code, Codex CLI, Copilot in VS Code and the Copilot CLI — what `hird register <harness>` writes, for reading or for pasting somewhere it does not reach. |
+| [`harness/`](harness) | MCP registration for Claude Code, Codex CLI, Copilot in VS Code, the Copilot CLI and OpenCode — what `hird register <harness>` writes, for reading or for pasting somewhere it does not reach. |
 | [`lib/mcp.sh`](lib/mcp.sh) | The shell helpers the scripts share — a raw MCP session in 20 lines. |
 
 ```sh

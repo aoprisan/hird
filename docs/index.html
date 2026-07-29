@@ -95,7 +95,7 @@
   This builds the Rust release binary and copies that standalone snapshot to
   <code>~/.local/bin/hird</code>, then removes the release build artifacts.
   Re-run the script after upgrading the source. <code>--install-skill</code>
-  installs the bundled portable skill for Codex
+  installs the bundled portable skill for Codex and OpenCode
   (<code>~/.agents/skills/hird</code>), Claude Code
   (<code>~/.claude/skills/hird</code>), and GitHub Copilot
   (<code>~/.copilot/skills/hird</code>). It is optional and can be run
@@ -331,7 +331,8 @@ nothing was written; drop --dry-run to file it</code></pre>
 <pre><code><span class="k">hird</span> register claude-code    <span class="c"># ./.mcp.json</span>
 <span class="k">hird</span> register codex          <span class="c"># ~/.codex/config.toml</span>
 <span class="k">hird</span> register copilot        <span class="c"># ./.vscode/mcp.json — Copilot in VS Code</span>
-<span class="k">hird</span> register copilot-cli    <span class="c"># ~/.copilot/mcp-config.json</span></code></pre>
+<span class="k">hird</span> register copilot-cli    <span class="c"># ~/.copilot/mcp-config.json</span>
+<span class="k">hird</span> register opencode       <span class="c"># ~/.config/opencode/opencode.json</span></code></pre>
 
 <pre><code><span class="w">registered hird in /home/you/project/.vscode/mcp.json
   command  /home/you/.cargo/bin/hird mcp
@@ -418,6 +419,26 @@ env = { HIRD_HARNESS = <span class="s">"codex"</span> }</code></pre>
 
 <p>
   <code>/mcp add</code> inside a session writes the same file.
+</p>
+
+<h4>OpenCode</h4>
+<span class="filename">${XDG_CONFIG_HOME:-~/.config}/opencode/opencode.json</span>
+<pre><code>{
+  <span class="s">"mcp"</span>: {
+    <span class="s">"hird"</span>: {
+      <span class="s">"type"</span>: <span class="s">"local"</span>,
+      <span class="s">"command"</span>: [<span class="s">"/home/you/.cargo/bin/hird"</span>, <span class="s">"mcp"</span>],
+      <span class="s">"environment"</span>: { <span class="s">"HIRD_HARNESS"</span>: <span class="s">"opencode"</span> }
+    }
+  }
+}</code></pre>
+
+<p>
+  If <code>opencode.jsonc</code> already exists and
+  <code>opencode.json</code> does not, hird uses the JSONC path. A file
+  containing comments is left untouched; <code>--print</code> renders the
+  block to merge by hand. Restart OpenCode after registering, and
+  <code>opencode mcp list</code> confirms the connection.
 </p>
 
 <p>

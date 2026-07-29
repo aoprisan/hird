@@ -188,7 +188,7 @@ fn data_dir() -> PathBuf {
         .unwrap_or_else(|| home().join(".local").join("share"))
 }
 
-fn config_dir() -> PathBuf {
+pub(crate) fn config_dir() -> PathBuf {
     non_empty_env("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| home().join(".config"))
