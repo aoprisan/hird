@@ -1157,6 +1157,23 @@ fn discovery_answers_without_a_handshake_and_offers_the_current_spec() {
 }
 
 #[test]
+fn stateless_tool_list_carries_required_cache_hints() {
+    let sandbox = Sandbox::new();
+    let mut session = McpSession::start_stateless(&sandbox, Some("opencode"));
+
+    let response = session.request("tools/list", json!({}));
+    let result = &response["result"];
+    assert!(result["tools"]
+        .as_array()
+        .is_some_and(|tools| !tools.is_empty()));
+    assert_eq!(result["resultType"], "complete");
+    assert_eq!(result["cacheScope"], "private");
+    assert_eq!(result["ttlMs"], 0);
+
+    session.shutdown();
+}
+
+#[test]
 fn a_stateless_client_can_work_a_task_end_to_end() {
     let sandbox = Sandbox::new();
     sandbox.write_file("src/config.rs", "fn load() {}\n");

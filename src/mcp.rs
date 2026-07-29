@@ -20,7 +20,7 @@ use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResponse, DiscoverResult, ErrorCode, Implementation,
-    ServerCapabilities, ServerInfo,
+    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo,
 };
 use rmcp::service::RequestContext;
 use rmcp::{tool, tool_handler, tool_router, ErrorData, RoleServer, ServerHandler, ServiceExt};
@@ -1671,6 +1671,24 @@ impl ServerHandler for HirdMcp {
         Self::tool_router()
             .call(ToolCallContext::new(self, request, context))
             .await
+    }
+
+    /// List tools with the cache hints required by MCP 2026-07-28.
+    ///
+    /// Tool definitions are fixed for the lifetime of this binary, but the
+    /// answer is private to this hird process and cheap to rebuild. A zero TTL
+    /// also keeps legacy and modern clients from retaining stale definitions
+    /// across an upgrade.
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, ErrorData> {
+        Ok(
+            ListToolsResult::with_all_items(Self::tool_router().list_all())
+                .with_ttl_ms(0)
+                .with_cache_scope(CacheScope::Private),
+        )
     }
 
     /// What `server/discover` answers, for clients that never call `initialize`.
