@@ -22,7 +22,26 @@ fn main() {
 
 fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    match cli.command {
+    if (cli.install || cli.install_skill) && cli.command.is_some() {
+        anyhow::bail!("installer options cannot be used with a subcommand");
+    }
+    if cli.install {
+        let stdout = std::io::stdout();
+        let mut out = std::io::BufWriter::new(stdout.lock());
+        hird::install::install_binary(&mut out)?;
+        out.flush()?;
+    }
+    if cli.install_skill {
+        let stdout = std::io::stdout();
+        let mut out = std::io::BufWriter::new(stdout.lock());
+        hird::install::install_skill(&mut out)?;
+        out.flush()?;
+    }
+    if cli.install || cli.install_skill {
+        return Ok(());
+    }
+
+    match cli.command.as_ref().expect("clap requires a command") {
         Command::Mcp => serve_mcp(&cli),
         Command::Tui => {
             let config = Config::load_default()?;

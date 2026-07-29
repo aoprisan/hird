@@ -50,8 +50,16 @@ No daemon. No server. No accounts.
 ## Install
 
 ```sh
-cargo install --path .
+./scripts/install.sh --install-skill
 ```
+
+This builds the Rust release binary and copies that standalone snapshot to
+`~/.local/bin/hird`, then removes the release build artifacts. Re-run the
+script after upgrading the source.
+`--install-skill` installs the bundled, agent-portable skill for Codex
+(`~/.agents/skills/hird`), Claude Code (`~/.claude/skills/hird`), and GitHub
+Copilot (`~/.copilot/skills/hird`). It is optional and can be run separately.
+Start new agent sessions after installing the skill.
 
 Needs a Rust toolchain. SQLite is compiled in — there is nothing else to
 install and nothing to configure before first use.

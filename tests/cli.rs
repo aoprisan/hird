@@ -252,6 +252,70 @@ fn help_and_version_work_without_a_database() {
 }
 
 #[test]
+fn install_skill_writes_the_bundled_global_skill_without_opening_the_database() {
+    let sandbox = Sandbox::new();
+    let installed = sandbox.run(&["--install-skill"]);
+    for relative in [
+        ".agents/skills/hird/SKILL.md",
+        ".claude/skills/hird/SKILL.md",
+        ".copilot/skills/hird/SKILL.md",
+    ] {
+        let path = sandbox.dir.path().join(relative);
+        assert!(
+            installed.contains(&path.to_string_lossy().to_string()),
+            "{installed}"
+        );
+        let skill = std::fs::read_to_string(path).unwrap();
+        assert!(skill.contains("name: hird"), "{skill}");
+        assert!(skill.contains("task_claim"), "{skill}");
+    }
+    assert!(!sandbox.db().exists());
+
+    let repeated = sandbox.run(&["--install-skill"]);
+    assert!(repeated.contains("already installed"), "{repeated}");
+}
+
+#[test]
+fn install_copies_the_running_binary_without_opening_the_database() {
+    let sandbox = Sandbox::new();
+    let installed = sandbox.run(&["--install"]);
+    let path = sandbox.dir.path().join(".local/bin/hird");
+
+    assert!(
+        installed.contains(&path.to_string_lossy().to_string()),
+        "{installed}"
+    );
+    assert_eq!(
+        std::fs::read(path).unwrap(),
+        std::fs::read(support::bin()).unwrap()
+    );
+    assert!(!sandbox.db().exists());
+}
+
+#[test]
+fn installer_options_refuse_normal_commands_before_doing_anything() {
+    let sandbox = Sandbox::new();
+    let err = sandbox.run_failing(&["--install-skill", "ls"]);
+    assert!(err.contains("installer options cannot be used"), "{err}");
+    assert!(!sandbox
+        .dir
+        .path()
+        .join(".agents/skills/hird/SKILL.md")
+        .exists());
+    assert!(!sandbox
+        .dir
+        .path()
+        .join(".claude/skills/hird/SKILL.md")
+        .exists());
+    assert!(!sandbox
+        .dir
+        .path()
+        .join(".copilot/skills/hird/SKILL.md")
+        .exists());
+    assert!(!sandbox.db().exists());
+}
+
+#[test]
 fn a_plan_can_be_filed_in_one_go_and_read_back_as_waves() {
     let sandbox = Sandbox::new();
     sandbox.run(&["add", "write the schema", "--path", "src/db.rs"]);

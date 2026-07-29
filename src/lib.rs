@@ -22,6 +22,7 @@ pub mod fmt;
 pub mod glob;
 pub mod hash;
 pub mod identity;
+pub mod install;
 pub mod mcp;
 pub mod model;
 pub mod plan;

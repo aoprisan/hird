@@ -24,14 +24,28 @@ use crate::witness;
 /// Coordinate AI coding agents across harnesses through a shared work queue
 /// and a shared assertion memory, all in one local SQLite database.
 #[derive(Debug, Parser)]
-#[command(name = "hird", version, about, long_about = None)]
+#[command(
+    name = "hird",
+    version,
+    about,
+    long_about = None,
+    arg_required_else_help = true
+)]
 pub struct Cli {
     /// Database file to use. Overrides HIRD_DB and the default location.
     #[arg(long, global = true, value_name = "PATH")]
     pub db: Option<PathBuf>,
 
+    /// Copy this hird binary into ~/.local/bin.
+    #[arg(long)]
+    pub install: bool,
+
+    /// Install the hird skill for Codex, Claude Code, and GitHub Copilot.
+    #[arg(long)]
+    pub install_skill: bool,
+
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -229,7 +243,7 @@ pub enum MemCommand {
 pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
     let db_path = config::resolve_db_path(cli.db.as_deref());
 
-    if let Command::DbPath = cli.command {
+    if let Some(Command::DbPath) = &cli.command {
         writeln!(out, "{}", db_path.display())?;
         return Ok(());
     }
@@ -239,13 +253,17 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let project = identity::resolve_project(&cwd);
 
-    match &cli.command {
+    match cli
+        .command
+        .as_ref()
+        .context("a command or installer option is required")?
+    {
         Command::DbPath => unreachable!("handled above"),
         Command::Tui | Command::Mcp => {
             anyhow::bail!(
                 "`hird {}` is served by the binary, not the command dispatcher",
-                match cli.command {
-                    Command::Tui => "tui",
+                match &cli.command {
+                    Some(Command::Tui) => "tui",
                     _ => "mcp",
                 }
             )
@@ -1024,7 +1042,7 @@ mod tests {
     fn negative_priorities_parse() {
         let cli = Cli::try_parse_from(["hird", "add", "t", "--priority", "-3"]).unwrap();
         match cli.command {
-            Command::Add(args) => assert_eq!(args.priority, -3),
+            Some(Command::Add(args)) => assert_eq!(args.priority, -3),
             other => panic!("parsed as {other:?}"),
         }
     }
@@ -1033,7 +1051,7 @@ mod tests {
     fn list_is_an_alias_for_ls() {
         assert!(matches!(
             Cli::try_parse_from(["hird", "list"]).unwrap().command,
-            Command::Ls(_)
+            Some(Command::Ls(_))
         ));
     }
 
@@ -1044,7 +1062,7 @@ mod tests {
             Cli::try_parse_from(["hird", "add", "t", "--needs", "3", "--needs", "4"]).unwrap();
         for cli in [comma, repeated] {
             match cli.command {
-                Command::Add(args) => assert_eq!(args.needs, vec![3, 4]),
+                Some(Command::Add(args)) => assert_eq!(args.needs, vec![3, 4]),
                 other => panic!("parsed as {other:?}"),
             }
         }
@@ -1055,7 +1073,7 @@ mod tests {
         let cli = Cli::try_parse_from(["hird", "add", "t", "--path", "src/**", "--path", "tests/"])
             .unwrap();
         match cli.command {
-            Command::Add(args) => assert_eq!(args.paths, vec!["src/**", "tests/"]),
+            Some(Command::Add(args)) => assert_eq!(args.paths, vec!["src/**", "tests/"]),
             other => panic!("parsed as {other:?}"),
         }
     }
@@ -1064,7 +1082,7 @@ mod tests {
     fn a_plan_is_applied_from_a_file_and_dry_run_is_opt_in() {
         let cli = Cli::try_parse_from(["hird", "plan", "apply", "plan.toml"]).unwrap();
         match cli.command {
-            Command::Plan(PlanCommand::Apply { file, dry_run, .. }) => {
+            Some(Command::Plan(PlanCommand::Apply { file, dry_run, .. })) => {
                 assert_eq!(file, PathBuf::from("plan.toml"));
                 assert!(!dry_run);
             }
@@ -1072,7 +1090,7 @@ mod tests {
         }
         let dry = Cli::try_parse_from(["hird", "plan", "apply", "-", "--dry-run"]).unwrap();
         match dry.command {
-            Command::Plan(PlanCommand::Apply { file, dry_run, .. }) => {
+            Some(Command::Plan(PlanCommand::Apply { file, dry_run, .. })) => {
                 assert_eq!(file, PathBuf::from("-"));
                 assert!(dry_run);
             }
@@ -1119,11 +1137,36 @@ mod tests {
     fn mem_search_defaults_to_an_empty_query() {
         let cli = Cli::try_parse_from(["hird", "mem", "search"]).unwrap();
         match cli.command {
-            Command::Mem(MemCommand::Search { query, limit, .. }) => {
+            Some(Command::Mem(MemCommand::Search { query, limit, .. })) => {
                 assert_eq!(query, "");
                 assert_eq!(limit, 20);
             }
             other => panic!("parsed as {other:?}"),
         }
+    }
+
+    #[test]
+    fn installer_options_parse_without_a_subcommand_and_may_be_combined() {
+        let mcp = Cli::try_parse_from(["hird", "--install"]).unwrap();
+        assert!(mcp.install);
+        assert!(mcp.command.is_none());
+
+        let both = Cli::try_parse_from(["hird", "--install", "--install-skill"]).unwrap();
+        assert!(both.install);
+        assert!(both.install_skill);
+        assert!(both.command.is_none());
+    }
+
+    #[test]
+    fn the_install_typo_is_not_an_option() {
+        let err = Cli::try_parse_from(["hird", "--insytall"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn installer_options_and_normal_commands_are_detectably_distinct() {
+        let cli = Cli::try_parse_from(["hird", "--install-skill", "ls"]).unwrap();
+        assert!(cli.install_skill);
+        assert!(matches!(cli.command, Some(Command::Ls(_))));
     }
 }

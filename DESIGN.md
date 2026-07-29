@@ -299,8 +299,13 @@ hird mem add <content> [--tags a,b] / hird mem search <query>
 hird tui
 hird mcp
 hird db-path
+hird --install                         # copy this binary to ~/.local/bin/hird
+hird --install-skill                   # install the skill for Codex, Claude and Copilot
 ```
 Human CLI actions record events with `actor='cli'`.
+
+`scripts/install.sh [--install-skill]` builds the locked release, runs the
+installer, and cleans the release profile on exit.
 
 ## 8. TUI (`hird tui`)
 
