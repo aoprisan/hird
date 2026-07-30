@@ -12,7 +12,19 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBe
 
 use super::ProjectScope;
 use crate::error::{Error, Result};
-use crate::model::{now_ts, Blocker, EventKind, Status, TaskSummary};
+use crate::model::{
+    now_ts, Blocker, Clearance, EventKind, Ground, GroundStanding, Shifted, Status, TaskSummary,
+};
+
+/// The unfinished review of a task's work, where one exists — the subquery
+/// every read in this module shares. Being a review *is* having recusal
+/// edges (§15), so "an unfinished review of `t`" is an unfinished task
+/// recused from it.
+const PENDING_REVIEW: &str = "(SELECT rev.seq FROM task_recusals rec
+        JOIN tasks rev ON rev.id = rec.task_id
+        WHERE rec.from_task_id = t.id
+          AND rev.status IN ('open','claimed','in_progress')
+        ORDER BY rev.seq LIMIT 1)";
 
 /// Repository over `task_deps`.
 pub struct Deps<'a> {
@@ -101,14 +113,29 @@ impl<'a> Deps<'a> {
     /// Everything that waits for `seq`, in task order.
     pub fn dependents(&self, seq: i64) -> Result<Vec<Blocker>> {
         let task_id = id_for_seq(self.conn, seq)?;
-        let mut stmt = self.conn.prepare(
-            "SELECT t.seq, t.title, t.status FROM task_deps d
+        let sql = format!(
+            "SELECT t.seq, t.title, t.status, {PENDING_REVIEW} FROM task_deps d
              JOIN tasks t ON t.id = d.task_id
              WHERE d.depends_on_id = ?1
-             ORDER BY t.seq",
-        )?;
+             ORDER BY t.seq"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map([&task_id], row_to_blocker)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The ground under `seq`: every finished dependency, carrying the result
+    /// its finisher wrote and how far that word can currently be trusted.
+    pub fn ground(&self, seq: i64) -> Result<Vec<Ground>> {
+        let task_id = id_for_seq(self.conn, seq)?;
+        ground_for(self.conn, &task_id)
+    }
+
+    /// Dependencies of `seq` that have stopped being `done` — the ground that
+    /// has moved under a task since it was claimed.
+    pub fn shifted(&self, seq: i64) -> Result<Vec<Shifted>> {
+        let task_id = id_for_seq(self.conn, seq)?;
+        shifted_for(self.conn, &task_id)
     }
 
     /// Every unfinished task in `scope` with unfinished dependencies, and
@@ -117,14 +144,30 @@ impl<'a> Deps<'a> {
     /// One query for the whole board: the TUI and `hird ls` mark blocked tasks
     /// without asking per row. Tasks that have already finished are left out —
     /// a `done` task is not waiting for anything, whatever its edges say.
-    pub fn unmet_map(&self, scope: &ProjectScope) -> Result<BTreeMap<i64, Vec<i64>>> {
+    /// Under [`Clearance::Reviewed`] a `done` dependency whose review is still
+    /// unfinished counts as unmet, so the board and the claim refuse for the
+    /// same reasons.
+    pub fn unmet_map(
+        &self,
+        scope: &ProjectScope,
+        clearance: Clearance,
+    ) -> Result<BTreeMap<i64, Vec<i64>>> {
         let (project_clause, project_value) = scope.clause("t.project");
+        let unmet_clause = match clearance {
+            Clearance::Done => "dep.status <> 'done'",
+            Clearance::Reviewed => {
+                "(dep.status <> 'done' OR EXISTS (SELECT 1 FROM task_recusals rec
+                    JOIN tasks rev ON rev.id = rec.task_id
+                    WHERE rec.from_task_id = dep.id
+                      AND rev.status IN ('open','claimed','in_progress')))"
+            }
+        };
         let sql = format!(
             "SELECT t.seq, dep.seq FROM task_deps d
              JOIN tasks t ON t.id = d.task_id
              JOIN tasks dep ON dep.id = d.depends_on_id
              WHERE {project_clause}
-               AND dep.status <> 'done'
+               AND {unmet_clause}
                AND t.status IN ('open','claimed','in_progress')
              ORDER BY t.seq, dep.seq"
         );
@@ -162,23 +205,97 @@ impl<'a> Deps<'a> {
 
 // -------------------------------------------------------------------- helpers
 
-/// Dependencies of `task_id` that are not `done`, cheapest form for the claim
+/// Dependencies of `task_id` that do not clear it, cheapest form for the claim
 /// path: empty means the task is ready as far as the graph is concerned.
-pub(crate) fn unmet_blockers(conn: &Connection, task_id: &str) -> Result<Vec<Blocker>> {
+pub(crate) fn unmet_blockers(
+    conn: &Connection,
+    task_id: &str,
+    clearance: Clearance,
+) -> Result<Vec<Blocker>> {
     Ok(blockers_for_id(conn, task_id)?
         .into_iter()
-        .filter(|b| !b.is_cleared())
+        .filter(|b| !b.is_cleared(clearance))
         .collect())
 }
 
 fn blockers_for_id(conn: &Connection, task_id: &str) -> Result<Vec<Blocker>> {
-    let mut stmt = conn.prepare(
-        "SELECT t.seq, t.title, t.status FROM task_deps d
+    let sql = format!(
+        "SELECT t.seq, t.title, t.status, {PENDING_REVIEW} FROM task_deps d
          JOIN tasks t ON t.id = d.depends_on_id
          WHERE d.task_id = ?1
-         ORDER BY t.seq",
-    )?;
+         ORDER BY t.seq"
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([task_id], row_to_blocker)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// The finished dependencies of `task_id`, each carrying its own account of
+/// itself: the `result` its finisher wrote, and whether that answer is upheld,
+/// merely done, or provisional under an unfinished review.
+///
+/// Two subqueries per row instead of two more joins, because the row count is
+/// a task's direct dependencies — single digits in any real plan.
+pub(crate) fn ground_for(conn: &Connection, task_id: &str) -> Result<Vec<Ground>> {
+    let sql = format!(
+        "SELECT t.seq, t.title, t.result, {PENDING_REVIEW},
+                (SELECT v.verdict FROM task_verdicts v WHERE v.task_id = t.id
+                 ORDER BY v.at DESC, v.id DESC LIMIT 1)
+         FROM task_deps d
+         JOIN tasks t ON t.id = d.depends_on_id
+         WHERE d.task_id = ?1 AND t.status = 'done'
+         ORDER BY t.seq"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([task_id], |row| {
+        let pending: Option<i64> = row.get(3)?;
+        let verdict: Option<String> = row.get(4)?;
+        let standing = match (pending, verdict.as_deref()) {
+            (Some(review), _) => GroundStanding::UnderReview { review },
+            (None, Some("upheld")) => GroundStanding::Upheld,
+            _ => GroundStanding::Done,
+        };
+        Ok(Ground {
+            seq: row.get(0)?,
+            title: row.get(1)?,
+            result: row.get(2)?,
+            standing,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Dependencies of `task_id` that are not `done` — for a task that is being
+/// worked, the ground that has moved since its claim let it through.
+///
+/// The attribution is the newest verdict on record: a blocker whose latest
+/// verdict is a sent-back was reopened by that review, and the review's
+/// findings are sitting in its brief. Anything else — an older verdict, none
+/// at all — is a human's move or a failure, and the sentence says only what
+/// the status can back.
+pub(crate) fn shifted_for(conn: &Connection, task_id: &str) -> Result<Vec<Shifted>> {
+    let sql = "SELECT t.seq, t.title, t.status,
+                (SELECT CASE WHEN v.verdict = 'sent_back' THEN rev.seq END
+                 FROM task_verdicts v JOIN tasks rev ON rev.id = v.review_id
+                 WHERE v.task_id = t.id
+                 ORDER BY v.at DESC, v.id DESC LIMIT 1)
+         FROM task_deps d
+         JOIN tasks t ON t.id = d.depends_on_id
+         WHERE d.task_id = ?1 AND t.status <> 'done'
+         ORDER BY t.seq";
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map([task_id], |row| {
+        let raw: String = row.get(2)?;
+        let status: Status = raw.parse().map_err(|e: crate::model::UnknownStatus| {
+            rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(e))
+        })?;
+        Ok(Shifted {
+            seq: row.get(0)?,
+            title: row.get(1)?,
+            status,
+            sent_back_by: row.get(3)?,
+        })
+    })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
@@ -243,6 +360,7 @@ fn row_to_blocker(row: &rusqlite::Row<'_>) -> rusqlite::Result<Blocker> {
         seq: row.get(0)?,
         title: row.get(1)?,
         status,
+        pending_review: row.get(3)?,
     })
 }
 
@@ -437,17 +555,33 @@ mod tests {
         db.deps().add(b, a, "cli").unwrap();
 
         let scope = ProjectScope::Only(PROJECT.into());
-        assert_eq!(db.deps().unmet_map(&scope).unwrap().get(&b), Some(&vec![a]));
+        assert_eq!(
+            db.deps()
+                .unmet_map(&scope, Clearance::Done)
+                .unwrap()
+                .get(&b),
+            Some(&vec![a])
+        );
 
         // Failing the dependency does not release the dependent: the work it
         // was waiting for still has not happened.
         db.tasks().claim(a, "x:1", TTL).unwrap();
         db.tasks().fail(a, "x:1", "nope").unwrap();
-        assert_eq!(db.deps().unmet_map(&scope).unwrap().get(&b), Some(&vec![a]));
+        assert_eq!(
+            db.deps()
+                .unmet_map(&scope, Clearance::Done)
+                .unwrap()
+                .get(&b),
+            Some(&vec![a])
+        );
 
         db.tasks().reopen(a, "cli", "retry").unwrap();
         finish(&db, a);
-        assert!(db.deps().unmet_map(&scope).unwrap().is_empty());
+        assert!(db
+            .deps()
+            .unmet_map(&scope, Clearance::Done)
+            .unwrap()
+            .is_empty());
     }
 
     /// A task that has already finished is not waiting for anything, however
@@ -464,7 +598,10 @@ mod tests {
 
         let scope = ProjectScope::Only(PROJECT.into());
         assert!(
-            db.deps().unmet_map(&scope).unwrap().is_empty(),
+            db.deps()
+                .unmet_map(&scope, Clearance::Done)
+                .unwrap()
+                .is_empty(),
             "b is done; reopening its dependency does not un-finish it"
         );
     }
@@ -481,7 +618,7 @@ mod tests {
 
         let map = db
             .deps()
-            .unmet_map(&ProjectScope::Only(PROJECT.into()))
+            .unmet_map(&ProjectScope::Only(PROJECT.into()), Clearance::Done)
             .unwrap();
         assert_eq!(map.get(&c), Some(&vec![b]));
         assert_eq!(map.len(), 1);
@@ -516,6 +653,182 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains("25 -> 24 -> 23"), "{text}");
         assert!(text.contains("3 -> 2 -> 1"), "{text}");
+    }
+
+    // ------------------------------------------------------------ the ground
+
+    /// File `title` marked for review with a declared scope, work it, finish
+    /// it, and return the review that filed itself.
+    fn reviewed_done(db: &Db, seq: i64, result: &str) -> i64 {
+        db.tasks().set_review(seq, true, "cli").unwrap();
+        db.scopes()
+            .declare(
+                seq,
+                &["src/loader.rs".to_string()],
+                "cli",
+                super::super::OnConflict::Report,
+            )
+            .unwrap();
+        db.tasks().claim(seq, "codex:9f2c", TTL).unwrap();
+        let finished = db.tasks().complete(seq, "codex:9f2c", result).unwrap();
+        finished.review.expect("a review was filed")
+    }
+
+    #[test]
+    fn the_claim_ground_carries_each_finished_dependencys_own_result() {
+        let db = db();
+        let schema = seed(&db, "schema");
+        let api = seed(&db, "api");
+        db.deps().add(api, schema, "cli").unwrap();
+        db.tasks().claim(schema, "codex:9f2c", TTL).unwrap();
+        db.tasks()
+            .complete(schema, "codex:9f2c", "the schema lives in db.rs")
+            .unwrap();
+
+        let ground = db.deps().ground(api).unwrap();
+        assert_eq!(ground.len(), 1);
+        assert_eq!(ground[0].seq, schema);
+        assert_eq!(
+            ground[0].result.as_deref(),
+            Some("the schema lives in db.rs")
+        );
+        assert_eq!(ground[0].standing, GroundStanding::Done);
+        assert_eq!(ground[0].label(), format!("#{schema} done"));
+    }
+
+    #[test]
+    fn ground_under_an_unfinished_review_says_it_is_provisional() {
+        let db = db();
+        let work = seed(&db, "port the loader");
+        let dependent = seed(&db, "use the loader");
+        db.deps().add(dependent, work, "cli").unwrap();
+        let review = reviewed_done(&db, work, "ported it");
+
+        let ground = db.deps().ground(dependent).unwrap();
+        assert_eq!(ground[0].standing, GroundStanding::UnderReview { review });
+        assert!(ground[0].label().contains("provisional"), "{ground:?}");
+
+        // The verdict lands, the hedge comes off, and the word gets stronger:
+        // this `done` has been read by a harness that provably did not do it.
+        db.tasks().claim(review, "claude-code:af31", TTL).unwrap();
+        db.tasks()
+            .complete_with(
+                review,
+                "claude-code:af31",
+                "read it, it holds",
+                Some(crate::model::Verdict::Upheld),
+            )
+            .unwrap();
+        let ground = db.deps().ground(dependent).unwrap();
+        assert_eq!(ground[0].standing, GroundStanding::Upheld);
+    }
+
+    #[test]
+    fn holds_keeps_a_dependent_waiting_until_the_verdict() {
+        let db = db();
+        let work = seed(&db, "port the loader");
+        let dependent = seed(&db, "use the loader");
+        db.deps().add(dependent, work, "cli").unwrap();
+        let review = reviewed_done(&db, work, "ported it");
+
+        // Under the default clearance the dependent is workable at once.
+        let scope = ProjectScope::Only(PROJECT.into());
+        assert!(db
+            .deps()
+            .unmet_map(&scope, Clearance::Done)
+            .unwrap()
+            .is_empty());
+
+        // Under `holds`, the same board says the dependent is still waiting —
+        // and the claim refusal names the review rather than the work.
+        assert_eq!(
+            db.deps()
+                .unmet_map(&scope, Clearance::Reviewed)
+                .unwrap()
+                .get(&dependent),
+            Some(&vec![work])
+        );
+        let err = db
+            .tasks()
+            .claim_scoped(
+                dependent,
+                "claude-code:af31",
+                TTL,
+                &[],
+                super::super::OnConflict::Report,
+                Clearance::Reviewed,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(&format!("under review {review}")), "{err}");
+        assert!(err.contains("verdict"), "{err}");
+
+        // The verdict clears it, with nothing else changing.
+        db.tasks().claim(review, "claude-code:af31", TTL).unwrap();
+        db.tasks()
+            .complete_with(
+                review,
+                "claude-code:af31",
+                "holds",
+                Some(crate::model::Verdict::Upheld),
+            )
+            .unwrap();
+        assert!(db
+            .deps()
+            .unmet_map(&scope, Clearance::Reviewed)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn shifted_ground_names_the_review_that_sent_the_work_back() {
+        let db = db();
+        let work = seed(&db, "port the loader");
+        let dependent = seed(&db, "use the loader");
+        db.deps().add(dependent, work, "cli").unwrap();
+        let review = reviewed_done(&db, work, "ported it");
+
+        // The dependent starts under the default clearance, on provisional
+        // ground; then the verdict takes the ground away.
+        db.tasks().claim(dependent, "copilot:11", TTL).unwrap();
+        db.tasks().claim(review, "claude-code:af31", TTL).unwrap();
+        db.tasks()
+            .complete_with(
+                review,
+                "claude-code:af31",
+                "the error path drops the lock",
+                Some(crate::model::Verdict::SentBack),
+            )
+            .unwrap();
+
+        let shifted = db.deps().shifted(dependent).unwrap();
+        assert_eq!(shifted.len(), 1);
+        assert_eq!(shifted[0].seq, work);
+        assert_eq!(shifted[0].sent_back_by, Some(review));
+        let said = shifted[0].describe();
+        assert!(
+            said.contains(&format!("sent back by review {review}")),
+            "{said}"
+        );
+        assert!(said.contains("re-read"), "{said}");
+    }
+
+    #[test]
+    fn ground_reopened_by_a_human_is_shifted_without_blaming_a_review() {
+        let db = db();
+        let a = seed(&db, "a");
+        let b = seed(&db, "b");
+        db.deps().add(b, a, "cli").unwrap();
+        finish(&db, a);
+        db.tasks().claim(b, "copilot:11", TTL).unwrap();
+        db.tasks().reopen(a, "cli", "found a hole").unwrap();
+
+        let shifted = db.deps().shifted(b).unwrap();
+        assert_eq!(shifted[0].sent_back_by, None);
+        assert!(
+            shifted[0].describe().contains("was reopened"),
+            "{shifted:?}"
+        );
     }
 
     // ------------------------------------------------------------- the graph

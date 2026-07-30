@@ -6,6 +6,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::identity;
+use crate::model::Clearance;
 use crate::repo::OnConflict;
 
 /// Default lease TTL when nothing else says otherwise.
@@ -38,6 +39,35 @@ impl PathConflicts {
     }
 }
 
+/// What a finished dependency under an unfinished review does to its
+/// dependents.
+///
+/// v1.7 made `done` revocable — a review can send finished work back — which
+/// left readiness resting on a word that is no longer final. Whether that
+/// possibility should stall a pipeline is a judgement about the project's
+/// tolerance for rework, so it is a key rather than a rule.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnderReview {
+    /// `done` clears the dependency at once; the claimant is told the ground
+    /// it builds on is provisional, and hears about it if the verdict then
+    /// takes that ground away.
+    #[default]
+    Clears,
+    /// Dependents stay unclaimable until the review delivers its verdict.
+    /// Slower, and immune to building on work that gets sent back.
+    Holds,
+}
+
+impl UnderReview {
+    fn policy(self) -> Clearance {
+        match self {
+            UnderReview::Clears => Clearance::Done,
+            UnderReview::Holds => Clearance::Reviewed,
+        }
+    }
+}
+
 /// On-disk configuration. Every field is optional in the file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -49,6 +79,9 @@ pub struct Config {
     pub all_projects_by_default: bool,
     /// How to treat a declared file scope that overlaps live work.
     pub path_conflicts: PathConflicts,
+    /// Whether a `done` dependency whose review has not delivered a verdict
+    /// clears its dependents or holds them.
+    pub under_review: UnderReview,
     /// Whether `task_next` passes over tasks whose declared file scope
     /// overlaps what another agent is already working.
     pub dispatch_avoids_conflicts: bool,
@@ -70,6 +103,7 @@ impl Default for Config {
             lease_ttl_minutes: DEFAULT_LEASE_TTL_MINUTES,
             all_projects_by_default: false,
             path_conflicts: PathConflicts::Report,
+            under_review: UnderReview::Clears,
             dispatch_avoids_conflicts: true,
             recall_limit: DEFAULT_RECALL_LIMIT,
             witness: true,
@@ -108,6 +142,11 @@ impl Config {
     /// The overlap policy to apply to a claim or a scope declaration.
     pub fn on_conflict(&self) -> OnConflict {
         self.path_conflicts.policy()
+    }
+
+    /// What it takes for a dependency to clear its dependents.
+    pub fn clearance(&self) -> Clearance {
+        self.under_review.policy()
     }
 
     /// Resolve an optional per-call collision-avoidance flag for `task_next`.

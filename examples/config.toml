@@ -28,6 +28,25 @@ all_projects_by_default = false
 # suits an unattended swarm where a lost edit costs more than a stalled task.
 path_conflicts = "report"
 
+# What a finished dependency under an unfinished review does to its dependents.
+#
+# When work marked for review completes, a review of it is filed and the work
+# is `done` — but `done` under an open review is provisional, because a
+# sent-back verdict reopens it.
+#
+#   "clears"  the dependents become workable at once. Whoever claims one is
+#             told, in `built_on`, that the ground it stands on is provisional,
+#             and hears at its next check-in if the verdict then takes that
+#             ground away.
+#   "holds"   the dependents stay unclaimable until the review delivers its
+#             verdict. Slower, and immune to building on work that gets sent
+#             back.
+#
+# "clears" suits a queue that would rather keep every agent busy and absorb the
+# occasional rework; "holds" suits work whose later stages are expensive enough
+# that building them on a wrong answer costs more than the wait.
+under_review = "clears"
+
 # Whether `task_next` — the tool agents call to be handed the next piece of
 # work — passes over tasks whose declared file scope overlaps live work.
 #

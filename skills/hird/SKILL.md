@@ -16,7 +16,11 @@ agents and a human may be using it at the same time.
   workable.
 - Claim before changing files. If another agent holds the task, tell the user
   who holds it instead of doing the same work independently.
-- Read the claimed task and its `recalled` facts before starting.
+- Read the claimed task, its `recalled` facts, and its `built_on` entries
+  before starting. `built_on` is what the tasks this one depends on said when
+  they finished — the context the dependency order exists to hand you. An
+  entry marked `provisional` is done but still under review; its work could be
+  sent back and reopened while you build on it.
 
 ## Work safely
 
@@ -29,7 +33,11 @@ agents and a human may be using it at the same time.
    files before writing again. `footprint` is hird's own answer to whether the
    task has changed anything — relay it as it stands, and note that its absence
    means hird was not watching rather than that nothing moved.
-4. Use `mem_search` before repeating investigation. Use `mem_store` for durable,
+4. If a `task_update` reply carries `ground_shifted`, a task this one builds on
+   has stopped being done — usually sent back by a review. Stop, re-read that
+   task (its brief now carries the findings), and adjust before building
+   further on its work. Tell the user.
+5. Use `mem_search` before repeating investigation. Use `mem_store` for durable,
    factual findings that will help another session; link them to `task_seq`.
 
 ## Finish or hand work back

@@ -10,7 +10,8 @@ use super::scope::OnConflict;
 use super::{deps, new_id, recusal, scope, ProjectScope};
 use crate::error::{Error, Result};
 use crate::model::{
-    fmt_ts, now_ts, Conflict, EventKind, Status, Task, TaskEvent, TaskSummary, Transition,
+    fmt_ts, now_ts, Clearance, Conflict, EventKind, Ground, Status, Task, TaskEvent, TaskSummary,
+    Transition,
 };
 
 /// Columns selected for a full [`Task`], in the order [`row_to_task`] expects.
@@ -38,6 +39,11 @@ pub struct Claim {
     pub paths: Vec<String>,
     /// Overlaps between that scope and work other agents are holding.
     pub conflicts: Vec<Conflict>,
+    /// The finished dependencies this task builds on: each one's own summary
+    /// of what it did, and whether that answer is still provisional. Handed
+    /// over here because the claim is the one moment the claimant is
+    /// guaranteed to be listening.
+    pub ground: Vec<Ground>,
 }
 
 /// The outcome of asking the queue for whatever should be worked next.
@@ -58,6 +64,12 @@ pub struct Dispatch {
     /// out loud: a queue whose only remaining work is a review of your own
     /// code is not an idle queue, it is a queue waiting for another harness.
     pub recused: Vec<(i64, crate::model::Recusal)>,
+    /// Tasks whose every dependency is finished but for a verdict — held only
+    /// under `under_review = "holds"`, each with the review it waits on. Its
+    /// own bucket rather than `blocked`, because "the work is done and the
+    /// review has not read it yet" points a human at a completely different
+    /// fix than "the work has not happened".
+    pub held: Vec<(i64, i64)>,
 }
 
 /// A finished task, and everything its completion set in motion.
@@ -405,8 +417,15 @@ impl<'a> Tasks<'a> {
     /// 'open'`, so exactly one of any number of racing claimants wins. Losers
     /// get an [`Error::ClaimConflict`] naming the current holder.
     pub fn claim(&self, seq: i64, actor: &str, lease_ttl: Duration) -> Result<Task> {
-        self.claim_scoped(seq, actor, lease_ttl, &[], OnConflict::Report)
-            .map(|claim| claim.task)
+        self.claim_scoped(
+            seq,
+            actor,
+            lease_ttl,
+            &[],
+            OnConflict::Report,
+            Clearance::Done,
+        )
+        .map(|claim| claim.task)
     }
 
     /// Claim a task and declare the files it will touch, in one transaction.
@@ -416,7 +435,9 @@ impl<'a> Tasks<'a> {
     /// been told not to work it. Here the refusal rolls the claim back too.
     ///
     /// Claiming is refused outright while any dependency is unfinished — a
-    /// dependency the queue does not enforce is only a comment.
+    /// dependency the queue does not enforce is only a comment. `clearance`
+    /// decides whether a dependency that is done but under an unfinished
+    /// review counts as finished.
     pub fn claim_scoped(
         &self,
         seq: i64,
@@ -424,6 +445,7 @@ impl<'a> Tasks<'a> {
         lease_ttl: Duration,
         paths: &[String],
         on_conflict: OnConflict,
+        clearance: Clearance,
     ) -> Result<Claim> {
         self.sweep_leases()?;
         // Validate the patterns before anything is claimed, so a typo cannot
@@ -435,7 +457,16 @@ impl<'a> Tasks<'a> {
         let expires = fmt_ts(now + chrono::Duration::from_std(lease_ttl).unwrap_or_default());
 
         let tx = self.immediate_tx()?;
-        let claim = claim_in_tx(&tx, seq, actor, &now_s, &expires, &paths, on_conflict)?;
+        let claim = claim_in_tx(
+            &tx,
+            seq,
+            actor,
+            &now_s,
+            &expires,
+            &paths,
+            on_conflict,
+            clearance,
+        )?;
         tx.commit()?;
         Ok(claim)
     }
@@ -457,6 +488,7 @@ impl<'a> Tasks<'a> {
         lease_ttl: Duration,
         scope: &ProjectScope,
         avoid_conflicts: bool,
+        clearance: Clearance,
     ) -> Result<Dispatch> {
         self.sweep_leases()?;
         let now = Utc::now();
@@ -481,8 +513,20 @@ impl<'a> Tasks<'a> {
 
         let mut dispatch = Dispatch::default();
         for (seq, id) in candidates {
-            if !deps::unmet_blockers(&tx, &id)?.is_empty() {
-                dispatch.blocked.push(seq);
+            let unmet = deps::unmet_blockers(&tx, &id, clearance)?;
+            if !unmet.is_empty() {
+                // A task whose every blocker is `done` is not waiting for work
+                // to happen — it is waiting for a verdict, and the two deserve
+                // different sentences.
+                let awaiting_verdict = unmet
+                    .iter()
+                    .all(|b| b.status == Status::Done)
+                    .then(|| unmet.iter().find_map(|b| b.pending_review))
+                    .flatten();
+                match awaiting_verdict {
+                    Some(review) => dispatch.held.push((seq, review)),
+                    None => dispatch.blocked.push(seq),
+                }
                 continue;
             }
             // Routed around rather than handed out and then refused: an agent
@@ -508,6 +552,7 @@ impl<'a> Tasks<'a> {
                 &expires,
                 &[],
                 OnConflict::Report,
+                clearance,
             )?);
             break;
         }
@@ -517,10 +562,14 @@ impl<'a> Tasks<'a> {
 
     /// Everything standing between an `open` task and an agent: unfinished
     /// dependencies first, then overlaps with live work.
-    pub fn readiness(&self, seq: i64) -> Result<(Vec<crate::model::Blocker>, Vec<Conflict>)> {
+    pub fn readiness(
+        &self,
+        seq: i64,
+        clearance: Clearance,
+    ) -> Result<(Vec<crate::model::Blocker>, Vec<Conflict>)> {
         self.sweep_leases()?;
         let id = task_id_for_seq(self.conn, seq)?;
-        let blockers = deps::unmet_blockers(self.conn, &id)?;
+        let blockers = deps::unmet_blockers(self.conn, &id, clearance)?;
         let patterns = declared_patterns(self.conn, &id)?;
         let conflicts = scope::conflicts_for(self.conn, &id, &patterns)?;
         Ok((blockers, conflicts))
@@ -918,10 +967,11 @@ fn claim_in_tx(
     expires: &str,
     paths: &[String],
     on_conflict: OnConflict,
+    clearance: Clearance,
 ) -> Result<Claim> {
     let id = task_id_for_seq(tx, seq)?;
 
-    let blockers = deps::unmet_blockers(tx, &id)?;
+    let blockers = deps::unmet_blockers(tx, &id, clearance)?;
     if !blockers.is_empty() {
         return Err(Error::Blocked { seq, blockers });
     }
@@ -972,11 +1022,18 @@ fn claim_in_tx(
         conflicts
     };
 
+    // The gate has just read these edges to let the claim through; read them
+    // once more as what they always were underneath — a context channel. The
+    // claimant is handed each finished dependency's own summary here, at the
+    // one moment it is guaranteed to be listening.
+    let ground = deps::ground_for(tx, &id)?;
+
     let task = fetch_task_by_seq(tx, seq)?.expect("claimed row exists");
     Ok(Claim {
         task,
         paths: declared,
         conflicts,
+        ground,
     })
 }
 
@@ -1632,6 +1689,7 @@ mod tests {
                 TTL,
                 &["src/db.rs".to_string()],
                 OnConflict::Report,
+                Clearance::Done,
             )
             .unwrap();
         assert_eq!(claim.task.status, Status::Claimed);
@@ -1651,7 +1709,7 @@ mod tests {
 
         let claim = db
             .tasks()
-            .claim_scoped(mine, "a:1", TTL, &[], OnConflict::Report)
+            .claim_scoped(mine, "a:1", TTL, &[], OnConflict::Report, Clearance::Done)
             .unwrap();
         assert_eq!(claim.paths, vec!["src/db.rs"]);
         assert_eq!(claim.conflicts.len(), 1);
@@ -1673,6 +1731,7 @@ mod tests {
                 TTL,
                 &["src/db.rs".to_string()],
                 OnConflict::Refuse,
+                Clearance::Done,
             )
             .unwrap_err();
         assert!(matches!(err, Error::PathConflict { .. }), "{err:?}");
@@ -1688,7 +1747,14 @@ mod tests {
         let seq = seed(&db, "t");
         let err = db
             .tasks()
-            .claim_scoped(seq, "a:1", TTL, &["../etc".to_string()], OnConflict::Report)
+            .claim_scoped(
+                seq,
+                "a:1",
+                TTL,
+                &["../etc".to_string()],
+                OnConflict::Report,
+                Clearance::Done,
+            )
             .unwrap_err();
         assert!(
             err.to_string().contains("not a usable path pattern"),
@@ -1704,6 +1770,72 @@ mod tests {
     }
 
     #[test]
+    fn a_claim_hands_over_the_ground_it_stands_on() {
+        let db = db();
+        let schema = seed(&db, "schema");
+        let api = seed(&db, "api");
+        db.deps().add(api, schema, "cli").unwrap();
+        db.tasks().claim(schema, "codex:9f2c", TTL).unwrap();
+        db.tasks()
+            .complete(schema, "codex:9f2c", "the schema lives in db.rs")
+            .unwrap();
+
+        let claim = db
+            .tasks()
+            .claim_scoped(
+                api,
+                "claude-code:af31",
+                TTL,
+                &[],
+                OnConflict::Report,
+                Clearance::Done,
+            )
+            .unwrap();
+        assert_eq!(claim.ground.len(), 1);
+        assert_eq!(claim.ground[0].seq, schema);
+        assert_eq!(
+            claim.ground[0].result.as_deref(),
+            Some("the schema lives in db.rs")
+        );
+    }
+
+    #[test]
+    fn next_routes_around_a_task_held_for_a_verdict_and_says_which_review() {
+        let db = db();
+        let work = seed(&db, "port the loader");
+        let dependent = seed(&db, "use the loader");
+        db.deps().add(dependent, work, "cli").unwrap();
+        db.tasks().set_review(work, true, "cli").unwrap();
+        declare(&db, work, &["src/loader.rs"]);
+        db.tasks().claim(work, "codex:9f2c", TTL).unwrap();
+        let review = db
+            .tasks()
+            .complete(work, "codex:9f2c", "ported it")
+            .unwrap()
+            .review
+            .expect("a review was filed");
+
+        // The author's harness asks for work under `holds`. The review is
+        // recused from it and the dependent waits on the verdict, so the
+        // dispatch comes back empty — but each refusal keeps its own reason.
+        let dispatch = db
+            .tasks()
+            .claim_next("codex:1a2b", TTL, &scope(), true, Clearance::Reviewed)
+            .unwrap();
+        assert!(dispatch.claim.is_none(), "{dispatch:?}");
+        assert_eq!(dispatch.held, vec![(dependent, review)]);
+        assert_eq!(dispatch.recused.len(), 1);
+        assert_eq!(dispatch.recused[0].0, review);
+
+        // A harness that may take the review is handed it ahead of waiting.
+        let other = db
+            .tasks()
+            .claim_next("claude-code:af31", TTL, &scope(), true, Clearance::Reviewed)
+            .unwrap();
+        assert_eq!(other.claim.unwrap().task.seq, review);
+    }
+
+    #[test]
     fn next_hands_out_the_highest_priority_task_and_claims_it() {
         let db = db();
         db.tasks().create(PROJECT, "low", "", 0, "cli").unwrap();
@@ -1715,7 +1847,7 @@ mod tests {
 
         let dispatch = db
             .tasks()
-            .claim_next("codex:9f2c", TTL, &scope(), true)
+            .claim_next("codex:9f2c", TTL, &scope(), true, Clearance::Done)
             .unwrap();
         let claim = dispatch.claim.expect("a task was available");
         assert_eq!(claim.task.seq, high);
@@ -1728,8 +1860,14 @@ mod tests {
         let first = seed(&db, "first");
         let second = seed(&db, "second");
 
-        let a = db.tasks().claim_next("a:1", TTL, &scope(), true).unwrap();
-        let b = db.tasks().claim_next("b:1", TTL, &scope(), true).unwrap();
+        let a = db
+            .tasks()
+            .claim_next("a:1", TTL, &scope(), true, Clearance::Done)
+            .unwrap();
+        let b = db
+            .tasks()
+            .claim_next("b:1", TTL, &scope(), true, Clearance::Done)
+            .unwrap();
         assert_eq!(a.claim.unwrap().task.seq, first);
         assert_eq!(b.claim.unwrap().task.seq, second);
     }
@@ -1746,7 +1884,10 @@ mod tests {
         db.deps().add(waiting, gate, "cli").unwrap();
 
         // `waiting` outranks `gate` on priority but is not workable yet.
-        let dispatch = db.tasks().claim_next("a:1", TTL, &scope(), true).unwrap();
+        let dispatch = db
+            .tasks()
+            .claim_next("a:1", TTL, &scope(), true, Clearance::Done)
+            .unwrap();
         assert_eq!(dispatch.claim.unwrap().task.seq, gate);
         assert_eq!(dispatch.blocked, vec![waiting]);
     }
@@ -1762,7 +1903,7 @@ mod tests {
 
         let dispatch = db
             .tasks()
-            .claim_next("claude-code:af31", TTL, &scope(), true)
+            .claim_next("claude-code:af31", TTL, &scope(), true, Clearance::Done)
             .unwrap();
         assert!(dispatch.claim.is_none(), "{dispatch:?}");
         assert_eq!(dispatch.deferred.len(), 1);
@@ -1774,7 +1915,7 @@ mod tests {
         // The same request, with collision avoidance off, hands it over.
         let forced = db
             .tasks()
-            .claim_next("claude-code:af31", TTL, &scope(), false)
+            .claim_next("claude-code:af31", TTL, &scope(), false, Clearance::Done)
             .unwrap();
         assert_eq!(forced.claim.unwrap().task.seq, overlapping);
     }
@@ -1794,7 +1935,10 @@ mod tests {
         declare(&db, free, &["docs/**"]);
         db.tasks().claim(held, "codex:9f2c", TTL).unwrap();
 
-        let dispatch = db.tasks().claim_next("a:1", TTL, &scope(), true).unwrap();
+        let dispatch = db
+            .tasks()
+            .claim_next("a:1", TTL, &scope(), true, Clearance::Done)
+            .unwrap();
         assert_eq!(dispatch.claim.unwrap().task.seq, free);
         assert_eq!(dispatch.deferred.len(), 1);
     }
@@ -1802,7 +1946,10 @@ mod tests {
     #[test]
     fn next_on_an_empty_queue_returns_nothing_and_blames_nobody() {
         let db = db();
-        let dispatch = db.tasks().claim_next("a:1", TTL, &scope(), true).unwrap();
+        let dispatch = db
+            .tasks()
+            .claim_next("a:1", TTL, &scope(), true, Clearance::Done)
+            .unwrap();
         assert_eq!(dispatch, Dispatch::default());
     }
 
@@ -1817,7 +1964,7 @@ mod tests {
         declare(&db, mine, &["src/db.rs"]);
         db.tasks().claim(held, "codex:9f2c", TTL).unwrap();
 
-        let (blockers, conflicts) = db.tasks().readiness(mine).unwrap();
+        let (blockers, conflicts) = db.tasks().readiness(mine, Clearance::Done).unwrap();
         assert_eq!(blockers.len(), 1);
         assert_eq!(blockers[0].seq, gate);
         assert_eq!(conflicts.len(), 1);
@@ -1850,7 +1997,13 @@ mod tests {
                     let db = Db::open(&path).unwrap();
                     barrier.wait();
                     db.tasks()
-                        .claim_next(&format!("harness:{i:02}"), TTL, &scope(), true)
+                        .claim_next(
+                            &format!("harness:{i:02}"),
+                            TTL,
+                            &scope(),
+                            true,
+                            Clearance::Done,
+                        )
                         .unwrap()
                         .claim
                         .map(|c| c.task.seq)
