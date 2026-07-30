@@ -96,18 +96,36 @@ fn claim_conflict_message(
 }
 
 fn blocked_message(seq: i64, blockers: &[Blocker]) -> String {
-    let listed = join_and(blockers.iter().map(|b| {
-        format!(
+    let listed = join_and(blockers.iter().map(|b| match b.pending_review {
+        Some(review) if b.status == Status::Done => format!(
+            "task {} ({}, done but under review {review})",
+            b.seq,
+            crate::fmt::truncate(&b.title, 40),
+        ),
+        _ => format!(
             "task {} ({}, {})",
             b.seq,
             crate::fmt::truncate(&b.title, 40),
             b.status
-        )
+        ),
     }));
-    format!(
-        "task {seq} is blocked by {listed}; it becomes claimable once every \
-         dependency is done"
-    )
+    // A dependency that is finished but for its verdict deserves a different
+    // last clause: the fix is not to do the work, it is to wait for — or be —
+    // the harness that reads it.
+    if blockers
+        .iter()
+        .all(|b| b.status == Status::Done && b.pending_review.is_some())
+    {
+        format!(
+            "task {seq} is blocked by {listed}; the work is finished, but this queue \
+             holds dependents until the review delivers its verdict"
+        )
+    } else {
+        format!(
+            "task {seq} is blocked by {listed}; it becomes claimable once every \
+             dependency is done"
+        )
+    }
 }
 
 fn cycle_message(seq: i64, on: i64, path: &[i64]) -> String {

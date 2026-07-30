@@ -34,8 +34,8 @@ use crate::error::Error;
 use crate::footing;
 use crate::identity::{self, AgentId};
 use crate::model::{
-    Assertion, Blocker, Conflict, Contention, Footprint, Observed, Recusal, Standing, Status, Task,
-    TaskEvent, TaskSummary, Verdict, VerdictRecord,
+    Assertion, Blocker, Conflict, Contention, Footprint, Ground, Observed, Recusal, Shifted,
+    Standing, Status, Task, TaskEvent, TaskSummary, Verdict, VerdictRecord,
 };
 use crate::repo::{
     Claim, Delivered, Dispatch, MemoryQuery, NewAssertion, ProjectScope, Recalled, Subtask,
@@ -289,7 +289,14 @@ impl HirdMcp {
              simply cannot do a task, `task_release` hands it back without marking it failed.\n\
              \n\
              Tasks can depend on other tasks. A task whose dependencies are unfinished \
-             cannot be claimed, and the refusal names what it is waiting for.\n\
+             cannot be claimed, and the refusal names what it is waiting for. When you do \
+             claim, `built_on` carries each finished dependency's own result — the work \
+             this task was ordered after, summarised by whoever did it. Read it before \
+             the body: it is the context the dependency existed to produce. A `built_on` \
+             entry marked provisional is done but still under review; if its verdict \
+             sends that work back while you hold this task, your next `task_update` \
+             answers with `ground_shifted` — stop and re-read the reopened task before \
+             building further on what it made.\n\
              \n\
              Some tasks are reviews, and a review is barred to the harness whose work it \
              reviews — including this one. If a claim comes back saying the task is recused, \
@@ -612,6 +619,11 @@ struct TaskDetail {
     /// Tasks that must finish before this one can be claimed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     waiting_for: Vec<BlockerRow>,
+    /// The finished dependencies this task builds on — each one's own summary
+    /// of what it did, and whether that answer is upheld, done, or still
+    /// provisional under an unfinished review.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    built_on: Vec<GroundRow>,
     /// Tasks that are waiting for this one.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     blocks: Vec<i64>,
@@ -652,6 +664,10 @@ struct BlockerRow {
     seq: i64,
     title: String,
     status: Status,
+    /// The unfinished review holding this `done` blocker short of clearing —
+    /// present only under `under_review = "holds"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pending_review: Option<i64>,
 }
 
 impl From<Blocker> for BlockerRow {
@@ -660,13 +676,46 @@ impl From<Blocker> for BlockerRow {
             seq: b.seq,
             title: b.title,
             status: b.status,
+            pending_review: b.pending_review,
         }
     }
+}
+
+/// One finished dependency, handed over with the claim: the summary its own
+/// finisher wrote, and how far that word can currently be trusted.
+#[derive(Debug, Serialize)]
+struct GroundRow {
+    seq: i64,
+    title: String,
+    /// What finishing it said it did — the context this task was ordered
+    /// after it to have.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<String>,
+    /// `done`, `upheld`, or `under review N, provisional`. Provisional means a
+    /// sent-back verdict could reopen that work while this task runs; a
+    /// check-in will say so if it happens.
+    standing: String,
+}
+
+impl From<Ground> for GroundRow {
+    fn from(g: Ground) -> GroundRow {
+        GroundRow {
+            seq: g.seq,
+            title: g.title,
+            result: g.result,
+            standing: g.standing.describe(),
+        }
+    }
+}
+
+fn ground_rows(ground: Vec<Ground>) -> Vec<GroundRow> {
+    ground.into_iter().map(GroundRow::from).collect()
 }
 
 /// Everything about a task other than its own row.
 struct TaskContext {
     waiting_for: Vec<Blocker>,
+    ground: Vec<Ground>,
     blocks: Vec<i64>,
     paths: Vec<String>,
     conflicts: Vec<Conflict>,
@@ -697,9 +746,9 @@ impl TaskDetail {
             waiting_for: context
                 .waiting_for
                 .into_iter()
-                .filter(|b| !b.is_cleared())
                 .map(BlockerRow::from)
                 .collect(),
+            built_on: ground_rows(context.ground),
             blocks: context.blocks,
             paths: context.paths,
             overlaps: describe_all(&context.conflicts),
@@ -834,6 +883,12 @@ struct ClaimResult {
     /// asked for it; the queue knew it was relevant and sent it along.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     recalled: Vec<RecallRow>,
+    /// The finished tasks this one builds on: each one's own summary of what
+    /// it did, and how far that word can be trusted. The dependency order
+    /// existed because this task needs to know what that work turned out to
+    /// be — so here it is, unasked.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    built_on: Vec<GroundRow>,
     /// Restated so the model does not have to remember the initialize text.
     reminder: String,
 }
@@ -841,6 +896,12 @@ struct ClaimResult {
 impl ClaimResult {
     fn new(claim: Claim, holder: String, heartbeat: u64, recalled: Vec<Recalled>) -> ClaimResult {
         let overlaps = describe_all(&claim.conflicts);
+        let provisional: Vec<i64> = claim
+            .ground
+            .iter()
+            .filter(|g| g.standing.is_provisional())
+            .map(|g| g.seq)
+            .collect();
         let heartbeat_rule = format!(
             "call task_update at least every {heartbeat} minutes to keep this lease, \
              then task_complete or task_fail when you are done"
@@ -853,6 +914,20 @@ impl ClaimResult {
                  them. Otherwise: {heartbeat_rule}"
             )
         };
+        if !provisional.is_empty() {
+            let listed = provisional
+                .iter()
+                .map(|seq| format!("task {seq}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            reminder = format!(
+                "{listed} in `built_on` {} finished but still under review — a sent-back \
+                 verdict would reopen {}, and your next check-in will say so if it happens. \
+                 {reminder}",
+                plural(provisional.len(), "is", "are"),
+                plural(provisional.len(), "it", "them"),
+            );
+        }
         if !recalled.is_empty() {
             reminder = format!(
                 "read `recalled` first — earlier agents left those notes about this work, \
@@ -870,6 +945,7 @@ impl ClaimResult {
             paths: claim.paths,
             overlaps,
             recalled: recall_rows(recalled),
+            built_on: ground_rows(claim.ground),
             reminder,
         }
     }
@@ -886,6 +962,12 @@ struct NextResult {
     /// Open tasks that are waiting on unfinished dependencies.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     blocked: Vec<i64>,
+    /// Tasks whose every dependency is finished but for a verdict — the queue
+    /// is configured to hold their dependents until the named review
+    /// concludes. Different from `blocked`: the fix is a review being read,
+    /// not work being done.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    held: Vec<HeldRow>,
     /// Ready tasks passed over because another agent is in their files.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     deferred: Vec<DeferredRow>,
@@ -900,6 +982,13 @@ struct NextResult {
 struct DeferredRow {
     seq: i64,
     overlaps: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct HeldRow {
+    seq: i64,
+    /// The unfinished review whose verdict this task waits on.
+    review: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -922,6 +1011,11 @@ impl NextResult {
                 .map(|claim| ClaimResult::new(claim, holder, heartbeat, recalled)),
             idle,
             blocked: dispatch.blocked,
+            held: dispatch
+                .held
+                .into_iter()
+                .map(|(seq, review)| HeldRow { seq, review })
+                .collect(),
             deferred: dispatch
                 .deferred
                 .into_iter()
@@ -944,11 +1038,15 @@ impl NextResult {
 
 /// Why the queue had nothing to hand out, in the terms the agent can act on.
 fn idle_reason(dispatch: &Dispatch) -> String {
-    // Named first when it is the only thing left, because it is the only one of
-    // the three that waiting will not fix: a review of this harness's own work
-    // stays unclaimable until somebody opens a different tool.
     let recused = dispatch.recused.len();
-    if recused > 0 && dispatch.blocked.is_empty() && dispatch.deferred.is_empty() {
+    let held = dispatch.held.len();
+    let blocked = dispatch.blocked.len();
+    let deferred = dispatch.deferred.len();
+
+    // Named first when it is the only thing left, because it is the only one
+    // of the four that waiting will not fix: a review of this harness's own
+    // work stays unclaimable until somebody opens a different tool.
+    if recused > 0 && held == 0 && blocked == 0 && deferred == 0 {
         return format!(
             "{recused} task{} ready, but every one of them is a review of work this harness \
              did — they need an agent in another harness. Tell the human; waiting will not \
@@ -956,13 +1054,42 @@ fn idle_reason(dispatch: &Dispatch) -> String {
             plural(recused, " is", "s are")
         );
     }
-    let tail = if recused > 0 {
-        format!(", and {recused} that this harness is recused from (they need another harness)")
-    } else {
-        String::new()
-    };
-    match (dispatch.blocked.len(), dispatch.deferred.len()) {
-        (0, 0) => format!("nothing is open in this project; the queue is empty{tail}"),
+    // Held gets its own sentence when it is the whole story: "the work is done
+    // and its review has not concluded" points at a review to work or chase,
+    // where "waiting on dependencies" points at work that has not happened.
+    if held > 0 && recused == 0 && blocked == 0 && deferred == 0 {
+        let mut reviews: Vec<i64> = dispatch.held.iter().map(|(_, review)| *review).collect();
+        reviews.sort_unstable();
+        reviews.dedup();
+        let listed = reviews
+            .iter()
+            .map(|s| format!("{s}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return format!(
+            "{held} task{} finished but for a verdict: this queue holds dependents until \
+             review {listed} concludes. The way forward is that review, not waiting",
+            plural(held, " is", "s are")
+        );
+    }
+    let mut tail = String::new();
+    if held > 0 {
+        tail.push_str(&format!(
+            ", and {held} held until a review delivers its verdict"
+        ));
+    }
+    if recused > 0 {
+        tail.push_str(&format!(
+            ", and {recused} that this harness is recused from (they need another harness)"
+        ));
+    }
+    match (blocked, deferred) {
+        // Both zero with a tail means everything left is held or recused; the
+        // tail carries the counts.
+        (0, 0) if !tail.is_empty() => {
+            format!("nothing is workable: {}", tail.trim_start_matches(", and "))
+        }
+        (0, 0) => "nothing is open in this project; the queue is empty".to_string(),
         (0, n) => format!(
             "{n} task{} ready, but every one of them touches files another agent is \
              working right now; try again once they finish{tail}",
@@ -1115,6 +1242,11 @@ struct UpdateResult {
     status: Status,
     lease_expires_at: String,
     note_recorded: String,
+    /// Dependencies of this task that have stopped being `done` since the
+    /// claim let it through — sent back by a review, reopened, cancelled or
+    /// failed. One sentence each; the first also lands in `advice`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    ground_shifted: Vec<String>,
     #[serde(flatten)]
     witness: Evidence,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1311,7 +1443,9 @@ impl HirdMcp {
             (
                 released,
                 listed,
-                db.deps().unmet_map(&scope).unwrap_or_default(),
+                db.deps()
+                    .unmet_map(&scope, self.config.clearance())
+                    .unwrap_or_default(),
                 recused,
                 db.verdicts().standing(&scope).unwrap_or_default(),
             )
@@ -1341,11 +1475,13 @@ impl HirdMcp {
         let recall_limit = self.config.recall_limit();
         let detail = self.with_db(|db| {
             let task = db.tasks().get(args.seq)?;
-            let (waiting_for, conflicts) = db.tasks().readiness(args.seq)?;
+            let (waiting_for, conflicts) =
+                db.tasks().readiness(args.seq, self.config.clearance())?;
             Ok::<_, Error>(TaskDetail::new(
                 task.clone(),
                 TaskContext {
                     waiting_for,
+                    ground: db.deps().ground(args.seq)?,
                     blocks: db
                         .deps()
                         .dependents(args.seq)?
@@ -1383,9 +1519,14 @@ impl HirdMcp {
         // of recall work on the very first call.
         let (claim, recalled) = self
             .with_db(|db| {
-                let claim = db
-                    .tasks()
-                    .claim_scoped(args.seq, &actor, ttl, &paths, policy)?;
+                let claim = db.tasks().claim_scoped(
+                    args.seq,
+                    &actor,
+                    ttl,
+                    &paths,
+                    policy,
+                    self.config.clearance(),
+                )?;
                 // The tree as it stands is this task's baseline, so anything
                 // that moves from here is inside its window and everything
                 // already dirty is not.
@@ -1416,7 +1557,9 @@ impl HirdMcp {
         let recall_limit = self.config.recall_limit();
         let (dispatch, recalled) = self
             .with_db(|db| {
-                let dispatch = db.tasks().claim_next(&actor, ttl, &scope, avoid)?;
+                let dispatch =
+                    db.tasks()
+                        .claim_next(&actor, ttl, &scope, avoid, self.config.clearance())?;
                 let recalled = match &dispatch.claim {
                     Some(claim) => {
                         self.begin_witnessing(db, claim.task.seq);
@@ -1594,24 +1737,38 @@ impl HirdMcp {
         };
         let actor = self.actor();
         let ttl = self.config.lease_ttl();
-        let (task, evidence) = self
+        let (task, evidence, shifted) = self
             .with_db(|db| {
                 let task = db
                     .tasks()
                     .update(args.seq, &actor, start, &args.note, ttl)?;
                 // The heartbeat is the natural place to look: the agent is
                 // between edits, and this is the last chance to tell it a file
-                // moved before it writes the next one.
-                Ok::<_, Error>((task, self.witnessed(db, args.seq)))
+                // moved before it writes the next one. The same goes for the
+                // ground: readiness was checked at the claim and never again,
+                // so this is where a blocker that has stopped being done —
+                // sent back, reopened, cancelled — reaches the one agent
+                // building on it. Best-effort like every rider: a failure here
+                // may not cost the agent the update it actually asked for.
+                let shifted = db.deps().shifted(args.seq).unwrap_or_default();
+                Ok::<_, Error>((task, self.witnessed(db, args.seq), shifted))
             })
             .map_err(stringify)?;
 
+        let ground_shifted: Vec<String> = shifted.iter().map(Shifted::describe).collect();
+        // Shifted ground outranks the witness's advice: a contended file costs
+        // an edit, a sent-back foundation costs the task.
+        let advice = ground_shifted
+            .first()
+            .cloned()
+            .or_else(|| evidence.advice());
         json(&UpdateResult {
             seq: task.seq,
             status: task.status,
             lease_expires_at: task.lease_expires_at.unwrap_or_default(),
             note_recorded: args.note.trim().to_string(),
-            advice: evidence.advice(),
+            ground_shifted,
+            advice,
             witness: evidence,
         })
     }
@@ -2171,6 +2328,132 @@ mod tests {
                 .contains("sent back by claude-code"),
             "{detail}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_claim_arrives_knowing_what_it_builds_on() {
+        let s = server();
+        let schema = seed(&s, "design the schema", "");
+        let api = seed(&s, "port the api", "");
+        s.with_db(|db| {
+            db.deps().add(api, schema, "cli")?;
+            db.tasks()
+                .claim(schema, "codex:9f2c", Config::default().lease_ttl())?;
+            db.tasks()
+                .complete(schema, "codex:9f2c", "the schema lives in db.rs")
+        })
+        .unwrap();
+
+        let out = parse(s.task_claim(Parameters(just(api))).await);
+        assert_eq!(out["built_on"][0]["seq"], schema);
+        assert_eq!(out["built_on"][0]["result"], "the schema lives in db.rs");
+        assert_eq!(out["built_on"][0]["standing"], "done");
+        // Nothing provisional, so the reminder spends no words on it.
+        assert!(
+            !out["reminder"].as_str().unwrap().contains("under review"),
+            "{out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn provisional_ground_is_flagged_on_the_claim_and_shifts_at_the_check_in() {
+        let s = server();
+        let (work, review) = reviewed_work(&s).await;
+        let dependent = seed(&s, "use the loader", "");
+        s.with_db(|db| db.deps().add(dependent, work, "cli"))
+            .unwrap();
+
+        // Claimed while the review is open: the handover says the ground is
+        // provisional, and the reminder says what that means.
+        let out = parse(s.task_claim(Parameters(just(dependent))).await);
+        let standing = out["built_on"][0]["standing"].as_str().unwrap();
+        assert!(
+            standing.contains(&format!("under review {review}")),
+            "{out}"
+        );
+        assert!(standing.contains("provisional"), "{out}");
+        assert!(
+            out["reminder"]
+                .as_str()
+                .unwrap()
+                .contains("still under review"),
+            "{out}"
+        );
+
+        // The verdict takes the ground away; the next heartbeat says so.
+        parse(
+            s.task_complete(Parameters(TaskCompleteArgs {
+                seq: review,
+                result: "the empty case is missed".into(),
+                verdict: Some("sent_back".into()),
+            }))
+            .await,
+        );
+        let out = parse(
+            s.task_update(Parameters(TaskUpdateArgs {
+                seq: dependent,
+                note: "wiring the loader in".into(),
+                status: None,
+            }))
+            .await,
+        );
+        let shifted = out["ground_shifted"][0].as_str().unwrap();
+        assert!(
+            shifted.contains(&format!("sent back by review {review}")),
+            "{out}"
+        );
+        assert_eq!(out["advice"].as_str().unwrap(), shifted, "{out}");
+    }
+
+    #[tokio::test]
+    async fn holds_keeps_dependents_off_the_board_until_the_verdict() {
+        let s = HirdMcp::new(
+            Db::open_in_memory().unwrap(),
+            AgentId::new("claude-code", "af31"),
+            PROJECT.to_string(),
+            Config {
+                under_review: crate::config::UnderReview::Holds,
+                ..Config::default()
+            },
+        );
+        // Work finished by this same harness, so the review that filed itself
+        // is recused from us and the dependent is held — the queue has
+        // nothing for this session, and has to say why.
+        let work = seed(&s, "port the loader", "");
+        let dependent = seed(&s, "use the loader", "");
+        let review = s
+            .with_db(|db| {
+                db.deps().add(dependent, work, "cli")?;
+                db.tasks().set_review(work, true, "cli")?;
+                db.scopes().declare(
+                    work,
+                    &["src/loader.rs".to_string()],
+                    "cli",
+                    crate::repo::OnConflict::Report,
+                )?;
+                db.tasks()
+                    .claim(work, "claude-code:9x9x", Config::default().lease_ttl())?;
+                db.tasks().complete(work, "claude-code:9x9x", "ported")
+            })
+            .unwrap()
+            .review
+            .expect("a review was filed");
+
+        let err = s.task_claim(Parameters(just(dependent))).await.unwrap_err();
+        assert!(err.contains(&format!("under review {review}")), "{err}");
+        assert!(err.contains("verdict"), "{err}");
+
+        let out = parse(
+            s.task_next(Parameters(TaskNextArgs {
+                all_projects: None,
+                avoid_conflicts: None,
+            }))
+            .await,
+        );
+        assert!(out.get("claimed").is_none(), "{out}");
+        assert_eq!(out["held"][0]["seq"], dependent);
+        assert_eq!(out["held"][0]["review"], review);
+        assert!(out["idle"].as_str().unwrap().contains("verdict"), "{out}");
     }
 
     #[tokio::test]

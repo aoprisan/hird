@@ -892,6 +892,13 @@ fn agents(db: &Db, scope: &ProjectScope, out: &mut impl Write) -> anyhow::Result
         for found in db.witnessed().contention(task.seq).unwrap_or_default() {
             writeln!(out, "    !!!    {}", found.describe())?;
         }
+        // Ground that moved while the agent was on it: a dependency that
+        // stopped being done — sent back, reopened, cancelled — after this
+        // task was let through. The agent hears at its next check-in; the
+        // human deserves the same line without waiting for one.
+        for shifted in db.deps().shifted(task.seq).unwrap_or_default() {
+            writeln!(out, "    !!!    {}", shifted.describe())?;
+        }
     }
     Ok(())
 }
@@ -941,7 +948,7 @@ fn ls(
         writeln!(out, "no tasks")?;
         return Ok(());
     }
-    let unmet = db.deps().unmet_map(&scope)?;
+    let unmet = db.deps().unmet_map(&scope, config.clearance())?;
     // What each task did to the tree, which the row prints as one word. A
     // failure here costs the listing a column, not the listing.
     let footprints = db.witnessed().footprints(&scope).unwrap_or_default();
@@ -1077,14 +1084,32 @@ fn show(db: &Db, seq: i64, config: &Config, out: &mut impl Write) -> anyhow::Res
     }
     writeln!(out, "created   {}", fmt::age_phrase(&task.created_at, now))?;
 
-    let (blockers, conflicts) = db.tasks().readiness(seq)?;
+    let (blockers, conflicts) = db.tasks().readiness(seq, config.clearance())?;
     if !blockers.is_empty() {
         let listed = blockers
             .iter()
-            .map(|b| format!("#{} ({})", b.seq, b.status))
+            .map(|b| match b.pending_review {
+                // Only reachable under `under_review = "holds"`: the work is
+                // done, and what the dependent waits on is the verdict.
+                Some(review) if b.status == Status::Done => {
+                    format!("#{} (done, under review {review})", b.seq)
+                }
+                _ => format!("#{} ({})", b.seq, b.status),
+            })
             .collect::<Vec<_>>()
             .join(", ");
         writeln!(out, "waits for {listed}")?;
+    }
+    // The ground under the task: what the work it builds on says for itself.
+    // One line per finished dependency — standing first, then as much of its
+    // result as a line can hold.
+    for ground in db.deps().ground(seq)? {
+        let result = ground
+            .result
+            .as_deref()
+            .map(|r| format!(" — {}", fmt::truncate(r, 60)))
+            .unwrap_or_default();
+        writeln!(out, "built on  {}{result}", ground.label())?;
     }
     let dependents = db.deps().dependents(seq)?;
     if !dependents.is_empty() {

@@ -1276,3 +1276,46 @@ needs = ["schema"]
         "re-applying should be quiet:\n{shown}"
     );
 }
+
+/// `hird show` on a dependent names the ground it builds on: each finished
+/// dependency's standing and its own result, and — under `holds` — the review
+/// its readiness is waiting for.
+#[test]
+fn show_names_the_ground_a_task_builds_on() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&[
+        "add",
+        "port the loader",
+        "--review",
+        "--path",
+        "src/loader.rs",
+    ]);
+    sandbox.run(&["add", "use the loader", "--needs", "1"]);
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex.claim(1);
+    codex
+        .call(
+            "task_complete",
+            serde_json::json!({"seq": 1, "result": "the loader keeps the env-var precedence"}),
+        )
+        .unwrap();
+    codex.shutdown();
+
+    let shown = sandbox.run(&["show", "2"]);
+    assert!(
+        shown.contains("built on  #1 under review 3, provisional"),
+        "{shown}"
+    );
+    assert!(shown.contains("the loader keeps the env-var"), "{shown}");
+
+    // Under the default config the dependent is not waiting; under `holds`
+    // the same board says what the wait actually is.
+    assert!(!shown.contains("waits for #1"), "{shown}");
+    sandbox.write_config("under_review = \"holds\"\n");
+    let held = sandbox.run(&["show", "2"]);
+    assert!(
+        held.contains("waits for #1 (done, under review 3)"),
+        "{held}"
+    );
+}

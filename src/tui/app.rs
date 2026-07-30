@@ -75,6 +75,10 @@ pub struct AgentRow {
     /// Files this agent and another both declared and that have since moved,
     /// already written out as sentences.
     pub contentions: Vec<String>,
+    /// Dependencies of this agent's task that stopped being `done` while it
+    /// was held — sent back, reopened, cancelled — already written out as
+    /// sentences. An agent building on ground that moved, seen from outside.
+    pub shifted: Vec<String>,
     /// Whether anything has moved under this agent at all. `changed` being
     /// empty is not the same statement — it is also what a project hird
     /// cannot watch looks like.
@@ -94,6 +98,9 @@ pub struct Overlap {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Readiness {
     pub waiting_for: Vec<Blocker>,
+    /// The finished dependencies the task builds on, each with its own result
+    /// and how far that result can currently be trusted.
+    pub ground: Vec<crate::model::Ground>,
     pub blocks: Vec<i64>,
     pub paths: Vec<String>,
     pub conflicts: Vec<Conflict>,
@@ -218,6 +225,9 @@ pub struct App {
     /// Task numbers that are somebody's review, so the board can say so
     /// without opening each card.
     pub reviews: BTreeMap<i64, i64>,
+    /// Judged task number to the unfinished review of it, so a done card can
+    /// say its `done` is still provisional.
+    pub under_review: BTreeMap<i64, i64>,
     /// Task number to the newest verdict delivered on its work, so the board
     /// can tell "done" from "done, and seen to be done by another harness".
     pub verdicts: BTreeMap<i64, Verdict>,
@@ -282,6 +292,7 @@ impl App {
             selected: [0; 4],
             unmet: BTreeMap::new(),
             reviews: BTreeMap::new(),
+            under_review: BTreeMap::new(),
             verdicts: BTreeMap::new(),
             footprints: BTreeMap::new(),
             agents: Vec::new(),
@@ -374,8 +385,20 @@ impl App {
         let scope = self.scope();
         self.tasks = db.tasks().list(&scope, None)?;
         self.counts = db.tasks().counts(&scope)?;
-        self.unmet = db.deps().unmet_map(&scope)?;
+        self.unmet = db.deps().unmet_map(&scope, self.config.clearance())?;
         self.reviews = db.recusals().reviews(&scope)?;
+        // Inverted from `reviews` and filtered to reviews still in flight:
+        // the judged card's `done` is provisional exactly while one is.
+        self.under_review = self
+            .reviews
+            .iter()
+            .filter(|(review, _)| {
+                self.tasks
+                    .iter()
+                    .any(|t| t.seq == **review && !t.status.is_terminal())
+            })
+            .map(|(review, judged)| (*judged, *review))
+            .collect();
         self.verdicts = db.verdicts().standing(&scope)?;
         self.footprints = db.witnessed().footprints(&scope)?;
         self.waves = dispatch_waves(&self.tasks, &db.deps().edges(&scope)?);
@@ -393,6 +416,13 @@ impl App {
                 .unwrap_or_default()
                 .iter()
                 .map(crate::model::Contention::describe)
+                .collect();
+            agent.shifted = db
+                .deps()
+                .shifted(agent.seq)
+                .unwrap_or_default()
+                .iter()
+                .map(crate::model::Shifted::describe)
                 .collect();
         }
         self.assertions = db.memory().search(
@@ -836,9 +866,10 @@ impl App {
         let task = db.tasks().get(seq)?;
         let events = db.tasks().events(&task.id, 40)?;
         let learned = db.memory().for_task(&task.id)?;
-        let (waiting_for, conflicts) = db.tasks().readiness(seq)?;
+        let (waiting_for, conflicts) = db.tasks().readiness(seq, self.config.clearance())?;
         let readiness = Readiness {
             waiting_for,
+            ground: db.deps().ground(seq)?,
             blocks: db
                 .deps()
                 .dependents(seq)?
@@ -935,6 +966,7 @@ fn agent_rows(
             overlaps: Vec::new(),
             changed: moved.get(&t.seq).cloned().unwrap_or_default(),
             contentions: Vec::new(),
+            shifted: Vec::new(),
             footprint: footprints.get(&t.seq).copied().unwrap_or_default(),
         })
         .collect();

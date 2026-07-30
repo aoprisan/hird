@@ -33,6 +33,7 @@
     <li><a href="#split">Splitting a task</a></li>
     <li><a href="#review">No agent reviews its own work</a></li>
     <li><a href="#verdict">The review closes its own loop</a></li>
+    <li><a href="#ground">The ground a task builds on</a></li>
     <li><a href="#memory">Memory</a></li>
     <li class="sub"><a href="#recall">Recall</a></li>
     <li class="sub"><a href="#footing">Footing: when a fact went stale</a></li>
@@ -1030,6 +1031,76 @@ codex                3          0</code></pre>
 </p>
 </section>
 
+<section id="ground">
+<h2>The ground a task builds on</h2>
+
+<p>
+  A dependency edge means one task needs what another produces — "the API
+  waits for the schema" is about <em>knowing the schema</em>, not just
+  outliving it. So the edge is a context channel, not only a gate: claiming a
+  task hands over each finished dependency's own result, written by whoever
+  finished it, without the claimant knowing to ask.
+</p>
+
+<pre><code>task_claim { <span class="s">"seq"</span>: 2 }
+
+{ <span class="s">"claimed"</span>: 2, ...
+  <span class="s">"built_on"</span>: [{ <span class="s">"seq"</span>: 1, <span class="s">"title"</span>: <span class="s">"Design the storage schema"</span>,
+                 <span class="s">"result"</span>: <span class="s">"schema in src/db.rs; migrations are an array,
+                            version = index + 1"</span>,
+                 <span class="s">"standing"</span>: <span class="s">"done"</span> }] }</code></pre>
+
+<p>
+  <code>standing</code> says how far that word can be trusted, the same move
+  memory's footing makes for facts: <code>done</code>, <code>upheld</code> —
+  read and signed for by a harness that provably did not write it — or
+  <code>under review 5, provisional</code>, which means the review has not
+  delivered its verdict and a <code>sent_back</code> could still reopen that
+  work.
+</p>
+
+<p>
+  Provisional matters because verdicts made <code>done</code> revocable. A
+  dependent claimed while its blocker's review is still open is building on an
+  answer that can be taken back — and when that happens, the queue is the only
+  participant positioned to notice. Now it does something about it, twice
+  over: the reopened work's live dependents get a <code>ground_shifted</code>
+  event on their trails in the same transaction as the verdict, and each
+  holder hears at its next check-in, ahead of everything else the reply could
+  say:
+</p>
+
+<pre><code>task_update { <span class="s">"seq"</span>: 2, <span class="s">"note"</span>: <span class="s">"wiring the loader in"</span> }
+
+{ ...,
+  <span class="s">"ground_shifted"</span>: [<span class="s">"task 1 (Design the storage schema), which this task
+      builds on, was sent back by review 5 and reopened; re-read it — the
+      findings are in its brief — before building further on its work"</span>] }</code></pre>
+
+<p>
+  The same sentence catches ground lost any other way — a blocker you reopened
+  or cancelled, or one that failed since — attributed no further than its
+  status can back. Nothing interrupts an agent mid-edit: hird tells, at the
+  next moment it is listening, and lets it decide — the same manners the
+  witness has.
+</p>
+
+<p>
+  Whether provisional ground should <em>hold</em> dependents back is a policy,
+  not a rule: <code>under_review = "clears"</code> (the default) makes them
+  workable at once and tells them what they stand on; <code>"holds"</code>
+  keeps them unclaimable until the verdict, for work whose later stages cost
+  more than the wait. Under <code>holds</code> the refusal and the board both
+  say what the wait actually is — <code>waits for #1 (done, under review
+  5)</code> — and <code>task_next</code> reports held tasks in their own
+  bucket, because "finished but for a verdict" points you at a review to
+  chase, not at work to do. On every board, a <code>done</code> card with an
+  open review wears <code>under review #5</code> until the verdict lands: the
+  difference between <em>done</em> and <em>done, so far as anyone has
+  checked</em>.
+</p>
+</section>
+
 <section id="memory">
 <h2>Memory</h2>
 
@@ -1428,6 +1499,12 @@ all_projects_by_default = false
 #   "report"  record it and tell the agent who else is in there  (default)
 #   "refuse"  reject the claim outright, rolling back anything it took</span>
 path_conflicts = <span class="s">"report"</span>
+
+<span class="c"># What a finished dependency under an unfinished review does to its dependents:
+#   "clears"  workable at once, told the ground they build on is provisional
+#             (default)
+#   "holds"   unclaimable until the review delivers its verdict</span>
+under_review = <span class="s">"clears"</span>
 
 <span class="c"># Whether task_next passes over tasks whose files overlap live work. Default
 # true: when the queue gets to choose, it should not choose a collision.</span>

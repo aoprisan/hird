@@ -368,6 +368,10 @@ it becomes claimable once every dependency is done
 Only `done` clears a blocker. A failed dependency keeps its dependents off the
 ready list, because the work they were waiting for did not happen.
 
+The edge is also a context channel: when the blockers are done and the
+dependent is claimed, the claim arrives carrying each blocker's own result —
+see [the ground a task builds on](#the-ground-a-task-builds-on).
+
 ### Two agents, one file
 
 The queue also knows which files each task expects to touch, so it can see the
@@ -781,6 +785,68 @@ delivered verdicts and nothing else. It is a report, not a scheduler: nothing
 routes work by it, and what to do about a harness that ships rework is a call
 hird leaves to you — now made over a table instead of a hunch.
 
+## The ground a task builds on
+
+A dependency edge means one task needs what another produces — "the API waits
+for the schema" is about *knowing the schema*, not just outliving it. So the
+edge is a context channel, not only a gate: claiming a task hands over each
+finished dependency's own result, written by whoever finished it, without the
+claimant knowing to ask.
+
+```
+task_claim { seq: 2 }
+
+{ "claimed": 2, ...
+  "built_on": [{ "seq": 1, "title": "Design the storage schema",
+                 "result": "schema in src/db.rs; migrations are an array,
+                            version = index + 1",
+                 "standing": "done" }] }
+```
+
+`standing` says how far that word can be trusted, the same move memory's
+footing makes for facts: `done`, `upheld` — read and signed for by a harness
+that provably did not write it — or `under review 5, provisional`, which
+means the review has not delivered its verdict and a `sent_back` could still
+reopen that work.
+
+Provisional matters because verdicts made `done` revocable. A dependent
+claimed while its blocker's review is still open is building on an answer
+that can be taken back — and when that happens, the queue is the only
+participant positioned to notice. Now it does something about it, twice
+over. The reopened work's live dependents get a `ground_shifted` event on
+their trails in the same transaction as the verdict. And the holder hears at
+its next check-in, ahead of everything else the reply could say:
+
+```
+task_update { seq: 2, note: "wiring the loader in" }
+
+{ ...,
+  "ground_shifted": ["task 1 (Design the storage schema), which this task
+      builds on, was sent back by review 5 and reopened; re-read it — the
+      findings are in its brief — before building further on its work"] }
+```
+
+The same sentence catches ground lost any other way — a blocker a human
+reopened or cancelled, or one that failed since — attributed no further than
+its status can back. Nothing interrupts the agent mid-edit: hird tells, at
+the next moment it is listening, and lets it decide — the same manners the
+witness has.
+
+Whether provisional ground should *hold* dependents back is a policy, not a
+rule:
+
+```toml
+under_review = "clears"   # default: workable at once, told what it stands on
+under_review = "holds"    # unclaimable until the review delivers its verdict
+```
+
+Under `holds`, the refusal and the board both say what the wait actually is —
+`waits for #1 (done, under review 5)` — and `task_next` reports held tasks in
+their own bucket, because "finished but for a verdict" points you at a review
+to chase, not at work to do. On every board, a `done` card with an open
+review wears `under review #5` until the verdict lands: the difference
+between *done* and *done, so far as anyone has checked*.
+
 ## Memory
 
 The queue is for work; memory is for what the work taught you. Agents call
@@ -1065,6 +1131,12 @@ all_projects_by_default = false
 #   "refuse"  reject the claim outright, rolling back anything it took
 path_conflicts = "report"
 
+# What a finished dependency under an unfinished review does to its dependents:
+#   "clears"  workable at once, told the ground they build on is provisional
+#             (default)
+#   "holds"   unclaimable until the review delivers its verdict
+under_review = "clears"
+
 # Whether task_next passes over tasks whose files overlap live work. Default
 # true: when the queue gets to choose, it should not choose a collision.
 dispatch_avoids_conflicts = true
@@ -1118,10 +1190,11 @@ protocol errors, so a model can relay them to you as-is instead of reporting
 that a tool broke.
 
 None of the things an agent is told without asking needed a thirteenth tool.
-Recall rides along with the claim; `footprint`, `changed`, `contended` and
-`undeclared` ride along with every check-in and every finishing call; `standing`
-rides along with every fact hird serves. Something an agent has to know to ask for is something
-it will not ask for.
+Recall and `built_on` ride along with the claim; `footprint`, `changed`,
+`contended` and `undeclared` ride along with every check-in and every
+finishing call; `ground_shifted` rides along with the heartbeat; `standing`
+rides along with every fact hird serves. Something an agent has to know to
+ask for is something it will not ask for.
 
 ## Examples
 

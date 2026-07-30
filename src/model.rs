@@ -221,6 +221,9 @@ pub enum EventKind {
     Reviewed,
     /// The witness saw the working tree change under this task.
     Witnessed,
+    /// A finished task this one builds on stopped being finished — sent back
+    /// by a review, reopened, cancelled or failed — while this task was held.
+    GroundShifted,
 }
 
 impl EventKind {
@@ -243,6 +246,7 @@ impl EventKind {
             EventKind::Recused => "recused",
             EventKind::Reviewed => "reviewed",
             EventKind::Witnessed => "witnessed",
+            EventKind::GroundShifted => "ground_shifted",
         }
     }
 }
@@ -275,6 +279,7 @@ impl FromStr for EventKind {
             "recused" => Ok(EventKind::Recused),
             "reviewed" => Ok(EventKind::Reviewed),
             "witnessed" => Ok(EventKind::Witnessed),
+            "ground_shifted" => Ok(EventKind::GroundShifted),
             other => Err(format!("unknown event kind {other:?}")),
         }
     }
@@ -334,6 +339,25 @@ pub struct TaskEvent {
     pub detail: String,
 }
 
+/// What it takes for a dependency to clear its dependents.
+///
+/// `done` was the whole answer until v1.7 made `done` revocable: a review can
+/// send finished work back, and a dependent claimed in the meantime is building
+/// on ground that may be pulled out from under it. Whether that possibility
+/// holds the dependent back is policy, not fact, so it is configuration
+/// (`under_review`) rather than code.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Clearance {
+    /// `done` clears a dependency, reviewed or not. The dependent is told the
+    /// ground is provisional rather than kept waiting.
+    #[default]
+    Done,
+    /// A `done` dependency with an unfinished review keeps holding its
+    /// dependents until the review delivers its verdict — upheld releases
+    /// them, sent back reopens the work and they wait on that instead.
+    Reviewed,
+}
+
 /// A task that must finish before another one can start.
 ///
 /// Carries enough context to explain a refusal without a second lookup, which
@@ -343,14 +367,21 @@ pub struct Blocker {
     pub seq: i64,
     pub title: String,
     pub status: Status,
+    /// The unfinished review of this blocker's work, where one exists. Only
+    /// meaningful on a `done` blocker: it is what makes that `done`
+    /// provisional rather than the last word.
+    pub pending_review: Option<i64>,
 }
 
 impl Blocker {
     /// A blocker is cleared only by reaching `done`; a `failed` or `cancelled`
     /// dependency keeps the dependent task off the ready list, because the work
-    /// it was waiting for did not happen.
-    pub fn is_cleared(&self) -> bool {
+    /// it was waiting for did not happen. Under [`Clearance::Reviewed`], `done`
+    /// under an unfinished review is not enough either — the verdict is still
+    /// out, and a sent-back would take the ground away again.
+    pub fn is_cleared(&self, clearance: Clearance) -> bool {
         self.status == Status::Done
+            && (clearance == Clearance::Done || self.pending_review.is_none())
     }
 }
 
@@ -414,6 +445,114 @@ impl Conflict {
 
 fn truncate_title(title: &str) -> String {
     crate::fmt::truncate(title, 40)
+}
+
+/// One finished dependency, handed over at claim time: what the work it
+/// produced says for itself, and how far that word can be trusted.
+///
+/// The dependency edge always was a context channel — "do the schema before
+/// the API" means the API needs to know what the schema turned out to be — but
+/// until v1.9 it was read only as a gate. The gate opens, the blocker's
+/// `result` is dropped on the floor, and the dependent's agent starts blind
+/// unless file overlap happens to carry something across. This is the row that
+/// closes that gap: the claimant is handed each blocker's own summary without
+/// knowing to ask for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ground {
+    pub seq: i64,
+    pub title: String,
+    /// The summary its finisher wrote. `None` only for work finished outside
+    /// the normal path — the column is what `task_complete` requires.
+    pub result: Option<String>,
+    pub standing: GroundStanding,
+}
+
+/// How much weight a finished dependency can bear.
+///
+/// Deliberately an echo of memory's `Standing` (§14): both answer "this was
+/// true when it was written — is it still?", one for assertions, one for the
+/// work a task builds on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GroundStanding {
+    /// Finished, with nothing further on record.
+    Done,
+    /// Finished and seen to be finished: the newest verdict on it, from a
+    /// harness that provably did not do the work, upheld it.
+    Upheld,
+    /// Finished, but its review has not delivered a verdict — a sent-back
+    /// would reopen this work, so whatever builds on it is building on a
+    /// provisional answer.
+    UnderReview { review: i64 },
+}
+
+impl GroundStanding {
+    /// `done`, `upheld`, `under review 15, provisional` — the words every
+    /// front end uses for it.
+    pub fn describe(self) -> String {
+        match self {
+            GroundStanding::Done => "done".to_string(),
+            GroundStanding::Upheld => "upheld".to_string(),
+            GroundStanding::UnderReview { review } => {
+                format!("under review {review}, provisional")
+            }
+        }
+    }
+
+    pub fn is_provisional(self) -> bool {
+        matches!(self, GroundStanding::UnderReview { .. })
+    }
+}
+
+impl Ground {
+    /// `#3 done`, `#3 upheld`, `#3 under review 15, provisional` — the label
+    /// every front end uses.
+    pub fn label(&self) -> String {
+        format!("#{} {}", self.seq, self.standing.describe())
+    }
+}
+
+/// A dependency that stopped being `done` while its dependent was being
+/// worked.
+///
+/// Readiness is checked at the claim and never again, which was sound while
+/// `done` was final. A verdict can now reopen finished work (§16), and a human
+/// could always cancel or reopen it; either way, an agent mid-task is building
+/// on ground that has moved, and it is the one participant with no way to
+/// notice. This is what its next check-in tells it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Shifted {
+    pub seq: i64,
+    pub title: String,
+    pub status: Status,
+    /// The review whose sent-back reopened it, when that is what happened and
+    /// nothing has happened since.
+    pub sent_back_by: Option<i64>,
+}
+
+impl Shifted {
+    /// One sentence, aimed at a model that has to decide what to do about it.
+    pub fn describe(&self) -> String {
+        let name = format!("task {} ({})", self.seq, truncate_title(&self.title));
+        match (self.sent_back_by, self.status) {
+            (Some(review), _) => format!(
+                "{name}, which this task builds on, was sent back by review {review} and \
+                 reopened; re-read it — the findings are in its brief — before building \
+                 further on its work"
+            ),
+            (None, Status::Cancelled) => format!(
+                "{name}, which this task builds on, has been cancelled since this task \
+                 was claimed"
+            ),
+            (None, Status::Failed) => {
+                format!("{name}, which this task builds on, has failed since this task was claimed")
+            }
+            (None, _) => format!(
+                "{name}, which this task builds on, was reopened since this task was \
+                 claimed and is no longer done"
+            ),
+        }
+    }
 }
 
 /// One file the witness saw change while a task was held.

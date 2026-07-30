@@ -1065,3 +1065,128 @@ repository offers it both ways: `footprint(seq)` for one task and
 `footprint` is a field on evidence agents already receive, not a thirteenth
 tool. Like recall and the witness before it, it reaches an agent that did not
 know to ask.
+
+## 18. (v1.9) The ground — what a task builds on
+
+Every dependency edge in this queue was drawn because one task needs what
+another produces. That is what "the API waits for the schema" *means*: not
+merely that the schema must exist first, but that the API's author needs to
+know what the schema turned out to be. And until now the queue read that edge
+exactly once, as a gate. The blocker goes `done`, the gate opens, the
+blocker's `result` — the one sentence its finisher wrote for exactly this
+moment — is dropped on the floor, and the dependent's agent starts blind
+unless recall's file overlap happens to carry something across. The causal
+edge, the strongest signal of relevance hird holds, was the one channel
+delivering nothing.
+
+And v1.7 quietly made the gate itself unsound. Readiness still says "only
+`done` clears a dependency", but §16 made `done` revocable: a review can send
+finished work back, reopening it in the same transaction as the verdict. A
+dependent claimed in the window between the completion and the verdict is
+building on ground that may be pulled out from under it — and when it is,
+*nobody tells it*. Its readiness was checked at the claim and never again.
+Its holder cannot see the verdict land. The board shows a reopened task and a
+live dependent, and the one participant positioned to connect them is the
+queue, which until now said nothing.
+
+So v1.9 teaches the queue to treat the ground under a task — the finished
+work it builds on — as a first-class thing: handed over, qualified, and
+watched.
+
+### The handover
+
+`task_claim` and `task_next` answer with `built_on`: one row per finished
+dependency, carrying its `seq`, title, its **own `result`** — the summary its
+finisher wrote — and a `standing`. The claim is the one moment the claimant
+is guaranteed to be listening, which is where every rider in hird lives, and
+the read happens inside the same transaction as the compare-and-set, so the
+handover describes the instant the task changed hands. `task_get` and `hird
+show` carry the same block (`built on  #3 done — the schema lives in db.rs`),
+and the TUI's task detail does too.
+
+`standing` is a deliberate echo of memory's §14: both answer *"this was true
+when it was written — is it still?"*, one for assertions, one for work.
+
+| | |
+|---|---|
+| `done` | finished, with nothing further on record |
+| `upheld` | finished and seen to be finished, by a harness that provably did not do it |
+| `under review N, provisional` | finished, but the review has not delivered its verdict |
+
+`provisional` is the honest word for the third state and the reason it must
+be said: the claimant is about to spend real work on that answer, and the
+difference between "settled" and "could be sent back while you build" is
+exactly the difference it cannot discover for itself.
+
+### The policy
+
+Whether provisional ground should *hold* a dependent back is not a fact, it
+is a judgement about a project's tolerance for rework — so like
+`path_conflicts` before it, it is a key rather than a rule:
+
+```toml
+under_review = "clears"   # or "holds"
+```
+
+`"clears"` is the default and the old behavior with the silence removed:
+`done` clears the dependency at once, and the claimant is told what it is
+standing on. `"holds"` keeps dependents unclaimable until the pending review
+finishes — upheld releases them; sent back reopens the work, and readiness,
+being derived, re-gates them behind it automatically; a review a human
+cancels abandons the hold, because the human keeps the last word they always
+had. The refusal teaches, the way every refusal here does: *"task 7 is
+blocked by task 3 (port the loader, done but under review 5); the work is
+finished, but this queue holds dependents until the review delivers its
+verdict."* And `task_next` routes around held tasks the way it routes around
+recused ones, in their own bucket — `held`, with the review each waits on —
+because "the work is done and the review has not been read" points a human at
+a completely different fix than "the work has not happened". A pending review
+is discovered from rows that already exist — an unfinished task recused from
+this one is what *being* its review means (§15) — so there is no migration
+and nothing new to keep consistent.
+
+### The shift
+
+When a sent-back verdict reopens work, its live dependents — tasks
+`claimed` or `in_progress`, let through while the ground was still standing —
+are the casualty the verdict cannot see. Delivery now writes a
+`ground_shifted` event on each of their trails in the same transaction as the
+reopen, so the record exists the moment the fact does. Open dependents get
+nothing: readiness is derived, so they are simply blocked again, and their
+eventual claim hands them the reopened brief anyway.
+
+The holder itself hears at its next check-in. `task_update` answers with
+`ground_shifted` — one sentence per dependency that has stopped being `done`,
+computed from the graph as it stands rather than replayed from events, which
+buys three things: it cannot be stale, it costs one indexed query only when
+the task has edges, and it catches every way ground gives way, not just the
+verdict — a blocker a human reopened, cancelled, or that failed since is
+reported in the same breath, attributed no further than its status can back.
+The sent-back case names its review and points at the findings: *"task 3,
+which this task builds on, was sent back by review 5 and reopened; re-read it
+— the findings are in its brief — before building further on its work."*
+That sentence outranks the witness's advice in the reply, because a contended
+file costs an edit and a sent-back foundation costs the task.
+
+The human gets the same three sights without asking: `hird agents` and the
+Swarm screen mark a live agent whose ground has shifted, and a `done` card
+whose review is still open carries `under review #5` on the board — the
+difference between *done* and *done, so far as anyone has checked*, visible
+from across the room.
+
+### What it deliberately does not do
+
+The queue does not interrupt. An agent mid-edit is not stopped, its lease is
+not revoked, its task is not released — hird tells, at the next moment the
+agent is listening, and lets it decide, exactly as the witness does with a
+contention. And nothing here re-litigates §16's restraint: a verdict still
+moves only work sitting exactly where the completion left it, and the shift
+report attributes a reopen to a review only when the newest verdict on
+record actually is that sent-back.
+
+### Still twelve tools
+
+`built_on`, `held` and `ground_shifted` are fields on answers agents already
+receive; the policy is a configuration key; the event is a row in a table
+that existed in v1. Nothing new to call, because an agent that had to ask
+"has my ground moved?" is an agent that would not ask.

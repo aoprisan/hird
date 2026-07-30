@@ -344,6 +344,14 @@ pub(super) fn deliver_in_tx(
                         crate::fmt::truncate(result.trim(), 120)
                     ),
                 )?;
+                // The work's dependents were let through on the strength of a
+                // `done` that has just been taken back. Any of them being
+                // worked right now is building on ground that moved, and its
+                // holder is the one participant with no way to notice — so
+                // the fallout goes on each of their trails here, in the same
+                // transaction as the reopen, and their next check-in relays
+                // it (`Deps::shifted`).
+                notify_live_dependents(tx, &work_id, work_seq, review.seq, actor, &now)?;
                 true
             }
             Verdict::SentBack => {
@@ -371,6 +379,43 @@ pub(super) fn deliver_in_tx(
         });
     }
     Ok(delivered)
+}
+
+/// Put the sent-back on the trail of every live dependent of the reopened
+/// work, so the shift is on the record the moment it happens rather than
+/// whenever somebody thinks to look.
+fn notify_live_dependents(
+    tx: &Transaction<'_>,
+    work_id: &str,
+    work_seq: i64,
+    review_seq: i64,
+    actor: &str,
+    now: &str,
+) -> Result<()> {
+    let dependents: Vec<String> = {
+        let mut stmt = tx.prepare(
+            "SELECT t.id FROM task_deps d
+             JOIN tasks t ON t.id = d.task_id
+             WHERE d.depends_on_id = ?1 AND t.status IN ('claimed','in_progress')
+             ORDER BY t.seq",
+        )?;
+        let rows = stmt.query_map([work_id], |row| row.get(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for dependent in dependents {
+        super::tasks::insert_event(
+            tx,
+            &dependent,
+            now,
+            actor,
+            EventKind::GroundShifted,
+            &format!(
+                "task {work_seq}, which this task builds on, was sent back by \
+                 review {review_seq} and reopened"
+            ),
+        )?;
+    }
+    Ok(())
 }
 
 /// The tasks a review judges: everything it is recused from.
@@ -545,6 +590,62 @@ mod tests {
         // The author may take their own work back up — the bar was on the
         // review, never on the fix.
         db.tasks().claim(work, "codex:9f2c", TTL).unwrap();
+    }
+
+    /// The reopen's fallout: an agent mid-task on top of the sent-back work
+    /// gets the shift on its trail in the same transaction, and an agent whose
+    /// task is merely open gets nothing — readiness re-derives for it anyway.
+    #[test]
+    fn sending_work_back_lands_on_the_trail_of_whoever_builds_on_it() {
+        let db = db();
+        let (work, review) = reviewed_work(&db, "codex:9f2c");
+        let live = db
+            .tasks()
+            .create(PROJECT, "use the loader", "", 0, "cli")
+            .unwrap()
+            .seq;
+        let idle = db
+            .tasks()
+            .create(PROJECT, "document the loader", "", 0, "cli")
+            .unwrap()
+            .seq;
+        db.deps().add(live, work, "cli").unwrap();
+        db.deps().add(idle, work, "cli").unwrap();
+        db.tasks().claim(live, "copilot:11", TTL).unwrap();
+
+        db.tasks().claim(review, "claude-code:af31", TTL).unwrap();
+        db.tasks()
+            .complete_with(
+                review,
+                "claude-code:af31",
+                "the error path drops the lock",
+                Some(Verdict::SentBack),
+            )
+            .unwrap();
+
+        let events_of = |seq: i64| {
+            let id = db.tasks().get(seq).unwrap().id;
+            db.tasks().events(&id, 40).unwrap()
+        };
+        let shifted: Vec<_> = events_of(live)
+            .into_iter()
+            .filter(|e| e.kind == crate::model::EventKind::GroundShifted)
+            .collect();
+        assert_eq!(shifted.len(), 1);
+        assert!(
+            shifted[0].detail.contains(&format!("task {work}")),
+            "{shifted:?}"
+        );
+        assert!(
+            shifted[0].detail.contains(&format!("review {review}")),
+            "{shifted:?}"
+        );
+        assert!(
+            !events_of(idle)
+                .iter()
+                .any(|e| e.kind == crate::model::EventKind::GroundShifted),
+            "an open dependent is re-gated by readiness; writing to its trail would be noise"
+        );
     }
 
     /// The whole loop, unattended: sent back, redone, re-reviewed, upheld —

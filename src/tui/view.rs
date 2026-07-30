@@ -128,6 +128,7 @@ fn render_column(frame: &mut Frame, area: Rect, app: &App, column: Column, now: 
                 now,
                 app.blocked_by(task.seq),
                 app.reviews.get(&task.seq).copied(),
+                app.under_review.get(&task.seq).copied(),
                 app.verdicts.get(&task.seq).copied(),
                 app.footprints.get(&task.seq).copied().unwrap_or_default(),
             ))
@@ -148,12 +149,14 @@ fn render_column(frame: &mut Frame, area: Rect, app: &App, column: Column, now: 
 }
 
 /// One card: `#seq title`, then a line of badges when there is anything to say.
+#[allow(clippy::too_many_arguments)]
 fn task_card(
     task: &TaskSummary,
     width: usize,
     now: DateTime<Utc>,
     blocked_by: &[i64],
     reviews: Option<i64>,
+    under_review: Option<i64>,
     verdict: Option<Verdict>,
     footprint: Footprint,
 ) -> Text<'static> {
@@ -224,6 +227,20 @@ fn task_card(
             format!("reviews #{reviewed}"),
             Style::default().magenta(),
         ));
+    }
+    // A done card whose review has not concluded is provisionally done: its
+    // dependents may already be building on it, and a sent-back would reopen
+    // it. Saying so is what keeps this card's green honest.
+    if let Some(review) = under_review {
+        if task.status == Status::Done {
+            if !badges.is_empty() {
+                badges.push(Span::raw("  "));
+            }
+            badges.push(Span::styled(
+                format!("under review #{review}"),
+                Style::default().magenta(),
+            ));
+        }
     }
     // The verdict, where it still describes the card: `done` with an upheld
     // verdict has been read and signed for by another harness, and `open`
@@ -392,6 +409,14 @@ fn agent_card(agent: &AgentRow, width: usize, now: DateTime<Utc>) -> Text<'stati
     for contention in &agent.contentions {
         lines.push(Line::from(Span::styled(
             format!("   ⚠ {}", fmt::truncate(contention, width)),
+            theme::contention_style(),
+        )));
+    }
+    // Equally loud, and worse: the ground this agent is building on has
+    // stopped being done while it works.
+    for shifted in &agent.shifted {
+        lines.push(Line::from(Span::styled(
+            format!("   ⚠ {}", fmt::truncate(shifted, width)),
             theme::contention_style(),
         )));
     }
@@ -813,10 +838,35 @@ fn render_task_detail(
                 readiness
                     .waiting_for
                     .iter()
-                    .map(|b| format!("#{} ({})", b.seq, b.status))
+                    .map(|b| match b.pending_review {
+                        Some(review) if b.status == Status::Done => {
+                            format!("#{} (done, under review {review})", b.seq)
+                        }
+                        _ => format!("#{} ({})", b.seq, b.status),
+                    })
                     .collect::<Vec<_>>()
                     .join(", "),
                 theme::blocked_style(),
+            ),
+        ]));
+    }
+    // The ground under the task: each finished dependency, standing first,
+    // then as much of its own result as the line can hold.
+    for ground in &readiness.ground {
+        let result = ground
+            .result
+            .as_deref()
+            .map(|r| format!(" — {}", fmt::truncate(r, 56)))
+            .unwrap_or_default();
+        lines.push(Line::from(vec![
+            Span::styled("built on   ", theme::focus_style()),
+            Span::styled(
+                format!("{}{result}", ground.label()),
+                if ground.standing.is_provisional() {
+                    Style::default().magenta()
+                } else {
+                    theme::dim_style()
+                },
             ),
         ]));
     }
@@ -1631,5 +1681,49 @@ mod tests {
         assert!(out.contains("waits #1"), "{out}");
         // And the status bar counts only the task that could actually go out.
         assert!(out.contains("1 ready"), "{out}");
+    }
+
+    /// A done card whose review has not concluded is provisionally done, and
+    /// the card says so — its dependents may already be building on it.
+    #[test]
+    fn a_done_card_under_an_open_review_says_so() {
+        let db = Db::open_in_memory().unwrap();
+        let work = db
+            .tasks()
+            .create(PROJECT, "port the loader", "", 0, "cli")
+            .unwrap()
+            .seq;
+        db.tasks().set_review(work, true, "cli").unwrap();
+        db.scopes()
+            .declare(
+                work,
+                &["src/loader.rs".to_string()],
+                "cli",
+                crate::repo::OnConflict::Report,
+            )
+            .unwrap();
+        db.tasks()
+            .claim(work, "codex:9f2c", Config::default().lease_ttl())
+            .unwrap();
+        db.tasks().complete(work, "codex:9f2c", "ported").unwrap();
+
+        let out = screen(&app_with(&db));
+        assert!(out.contains("under review #2"), "{out}");
+
+        // The verdict swaps the hedge for the signature.
+        db.tasks()
+            .claim(2, "claude-code:af31", Config::default().lease_ttl())
+            .unwrap();
+        db.tasks()
+            .complete_with(
+                2,
+                "claude-code:af31",
+                "read it, it holds",
+                Some(Verdict::Upheld),
+            )
+            .unwrap();
+        let out = screen(&app_with(&db));
+        assert!(!out.contains("under review #2"), "{out}");
+        assert!(out.contains("upheld"), "{out}");
     }
 }

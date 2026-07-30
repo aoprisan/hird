@@ -1363,3 +1363,117 @@ fn a_request_declaring_an_unknown_version_is_refused() {
 
     session.shutdown();
 }
+
+/// The dependency edge as a context channel, end to end across harnesses: the
+/// dependent's claim arrives carrying what the work it builds on said for
+/// itself, marked provisional while the review is open — and when the verdict
+/// sends that work back, the agent building on it hears at its next check-in.
+#[test]
+fn the_ground_is_handed_over_and_its_shift_reaches_the_builder() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&[
+        "add",
+        "port the loader",
+        "--review",
+        "--path",
+        "src/loader.rs",
+    ]);
+    sandbox.run(&["add", "use the loader", "--needs", "1"]);
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex.claim(1);
+    codex
+        .call(
+            "task_complete",
+            json!({"seq": 1, "result": "the loader keeps the env-var precedence"}),
+        )
+        .unwrap();
+    codex.shutdown();
+
+    // The claim hands over the blocker's own account of itself, and says the
+    // word is provisional while the review (task 3) has not concluded.
+    let mut claude = McpSession::start(&sandbox, "claude-code");
+    let claim = claude.call("task_claim", json!({"seq": 2})).unwrap();
+    assert_eq!(claim["built_on"][0]["seq"], 1, "{claim}");
+    assert_eq!(
+        claim["built_on"][0]["result"], "the loader keeps the env-var precedence",
+        "{claim}"
+    );
+    assert!(
+        claim["built_on"][0]["standing"]
+            .as_str()
+            .unwrap()
+            .contains("provisional"),
+        "{claim}"
+    );
+    assert!(
+        claim["reminder"].as_str().unwrap().contains("under review"),
+        "{claim}"
+    );
+
+    // The same harness may read the review — it did not do the work — and its
+    // sent-back reopens task 1 in the same transaction.
+    claude.call("task_claim", json!({"seq": 3})).unwrap();
+    claude
+        .call(
+            "task_complete",
+            json!({"seq": 3, "result": "the empty case is missed", "verdict": "sent_back"}),
+        )
+        .unwrap();
+
+    // The builder's next heartbeat carries the shift, as advice it can act on.
+    let update = claude
+        .call(
+            "task_update",
+            json!({"seq": 2, "note": "wiring the loader in"}),
+        )
+        .unwrap();
+    let shifted = update["ground_shifted"][0].as_str().unwrap();
+    assert!(shifted.contains("sent back by review 3"), "{update}");
+    assert!(
+        update["advice"].as_str().unwrap().contains("re-read"),
+        "{update}"
+    );
+    claude.shutdown();
+}
+
+/// `under_review = "holds"` keeps a dependent unclaimable until the verdict,
+/// and the refusal teaches what the wait actually is.
+#[test]
+fn holds_mode_keeps_dependents_waiting_for_the_verdict() {
+    let sandbox = Sandbox::new();
+    sandbox.write_config("under_review = \"holds\"\n");
+    sandbox.run(&[
+        "add",
+        "port the loader",
+        "--review",
+        "--path",
+        "src/loader.rs",
+    ]);
+    sandbox.run(&["add", "use the loader", "--needs", "1"]);
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex.claim(1);
+    codex
+        .call("task_complete", json!({"seq": 1, "result": "ported"}))
+        .unwrap();
+    // The author's harness cannot take the review, and the dependent waits on
+    // it — so the claim is refused with the reason, not with "blocked".
+    let err = codex.call("task_claim", json!({"seq": 2})).unwrap_err();
+    assert!(err.contains("under review 3"), "{err}");
+    assert!(err.contains("verdict"), "{err}");
+    codex.shutdown();
+
+    // The verdict clears the hold in the same breath as it lands.
+    let mut claude = McpSession::start(&sandbox, "claude-code");
+    claude.call("task_claim", json!({"seq": 3})).unwrap();
+    claude
+        .call(
+            "task_complete",
+            json!({"seq": 3, "result": "read it, it holds", "verdict": "upheld"}),
+        )
+        .unwrap();
+    let claim = claude.call("task_claim", json!({"seq": 2})).unwrap();
+    assert_eq!(claim["built_on"][0]["standing"], "upheld", "{claim}");
+    claude.shutdown();
+}
