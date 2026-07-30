@@ -597,6 +597,107 @@ fn the_agents_view_outside_git_says_nothing_about_the_tree() {
     codex.shutdown();
 }
 
+/// Reading is work too, and a board that cannot tell it from writing shows a
+/// finished investigation and a finished refactor as the same thing.
+///
+/// The whole point of the distinction is that hird says it out loud only where
+/// it watched: the last case here is the one that must stay silent.
+#[test]
+fn the_board_says_whether_a_task_wrote_anything_or_only_read() {
+    let sandbox = Sandbox::new();
+    sandbox.git_init();
+    sandbox.run(&["add", "audit the loader"]);
+    sandbox.run(&["add", "port the loader"]);
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex.claim(1);
+
+    // Held, and nothing has moved. Hedged, because the task is not over and
+    // its next call could still write something.
+    let listed = sandbox.run(&["ls"]);
+    let row = listed.lines().find(|l| l.contains("#1")).unwrap();
+    assert!(row.contains("read-only so far"), "{listed}");
+    let board = sandbox.run(&["agents"]);
+    assert!(board.contains("moved  nothing yet"), "{board}");
+
+    // Finished without writing, and now it is a verdict rather than a gauge.
+    let done = codex
+        .call(
+            "task_complete",
+            serde_json::json!({"seq": 1, "result": "read it; nothing needed changing"}),
+        )
+        .unwrap();
+    assert!(
+        done["footprint"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("read-only —"),
+        "{done}"
+    );
+    assert!(done.get("changed").is_none(), "{done}");
+
+    let listed = sandbox.run(&["ls"]);
+    let row = listed.lines().find(|l| l.contains("#1")).unwrap();
+    assert!(
+        row.contains("read-only") && !row.contains("so far"),
+        "{row}"
+    );
+    let shown = sandbox.run(&["show", "1"]);
+    assert!(
+        shown.contains("changed   read-only — nothing in the working tree moved"),
+        "{shown}"
+    );
+
+    // The same task worked the other way round says the opposite.
+    codex.claim(2);
+    sandbox.write_file("src/config.rs", "// ported\n");
+    let done = codex
+        .call(
+            "task_complete",
+            serde_json::json!({"seq": 2, "result": "ported"}),
+        )
+        .unwrap();
+    assert_eq!(done["footprint"], serde_json::json!("modified 1 file"));
+
+    let listed = sandbox.run(&["ls"]);
+    let row = listed.lines().find(|l| l.contains("#2")).unwrap();
+    assert!(row.contains("modified 1 file"), "{row}");
+    let shown = sandbox.run(&["show", "2"]);
+    assert!(shown.contains("changed   modified 1 file"), "{shown}");
+    assert!(
+        shown.contains("          src/config.rs (modified)"),
+        "{shown}"
+    );
+
+    codex.shutdown();
+}
+
+/// Outside git there is nothing watching, and "read-only" would be a claim
+/// hird is in no position to make. Silence is the only honest answer.
+#[test]
+fn a_task_nobody_watched_is_never_called_read_only() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["add", "audit the loader"]);
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex.claim(1);
+
+    let done = codex
+        .call(
+            "task_complete",
+            serde_json::json!({"seq": 1, "result": "read it"}),
+        )
+        .unwrap();
+    assert!(done.get("footprint").is_none(), "{done}");
+
+    for command in [&["ls"][..], &["show", "1"][..], &["agents"][..]] {
+        let out = sandbox.run(command);
+        assert!(!out.contains("read-only"), "hird {command:?}:\n{out}");
+        assert!(!out.contains("modified"), "hird {command:?}:\n{out}");
+    }
+
+    codex.shutdown();
+}
+
 // ------------------------------------------------------------------- plans
 
 /// The plan used by the tests below: five tasks, three waves, one unordered

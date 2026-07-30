@@ -24,9 +24,11 @@ agents and a human may be using it at the same time.
    If it reports overlap, coordinate before editing those files.
 2. Use `task_update` for concise progress notes and before the lease heartbeat
    expires. Include newly discovered file scope.
-3. Treat `changed`, `undeclared`, and `contended` in tool results as live
-   working-tree evidence. Declare undeclared files and re-read contended files
-   before writing again.
+3. Treat `footprint`, `changed`, `undeclared`, and `contended` in tool results
+   as live working-tree evidence. Declare undeclared files and re-read contended
+   files before writing again. `footprint` is hird's own answer to whether the
+   task has changed anything — relay it as it stands, and note that its absence
+   means hird was not watching rather than that nothing moved.
 4. Use `mem_search` before repeating investigation. Use `mem_store` for durable,
    factual findings that will help another session; link them to `task_seq`.
 

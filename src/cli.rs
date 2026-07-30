@@ -17,7 +17,7 @@ use crate::fmt;
 use crate::footing;
 use crate::glob;
 use crate::identity::{self, ACTOR_CLI};
-use crate::model::{Standing, Status, TaskSummary};
+use crate::model::{Footprint, Standing, Status, TaskSummary};
 use crate::plan;
 use crate::register::{self, Registration};
 use crate::repo::{dispatch_waves, MemoryQuery, NewAssertion, OnConflict, ProjectScope};
@@ -350,7 +350,13 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
             )
         }
         Command::Add(args) => add(&db, &project, args, out),
-        Command::Ls(args) => ls(&db, &project, &config, args, out),
+        Command::Ls(args) => {
+            // The listing now says whether each task has changed anything, and
+            // a stale answer to that is worse than none: a task that has been
+            // writing since the last sweep would be listed as read-only.
+            look(&db, &config, &project);
+            ls(&db, &project, &config, args, out)
+        }
         Command::Show { seq } => {
             look(&db, &config, &project);
             show(&db, *seq, &config, out)
@@ -862,6 +868,11 @@ fn agents(db: &Db, scope: &ProjectScope, out: &mut impl Write) -> anyhow::Result
         if !seen.is_empty() {
             let listed: Vec<String> = seen.iter().map(|o| o.path.clone()).collect();
             writeln!(out, "    moved  {}", listed.join(", "))?;
+        } else if db.witnessed().footprint(task.seq).unwrap_or_default() == Footprint::ReadOnly {
+            // An agent that has been in the code for twenty minutes and moved
+            // nothing is reading, or is stuck. Either way it is worth a line,
+            // and a blank space where the line would be says neither.
+            writeln!(out, "    moved  nothing yet")?;
         }
         for other in &live {
             // Both directions: an agent reading this wants to see who is in
@@ -931,6 +942,9 @@ fn ls(
         return Ok(());
     }
     let unmet = db.deps().unmet_map(&scope)?;
+    // What each task did to the tree, which the row prints as one word. A
+    // failure here costs the listing a column, not the listing.
+    let footprints = db.witnessed().footprints(&scope).unwrap_or_default();
     let now = Utc::now();
     let width = tasks
         .iter()
@@ -939,10 +953,11 @@ fn ls(
         .unwrap_or(1);
     for task in &tasks {
         let blocked = unmet.get(&task.seq).map(Vec::as_slice).unwrap_or(&[]);
+        let footprint = footprints.get(&task.seq).copied().unwrap_or_default();
         writeln!(
             out,
             "{}",
-            ls_line(task, width, scope.is_all(), now, blocked)
+            ls_line(task, width, scope.is_all(), now, blocked, footprint)
         )?;
     }
     Ok(())
@@ -955,6 +970,7 @@ fn ls_line(
     show_project: bool,
     now: chrono::DateTime<Utc>,
     blocked_by: &[i64],
+    footprint: Footprint,
 ) -> String {
     let mut line = format!(
         "#{seq:<width$}  {status:<11}  {title}",
@@ -979,6 +995,12 @@ fn ls_line(
     }
     if task.priority != 0 {
         line.push_str(&format!("  p{}", task.priority));
+    }
+    // Whether the work left a mark. A task nobody watched says nothing here,
+    // because "read-only" and "hird was not looking" are opposite claims and
+    // only one of them is this column's to make.
+    if let Some(label) = footprint.label(task.status.is_active()) {
+        line.push_str(&format!("  {label}"));
     }
     if show_project {
         line.push_str(&format!("  ({})", task.project));
@@ -1107,12 +1129,16 @@ fn show(db: &Db, seq: i64, config: &Config, out: &mut impl Write) -> anyhow::Res
     // `files` is what somebody said would happen; `changed` is what the
     // working tree says did. On a finished task this is the evidence behind
     // the result line, and it was not written by the agent that wrote it.
-    let seen = db.witnessed().touched(seq).unwrap_or_default();
-    if !seen.is_empty() {
-        writeln!(out, "changed   {}", seen[0].describe())?;
-        for observed in &seen[1..] {
-            writeln!(out, "          {}", observed.describe())?;
-        }
+    //
+    // The headline goes first because it is the part a list of paths cannot
+    // say: no paths means the task read and did not write, and it means that
+    // only where hird was watching closely enough to know.
+    let footprint = db.witnessed().footprint(seq).unwrap_or_default();
+    if let Some(sentence) = footprint.describe(task.status.is_active()) {
+        writeln!(out, "changed   {sentence}")?;
+    }
+    for observed in db.witnessed().touched(seq).unwrap_or_default() {
+        writeln!(out, "          {}", observed.describe())?;
     }
     for found in db.witnessed().contention(seq).unwrap_or_default() {
         writeln!(out, "contended {}", found.describe())?;
@@ -1415,7 +1441,14 @@ mod tests {
 
     #[test]
     fn ls_rows_line_up_and_omit_empty_columns() {
-        let line = ls_line(&summary(7, Status::Open), 2, false, now(), &[]);
+        let line = ls_line(
+            &summary(7, Status::Open),
+            2,
+            false,
+            now(),
+            &[],
+            Footprint::Unwatched,
+        );
         assert_eq!(line, "#7   open         write the parser");
     }
 
@@ -1425,7 +1458,7 @@ mod tests {
         task.claimed_by = Some("codex:9f2c".into());
         task.lease_expires_at = Some(crate::model::fmt_ts(now() + chrono::Duration::minutes(12)));
 
-        let line = ls_line(&task, 1, false, now(), &[]);
+        let line = ls_line(&task, 1, false, now(), &[], Footprint::Unwatched);
         assert!(line.contains("[codex:9f2c] 12m left"), "{line}");
     }
 
@@ -1433,8 +1466,9 @@ mod tests {
     fn ls_rows_show_priority_and_project_only_when_relevant() {
         let mut task = summary(7, Status::Open);
         task.priority = 5;
-        assert!(ls_line(&task, 1, false, now(), &[]).ends_with("  p5"));
-        assert!(ls_line(&task, 1, true, now(), &[]).ends_with(&format!("({PROJECT})")));
+        assert!(ls_line(&task, 1, false, now(), &[], Footprint::Unwatched).ends_with("  p5"));
+        assert!(ls_line(&task, 1, true, now(), &[], Footprint::Unwatched)
+            .ends_with(&format!("({PROJECT})")));
     }
 
     #[test]
@@ -1522,7 +1556,14 @@ mod tests {
 
     #[test]
     fn ls_rows_mark_the_tasks_that_cannot_start_yet() {
-        let line = ls_line(&summary(7, Status::Open), 1, false, now(), &[3, 4]);
+        let line = ls_line(
+            &summary(7, Status::Open),
+            1,
+            false,
+            now(),
+            &[3, 4],
+            Footprint::Unwatched,
+        );
         assert!(line.contains("waits #3,#4"), "{line}");
     }
 

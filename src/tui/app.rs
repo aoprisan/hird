@@ -12,7 +12,8 @@ use crate::db::Db;
 use crate::glob;
 use crate::identity::ACTOR_TUI;
 use crate::model::{
-    Assertion, Blocker, Conflict, Standing, Status, Task, TaskEvent, TaskSummary, Verdict,
+    Assertion, Blocker, Conflict, Footprint, Standing, Status, Task, TaskEvent, TaskSummary,
+    Verdict,
 };
 use crate::repo::{dispatch_waves, MemoryQuery, ProjectScope, Recalled};
 
@@ -74,6 +75,10 @@ pub struct AgentRow {
     /// Files this agent and another both declared and that have since moved,
     /// already written out as sentences.
     pub contentions: Vec<String>,
+    /// Whether anything has moved under this agent at all. `changed` being
+    /// empty is not the same statement — it is also what a project hird
+    /// cannot watch looks like.
+    pub footprint: Footprint,
 }
 
 /// Two live agents in the same files.
@@ -98,6 +103,9 @@ pub struct Readiness {
     pub verdicts: Vec<crate::model::VerdictRecord>,
     /// Verdicts this task delivered, when it is a completed review.
     pub delivered: Vec<crate::model::VerdictRecord>,
+    /// What the working tree says the task did to it: read-only, or so many
+    /// files moved. The other half of `paths`, which is only what was said.
+    pub footprint: Footprint,
 }
 
 /// A column of the kanban board.
@@ -213,6 +221,10 @@ pub struct App {
     /// Task number to the newest verdict delivered on its work, so the board
     /// can tell "done" from "done, and seen to be done by another harness".
     pub verdicts: BTreeMap<i64, Verdict>,
+    /// Task number to what the working tree says it did: read-only, or so
+    /// many files moved. Absent for every task hird was not watching, which
+    /// every reader treats as "nothing to say" rather than as "nothing moved".
+    pub footprints: BTreeMap<i64, Footprint>,
 
     // Swarm screen.
     pub agents: Vec<AgentRow>,
@@ -271,6 +283,7 @@ impl App {
             unmet: BTreeMap::new(),
             reviews: BTreeMap::new(),
             verdicts: BTreeMap::new(),
+            footprints: BTreeMap::new(),
             agents: Vec::new(),
             waves: Vec::new(),
             swarm_selected: 0,
@@ -364,12 +377,14 @@ impl App {
         self.unmet = db.deps().unmet_map(&scope)?;
         self.reviews = db.recusals().reviews(&scope)?;
         self.verdicts = db.verdicts().standing(&scope)?;
+        self.footprints = db.witnessed().footprints(&scope)?;
         self.waves = dispatch_waves(&self.tasks, &db.deps().edges(&scope)?);
         self.look(db);
         self.agents = agent_rows(
             &self.tasks,
             &db.scopes().declared(&scope, true)?,
             &db.witnessed().seen(&scope, true)?,
+            &self.footprints,
         );
         for agent in &mut self.agents {
             agent.contentions = db
@@ -835,6 +850,7 @@ impl App {
             recusals: db.recusals().for_task(seq)?,
             verdicts: db.verdicts().for_task(seq)?,
             delivered: db.verdicts().of_review(seq)?,
+            footprint: db.witnessed().footprint(seq).unwrap_or_default(),
         };
         // Only what came from elsewhere: `learned` already holds this task's
         // own assertions, listed under their own heading.
@@ -898,6 +914,7 @@ fn agent_rows(
     tasks: &[TaskSummary],
     declared: &[crate::model::ScopedTask],
     witnessed: &[crate::model::WitnessedTask],
+    footprints: &BTreeMap<i64, Footprint>,
 ) -> Vec<AgentRow> {
     let scopes: BTreeMap<i64, &Vec<String>> =
         declared.iter().map(|s| (s.seq, &s.patterns)).collect();
@@ -918,6 +935,7 @@ fn agent_rows(
             overlaps: Vec::new(),
             changed: moved.get(&t.seq).cloned().unwrap_or_default(),
             contentions: Vec::new(),
+            footprint: footprints.get(&t.seq).copied().unwrap_or_default(),
         })
         .collect();
     rows.sort_by(|a, b| a.holder.cmp(&b.holder).then(a.seq.cmp(&b.seq)));

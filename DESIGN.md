@@ -981,3 +981,87 @@ the kind of call hird leaves to people.
 The verdict is a parameter on `task_complete`, not a thirteenth tool; the
 record is a CLI report off a table that writes itself. The MCP surface §6
 froze stays frozen.
+
+## 17. (v1.8) The footprint — did this task change anything?
+
+§12 gave every task a list of the files that moved while it was held. The list
+answers "what changed?" precisely, and it answers the blunter question — "did
+this change *anything*?" — ambiguously, because it comes back empty in two
+opposite situations:
+
+- the task read the code and wrote nothing, and
+- hird was never watching, so it has nothing to report either way.
+
+A front end that prints nothing in both cases invites the reader to take the
+second for the first. That is the mistake this section exists to make
+impossible: a finished investigation and a finished refactor arrive on the board
+as the same green card, and the difference decides whether there is anything to
+review, anything to test, or anything to undo.
+
+### Three answers, never two
+
+`Footprint` is the type, and it is deliberately three-valued:
+
+| value | means | said as |
+| --- | --- | --- |
+| `Unwatched` | no baseline was ever taken: never claimed under a witness, or not a git checkout | nothing at all |
+| `ReadOnly` | a baseline was taken and the tree still matches it | `read-only` |
+| `Modified { paths, shared }` | the tree differs from the baseline | `modified 3 files` |
+
+The predicate for "hird was in a position to know" is the existence of the
+task's row in `task_witness` — the fingerprint taken at claim time. That is what
+makes `ReadOnly` an observation rather than an absence of one, and it is why the
+question is not answered off `task_changes` alone.
+
+**No migration.** Both tables already hold everything the answer needs; v1.8 is
+a reading of v1.2's evidence, not new evidence. Nothing new is written on any
+call, and turning the witness off turns this off with it, in the only way it
+can be turned off: hird stops having an opinion.
+
+### What a count may not be read as
+
+The limit from §12 carries over unchanged — one checkout has one filesystem and
+no keyboards — so `Modified` says the tree moved while the task was held, not
+that this task's agent moved it. Where another task in the same project holds
+one of those paths in its own footprint, both were live when the file moved, and
+`shared` says so: *modified 2 files, though another agent was live in some of
+them*. The count is never allowed to speak with more confidence than the
+evidence has earned, which is the same rule the drift advice follows.
+
+### A running total is not a verdict
+
+A task still being worked has not finished not writing anything, so `ReadOnly`
+is rendered `read-only so far` while a lease is held and `read-only` once it is
+over. `Modified` needs no such hedge: a file that moved has moved.
+
+This is also why `FinishResult` re-says its own footprint. The last look has to
+be taken while the task is still live, or the sweep would miss whatever the
+agent did on its way out — so by the time the reply is assembled, the hedge in
+the sentence is one call out of date. `Evidence::settled` restates it for a task
+that has stopped, from the same typed answer rather than by editing a string.
+
+### Where it shows
+
+- `hird ls` badges each row, and now sweeps the tree as it renders — a stale
+  answer here is worse than none, because a task that has been writing since the
+  last sweep would be listed as read-only.
+- `hird show` heads the `changed` block with the one-line answer, above the
+  paths it is drawn from.
+- `hird agents` says `moved  nothing yet` where an agent has been in the code
+  and written none of it. An agent twenty minutes into a task with an empty
+  footprint is reading, or it is stuck; a blank space says neither.
+- The TUI badges every card on the queue board, writes the sentence into the
+  task detail overlay, and marks a live agent's row on the Swarm screen.
+- MCP reports it as `footprint`, one string, in the same flattened evidence
+  block as `changed` and `contended` — absent where there is nothing to say, the
+  way every other witness field is.
+
+The board asks the question of every card it paints, twice a second, so the
+repository offers it both ways: `footprint(seq)` for one task and
+`footprints(scope)` for a whole board in two queries and a fold.
+
+### Still twelve tools
+
+`footprint` is a field on evidence agents already receive, not a thirteenth
+tool. Like recall and the witness before it, it reaches an agent that did not
+know to ask.
