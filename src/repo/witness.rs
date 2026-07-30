@@ -22,13 +22,15 @@
 //! said they would write a file and the file then moved, which is the predicted
 //! collision and the observed one at the same time.
 
+use std::collections::BTreeMap;
+
 use rusqlite::{params, Connection, Row, Transaction, TransactionBehavior};
 
 use super::deps::id_for_seq;
 use super::{new_id, ProjectScope};
 use crate::error::Result;
 use crate::glob;
-use crate::model::{now_ts, Contention, EventKind, Observed, Status, WitnessedTask};
+use crate::model::{now_ts, Contention, EventKind, Footprint, Observed, Status, WitnessedTask};
 use crate::witness::{Change, Tree};
 
 /// A live task and the tree it is measured against.
@@ -199,6 +201,111 @@ impl<'a> Witnessed<'a> {
         )?;
         let rows = stmt.query_map([&task_id], row_to_observed)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Whether task `seq` left a mark on the working tree, or only read it.
+    ///
+    /// [`Witnessed::touched`] already says *what* moved, and says nothing at
+    /// all in the two cases that matter here: a task that wrote nothing and a
+    /// task nobody watched both come back with an empty list. The difference
+    /// is the whole answer to "did this change anything?", so it is read off
+    /// the baseline rather than off the change rows — a baseline exists
+    /// exactly when hird was in a position to know.
+    pub fn footprint(&self, seq: i64) -> Result<Footprint> {
+        let task_id = id_for_seq(self.conn, seq)?;
+        let watched: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM task_witness WHERE task_id = ?1)",
+            [&task_id],
+            |row| row.get(0),
+        )?;
+        if !watched {
+            return Ok(Footprint::Unwatched);
+        }
+        let paths: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM task_changes WHERE task_id = ?1",
+            [&task_id],
+            |row| row.get(0),
+        )?;
+        if paths == 0 {
+            return Ok(Footprint::ReadOnly);
+        }
+        // A path in two footprints is a path that moved while both tasks were
+        // live, which is the one thing that stops a count being an account of
+        // what this task did.
+        let alongside: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM task_changes mine
+             JOIN task_changes theirs ON theirs.path = mine.path
+                                     AND theirs.task_id <> mine.task_id
+             JOIN tasks t ON t.id = theirs.task_id
+             WHERE mine.task_id = ?1
+               AND t.project = (SELECT project FROM tasks WHERE id = ?1)",
+            [&task_id],
+            |row| row.get(0),
+        )?;
+        Ok(Footprint::Modified {
+            paths: paths as usize,
+            shared: alongside > 0,
+        })
+    }
+
+    /// The same question for every task in `scope`, in one pass.
+    ///
+    /// Two queries and a fold rather than the per-task version run in a loop:
+    /// the board asks this of every card it paints, twice a second. Tasks the
+    /// witness never watched are absent from the map, which reads the same as
+    /// [`Footprint::Unwatched`] to every caller.
+    pub fn footprints(&self, scope: &ProjectScope) -> Result<BTreeMap<i64, Footprint>> {
+        let (project_clause, project_value) = scope.clause("t.project");
+        let binds: Vec<&str> = project_value.into_iter().collect();
+
+        let sql = format!(
+            "SELECT t.seq FROM task_witness w JOIN tasks t ON t.id = w.task_id
+             WHERE {project_clause}"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let watched = stmt.query_map(rusqlite::params_from_iter(binds.iter()), |row| {
+            row.get::<_, i64>(0)
+        })?;
+        let mut out: BTreeMap<i64, Footprint> = BTreeMap::new();
+        for seq in watched {
+            out.insert(seq?, Footprint::ReadOnly);
+        }
+
+        let sql = format!(
+            "SELECT t.seq, t.project, c.path FROM task_changes c JOIN tasks t ON t.id = c.task_id
+             WHERE {project_clause}"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(binds.iter()), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let changed = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+
+        // One row per task per path, so counting rows for a path counts the
+        // tasks that hold it.
+        let mut holders: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+        for (_, project, path) in &changed {
+            *holders
+                .entry((project.as_str(), path.as_str()))
+                .or_default() += 1;
+        }
+        let mut tally: BTreeMap<i64, (usize, bool)> = BTreeMap::new();
+        for (seq, project, path) in &changed {
+            let shared = holders
+                .get(&(project.as_str(), path.as_str()))
+                .is_some_and(|held| *held > 1);
+            let entry = tally.entry(*seq).or_insert((0, false));
+            entry.0 += 1;
+            entry.1 |= shared;
+        }
+        for (seq, (paths, shared)) in tally {
+            out.insert(seq, Footprint::Modified { paths, shared });
+        }
+        Ok(out)
     }
 
     /// Files two live tasks both said they would write, and that have since
@@ -770,6 +877,131 @@ mod tests {
             .begin(seq, &tree(&[("src/a.rs", "h1")]))
             .unwrap();
         assert!(db.witnessed().touched(seq).unwrap().is_empty());
+    }
+
+    /// The three answers, and the one that must never be guessed: a task
+    /// nobody watched is not a task that changed nothing.
+    #[test]
+    fn a_task_reports_read_only_only_where_it_was_actually_watched() {
+        let db = db();
+        let unwatched = seed(&db, "never watched", "codex:9f2c");
+        assert_eq!(
+            db.witnessed().footprint(unwatched).unwrap(),
+            Footprint::Unwatched
+        );
+
+        let seq = seed(&db, "read the config", "codex:9f2c");
+        db.witnessed().begin(seq, &tree(&[])).unwrap();
+        assert_eq!(db.witnessed().footprint(seq).unwrap(), Footprint::ReadOnly);
+
+        db.witnessed()
+            .record(seq, &[change("src/a.rs", "h1")], "codex:9f2c")
+            .unwrap();
+        assert_eq!(
+            db.witnessed().footprint(seq).unwrap(),
+            Footprint::Modified {
+                paths: 1,
+                shared: false
+            }
+        );
+
+        // Put back the way it was, so there is nothing left to have done.
+        db.witnessed().record(seq, &[], "codex:9f2c").unwrap();
+        assert_eq!(db.witnessed().footprint(seq).unwrap(), Footprint::ReadOnly);
+    }
+
+    /// One file in two footprints is one file that moved while both tasks were
+    /// live. The count may not be read as an account of either of them.
+    #[test]
+    fn a_file_in_two_footprints_is_reported_as_shared() {
+        let db = db();
+        let mine = seed(&db, "mine", "claude-code:af31");
+        let theirs = seed(&db, "theirs", "codex:9f2c");
+        for seq in [mine, theirs] {
+            db.witnessed().begin(seq, &tree(&[])).unwrap();
+        }
+        db.witnessed()
+            .record(mine, &[change("src/shared.rs", "h1")], "a")
+            .unwrap();
+        db.witnessed()
+            .record(theirs, &[change("src/shared.rs", "h2")], "b")
+            .unwrap();
+
+        for seq in [mine, theirs] {
+            assert_eq!(
+                db.witnessed().footprint(seq).unwrap(),
+                Footprint::Modified {
+                    paths: 1,
+                    shared: true
+                }
+            );
+        }
+
+        // A file only one of them ever saw is still that one's own.
+        let solo = seed(&db, "solo", "copilot:11");
+        db.witnessed().begin(solo, &tree(&[])).unwrap();
+        db.witnessed()
+            .record(solo, &[change("docs/index.md", "h3")], "c")
+            .unwrap();
+        assert_eq!(
+            db.witnessed().footprint(solo).unwrap(),
+            Footprint::Modified {
+                paths: 1,
+                shared: false
+            }
+        );
+    }
+
+    /// The board asks this of every card it paints, so it has to come back in
+    /// one pass — and it has to agree with the per-task answer exactly.
+    #[test]
+    fn the_batch_answer_matches_the_one_asked_task_by_task() {
+        let db = db();
+        let read_only = seed(&db, "read", "codex:9f2c");
+        let wrote = seed(&db, "wrote", "claude-code:af31");
+        let elsewhere = db
+            .tasks()
+            .create("/other/project", "not ours", "", 0, "cli")
+            .unwrap()
+            .seq;
+        db.tasks().claim(elsewhere, "copilot:11", TTL).unwrap();
+        for seq in [read_only, wrote, elsewhere] {
+            db.witnessed().begin(seq, &tree(&[])).unwrap();
+        }
+        db.witnessed()
+            .record(
+                wrote,
+                &[change("src/a.rs", "h1"), change("src/b.rs", "h2")],
+                "b",
+            )
+            .unwrap();
+        // The same path in another project is another project's business.
+        db.witnessed()
+            .record(elsewhere, &[change("src/a.rs", "h9")], "c")
+            .unwrap();
+        // Finished work keeps its footprint: this is the report a human reads
+        // after the fact, not a live gauge.
+        db.tasks().complete(wrote, "claude-code:af31", "done").ok();
+
+        let scope = ProjectScope::Only(PROJECT.into());
+        let batch = db.witnessed().footprints(&scope).unwrap();
+        assert_eq!(batch.get(&read_only), Some(&Footprint::ReadOnly));
+        assert_eq!(
+            batch.get(&wrote),
+            Some(&Footprint::Modified {
+                paths: 2,
+                shared: false
+            })
+        );
+        assert_eq!(batch.get(&elsewhere), None, "scoped to one project");
+        for seq in [read_only, wrote] {
+            assert_eq!(batch[&seq], db.witnessed().footprint(seq).unwrap());
+        }
+
+        // A task hird never watched is simply absent, which every reader
+        // treats as the same "nothing to say" as `Unwatched`.
+        let never = seed(&db, "never claimed under a witness", "codex:9f2c");
+        assert_eq!(db.witnessed().footprints(&scope).unwrap().get(&never), None);
     }
 
     #[test]

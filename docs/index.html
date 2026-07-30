@@ -29,6 +29,7 @@
     <li><a href="#dependencies">Dependencies</a></li>
     <li><a href="#scope">File scope and collisions</a></li>
     <li><a href="#witness">What actually happened</a></li>
+    <li class="sub"><a href="#footprint">Modified, or read-only</a></li>
     <li><a href="#split">Splitting a task</a></li>
     <li><a href="#review">No agent reviews its own work</a></li>
     <li><a href="#verdict">The review closes its own loop</a></li>
@@ -750,6 +751,52 @@ claude-code:af31  #7 claimed      Rewrite the loader tests      14m left
   and not the keyboard, and it says so rather than guessing.
 </p>
 
+<h3 id="footprint">Did it change anything, or did it only read?</h3>
+
+<p>
+  The same fingerprints answer a blunter question, and it is the one you ask
+  first when a task comes back done: did this work touch the code at all?
+</p>
+
+<pre><code>$ <span class="k">hird</span> ls
+#1  done         Port the config loader   modified 2 files
+#2  done         Audit the config loader  read-only
+#3  in_progress  Write the release notes  [codex:9f2c] 11m left  read-only so far</code></pre>
+
+<p>
+  An investigation that changed nothing and a refactor that rewrote half the
+  module are the same green card otherwise, and the difference decides whether
+  there is anything to review, anything to test, or anything to undo.
+</p>
+
+<p>Three answers, and the third one matters as much as the other two:</p>
+
+<ul>
+  <li>
+    <code>modified N files</code> — the tree differs from the fingerprint taken
+    when the task was claimed. Where another agent was live in one of those
+    files, the line says so, because one checkout has no keyboards.
+  </li>
+  <li>
+    <code>read-only</code> — <code>hird</code> was watching, and nothing moved.
+    On a task still being worked it reads <code>read-only so far</code>: a
+    running total, not a verdict.
+  </li>
+  <li>
+    nothing at all — <code>hird</code> was not watching, so it has no opinion.
+    Saying <em>read-only</em> here would be inventing evidence, and the whole
+    point of the witness is that it does not.
+  </li>
+</ul>
+
+<p>
+  Agents are told the same thing in the same words, on every check-in and on the
+  call that finishes the work:
+</p>
+
+<pre><code>{ <span class="s">"seq"</span>: 2, <span class="s">"status"</span>: <span class="s">"done"</span>, <span class="s">"result"</span>: <span class="s">"read it; the precedence is already right"</span>,
+  <span class="s">"footprint"</span>: <span class="s">"read-only — nothing in the working tree moved while it was held"</span> }</code></pre>
+
 <h3 id="witness-board">On the board</h3>
 
 <pre><code>$ <span class="k">hird</span> agents
@@ -761,12 +808,23 @@ codex:9f2c        #1 in_progress  Port the config loader        11m left
            claude-code:af31 at 14:36 UTC … re-read it before you write</span></code></pre>
 
 <p>
-  <code>files</code> is what was announced; <code>moved</code> is what happened;
-  the gap between the two lines is the point. <code>hird show</code> carries the
-  same record, which is the evidence behind a finished task's result line and
-  was not written by the agent that wrote it. The TUI's Swarm screen shows both,
-  and titles the pane with how many agents are standing in a file that is moving
-  under them.
+  <code>files</code> is what was announced; <code>moved</code> is what happened
+  — or <code>moved&nbsp;&nbsp;nothing yet</code> where an agent has been in the
+  code and written none of it — and the gap between the two lines is the point.
+  <code>hird show</code> carries the same record, headed by the one-line answer:
+</p>
+
+<pre><code>$ <span class="k">hird</span> show 1
+…
+changed   modified 2 files, though another agent was live in some of them
+          src/config.rs (modified)
+          src/mcp.rs (added)</code></pre>
+
+<p>
+  That is the evidence behind a finished task's result line, and it was not
+  written by the agent that wrote it. The TUI's Swarm screen shows both, and
+  titles the pane with how many agents are standing in a file that is moving
+  under them; the queue board badges every card with what it did to the tree.
 </p>
 
 <h3 id="witness-cost">It is never in the way</h3>
@@ -1202,14 +1260,14 @@ hird db-path</code></pre>
   <thead><tr><th>Command</th><th>What it is for</th></tr></thead>
   <tbody>
     <tr><td><code>add</code></td><td>File a task. Prints the number, which is how you and the agents refer to it.</td></tr>
-    <tr><td><code>ls</code></td><td>The queue as rows: status, holder, lease countdown, what it waits for.</td></tr>
-    <tr><td><code>show</code></td><td>One task in full — body, dependencies, scope, history, what was learned on it.</td></tr>
+    <tr><td><code>ls</code></td><td>The queue as rows: status, holder, lease countdown, what it waits for, and whether it <a href="#footprint">changed anything</a>.</td></tr>
+    <tr><td><code>show</code></td><td>One task in full — body, dependencies, scope, history, what was learned on it, and what the working tree says it did.</td></tr>
     <tr><td><code>cancel</code> / <code>reopen</code></td><td>Human overrides. They work regardless of who holds the task.</td></tr>
     <tr><td><code>dep</code></td><td>Add or remove "must wait for" edges after the fact.</td></tr>
     <tr><td><code>plan</code></td><td>File a whole graph from a <a href="#plan-files">plan file</a>, in one transaction. <code>--dry-run</code> reads it out — waves, overlaps and all — and writes nothing.</td></tr>
     <tr><td><code>graph</code></td><td>The plan as dispatch waves: workable now, and what each later wave waits for.</td></tr>
     <tr><td><code>scope</code></td><td>Show or set the files a task is expected to touch. Warns about overlaps.</td></tr>
-    <tr><td><code>agents</code></td><td>Who is working what, with a <code>!!</code> line wherever two agents are in the same files.</td></tr>
+    <tr><td><code>agents</code></td><td>Who is working what, what has moved under each of them, and a <code>!!</code> line wherever two agents are in the same files.</td></tr>
     <tr><td><code>record</code></td><td>Each harness's track record under <a href="#verdict">review</a>: work upheld, work sent back, first-pass rate, and the verdicts it has handed out.</td></tr>
     <tr><td><code>recall</code></td><td>What earlier work already learned about a task, and why it is relevant — the same thing an agent is handed when it claims it.</td></tr>
     <tr><td><code>mem</code></td><td>Record and search assertions.</td></tr>
@@ -1223,7 +1281,10 @@ hird db-path</code></pre>
 <p>
   <code>--body-file -</code> reads the task body from stdin, and
   <code>hird plan apply -</code> reads a whole plan from it, so either can be
-  piped straight into the queue. Every CLI action is recorded with
+  piped straight into the queue. <code>ls</code>, <code>show</code> and
+  <code>agents</code> sweep the working tree as they render, so all three report
+  what has actually moved alongside what was declared — and say plainly when the
+  answer is <em>nothing</em>. Every CLI action is recorded with
   <code>actor = "cli"</code>, so the history pane shows who did what.
 </p>
 </section>
@@ -1334,7 +1395,9 @@ hird db-path</code></pre>
   arbitrary new work: agents split what they hold, and everything else is filed
   by you. <a href="#recall">Recall</a> did not need a thirteenth tool either — it
   rides along with the claim — and neither did
-  <a href="#footing">footing</a>, which rides along with every fact hird serves.
+  <a href="#footing">footing</a>, which rides along with every fact hird serves,
+  or the <a href="#footprint">footprint</a>, which rides along with every
+  check-in and every finishing call.
   The <a href="#verdict">verdict</a> is a parameter on <code>task_complete</code>,
   not a thirteenth tool. Something an agent has to know to ask for is something
   it will not ask for.
@@ -1447,7 +1510,7 @@ memory_footing = true</code></pre>
     </tr>
     <tr>
       <td><a href="https://github.com/aoprisan/hird/blob/main/examples/witness.sh"><code>witness.sh</code></a></td>
-      <td>Two agents, one checkout, one file — the <a href="#witness">witness</a> catching a lost edit while there is still time to act on it. Makes its own throwaway git repository.</td>
+      <td>Two agents, one checkout, one file — the <a href="#witness">witness</a> catching a lost edit while there is still time to act on it, and a third task that finishes <a href="#footprint">read-only</a>. Makes its own throwaway git repository.</td>
     </tr>
     <tr>
       <td><a href="https://github.com/aoprisan/hird/blob/main/examples/footing.sh"><code>footing.sh</code></a></td>

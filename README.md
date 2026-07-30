@@ -570,6 +570,41 @@ The conditional is deliberate. Alone in a project, a file that moved moved
 because of you. With another agent live, `hird` watched the file and not the
 keyboard, and it says so rather than guessing.
 
+### Did it change anything, or did it only read?
+
+The same fingerprints answer a blunter question, and it is the one you ask first
+when a task comes back done: did this work touch the code at all?
+
+```sh
+$ hird ls
+#1  done         Port the config loader   modified 2 files
+#2  done         Audit the config loader  read-only
+#3  in_progress  Write the release notes  [codex:9f2c] 11m left  read-only so far
+```
+
+An investigation that changed nothing and a refactor that rewrote half the
+module are the same green card otherwise, and the difference decides whether
+there is anything to review, anything to test, or anything to undo.
+
+Three answers, and the third one matters as much as the other two:
+
+- **`modified N files`** — the tree differs from the fingerprint taken when the
+  task was claimed. Where another agent was live in one of those files, the
+  line says so, because one checkout has no keyboards.
+- **`read-only`** — hird was watching, and nothing moved. On a task still being
+  worked it reads `read-only so far`: a running total, not a verdict.
+- **nothing at all** — hird was not watching, so it has no opinion. Saying
+  "read-only" here would be inventing evidence, and the whole point of the
+  witness is that it does not.
+
+Agents are told the same thing in the same words, on every check-in and on the
+call that finishes the work:
+
+```json
+{ "seq": 2, "status": "done", "result": "read it; the precedence is already right",
+  "footprint": "read-only — nothing in the working tree moved while it was held" }
+```
+
 ### On the board
 
 ```
@@ -582,11 +617,23 @@ codex:9f2c        #1 in_progress  Port the config loader        11m left
            claude-code:af31 at 14:36 UTC … re-read it before you write
 ```
 
-`files` is what was announced; `moved` is what happened; the gap between the two
-lines is the point. `hird show` carries the same record, which is the evidence
-behind a finished task's result line and was not written by the agent that wrote
-it. The TUI's Swarm screen shows both, and titles the pane with how many agents
-are standing in a file that is moving under them.
+`files` is what was announced; `moved` is what happened — or `moved  nothing
+yet` where an agent has been in the code and written none of it — and the gap
+between the two lines is the point. `hird show` carries the same record, headed
+by the one-line answer:
+
+```
+$ hird show 1
+…
+changed   modified 2 files, though another agent was live in some of them
+          src/config.rs (modified)
+          src/mcp.rs (added)
+```
+
+That is the evidence behind a finished task's result line, and it was not
+written by the agent that wrote it. The TUI's Swarm screen shows both, and
+titles the pane with how many agents are standing in a file that is moving
+under them; the queue board badges every card with what it did to the tree.
 
 ### It is never in the way
 
@@ -930,8 +977,9 @@ hird db-path
 `--body-file -` reads the task body from stdin, and `hird plan apply -` reads a
 whole plan from it, so either can be piped straight into the queue.
 
-`hird show` and `hird agents` sweep the working tree as they render, so both
-report what has actually moved alongside what was declared.
+`hird ls`, `hird show` and `hird agents` sweep the working tree as they render,
+so all three report what has actually moved alongside what was declared — and
+say plainly when the answer is "nothing".
 
 ## The TUI
 
@@ -1070,9 +1118,9 @@ protocol errors, so a model can relay them to you as-is instead of reporting
 that a tool broke.
 
 None of the things an agent is told without asking needed a thirteenth tool.
-Recall rides along with the claim; `changed`, `contended` and `undeclared` ride
-along with every check-in and every finishing call; `standing` rides along with
-every fact hird serves. Something an agent has to know to ask for is something
+Recall rides along with the claim; `footprint`, `changed`, `contended` and
+`undeclared` ride along with every check-in and every finishing call; `standing`
+rides along with every fact hird serves. Something an agent has to know to ask for is something
 it will not ask for.
 
 ## Examples
@@ -1084,7 +1132,8 @@ points `HIRD_DB` at a throwaway file, so running one cannot disturb your board.
 ./examples/manual-dispatch.sh   # file work, hand it out by number
 ./examples/swarm-plan.sh        # file a plan, three agents pull from it
 ./examples/plan-file.sh         # the same plan as a file: read it, file it, edit it
-./examples/witness.sh           # two agents in one file, caught in the act
+./examples/witness.sh           # two agents in one file, caught in the act —
+                                #   and a third task that finishes read-only
 ./examples/footing.sh           # a fact, the file it came from, and that file rewritten
 ./examples/review.sh            # work that files its own review, barred to whoever did it
 ./examples/verdict.sh           # the sent-back loop, and the per-harness record it leaves

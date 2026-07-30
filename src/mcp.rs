@@ -34,8 +34,8 @@ use crate::error::Error;
 use crate::footing;
 use crate::identity::{self, AgentId};
 use crate::model::{
-    Assertion, Blocker, Conflict, Contention, Observed, Recusal, Standing, Status, Task, TaskEvent,
-    TaskSummary, Verdict, VerdictRecord,
+    Assertion, Blocker, Conflict, Contention, Footprint, Observed, Recusal, Standing, Status, Task,
+    TaskEvent, TaskSummary, Verdict, VerdictRecord,
 };
 use crate::repo::{
     Claim, Delivered, Dispatch, MemoryQuery, NewAssertion, ProjectScope, Recalled, Subtask,
@@ -214,7 +214,15 @@ impl HirdMcp {
         if self.witness.is_none() {
             return Evidence::default();
         }
+        let live = db
+            .tasks()
+            .get(seq)
+            .map(|task| task.status.is_active())
+            .unwrap_or(false);
+        let watched = db.witnessed().footprint(seq).unwrap_or_default();
         Evidence {
+            footprint: watched.describe(live),
+            watched,
             changed: db
                 .witnessed()
                 .touched(seq)
@@ -362,7 +370,10 @@ impl HirdMcp {
          moved under another agent that declared it too — whoever read it first is \
          holding a copy that no longer matches, so re-read it before your next write and \
          tell the human. hird watched the file change; it cannot see who typed, so treat \
-         `changed` as what happened in your window, not as a list of your own edits.\n"
+         `changed` as what happened in your window, not as a list of your own edits. \
+         `footprint` is the same evidence in one sentence — `read-only` when nothing has \
+         moved, `modified 3 files` when something has — and it is what to tell the human \
+         when they ask whether the work changed anything.\n"
     }
 }
 
@@ -985,6 +996,12 @@ fn plural(n: usize, one: &'static str, many: &'static str) -> &'static str {
 /// when it is empty, which is the ordinary case and the quiet one.
 #[derive(Debug, Default, Serialize)]
 struct Evidence {
+    /// Whether this task has changed anything at all: `read-only` when the
+    /// tree has not moved since it was claimed, `modified 3 files` when it
+    /// has. Absent where hird was not watching, which is not the same as
+    /// nothing having happened — say which of the two you are reporting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    footprint: Option<String>,
     /// Files that moved while you held this task, as `path (modified)`. Not a
     /// claim about who moved them — one checkout, several agents.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -1006,9 +1023,26 @@ struct Evidence {
     /// Not reported — it only decides how confidently the advice can speak.
     #[serde(skip)]
     alone: bool,
+    /// The same answer `footprint` is written from, kept in its typed form so
+    /// a result assembled after the task has stopped being worked can re-say
+    /// it without the hedge a task still in flight needs.
+    #[serde(skip)]
+    watched: Footprint,
 }
 
 impl Evidence {
+    /// The same evidence, re-said for a task that has just stopped being
+    /// worked.
+    ///
+    /// The last look has to be taken while the task is still live, or its
+    /// footprint would miss whatever it did on the way out — so by the time
+    /// the reply is written the hedge in "read-only so far" is one call out
+    /// of date. There is no more work coming: it is the whole story now.
+    fn settled(mut self) -> Evidence {
+        self.footprint = self.watched.describe(false);
+        self
+    }
+
     /// The one thing to do about it, or nothing.
     ///
     /// Ordered by cost of ignoring it: losing another agent's work beats
@@ -1118,6 +1152,7 @@ impl FinishResult {
         review_filed: Option<i64>,
         delivered: &[Delivered],
     ) -> FinishResult {
+        let witness = witness.settled();
         // A filed review outranks the witness's advice: it is the thing the
         // agent has to say out loud, and it is about to stop being this
         // agent's business entirely. A delivered verdict outranks the witness

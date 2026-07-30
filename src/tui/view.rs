@@ -11,7 +11,7 @@ use super::app::{AgentRow, App, Column, Mode, Readiness, Screen};
 use super::theme;
 use crate::fmt;
 use crate::identity::actor_harness;
-use crate::model::{Assertion, Standing, Status, TaskSummary, Verdict};
+use crate::model::{Assertion, Footprint, Standing, Status, TaskSummary, Verdict};
 use crate::repo::Recalled;
 
 /// Draw the whole screen.
@@ -129,6 +129,7 @@ fn render_column(frame: &mut Frame, area: Rect, app: &App, column: Column, now: 
                 app.blocked_by(task.seq),
                 app.reviews.get(&task.seq).copied(),
                 app.verdicts.get(&task.seq).copied(),
+                app.footprints.get(&task.seq).copied().unwrap_or_default(),
             ))
         })
         .collect();
@@ -154,6 +155,7 @@ fn task_card(
     blocked_by: &[i64],
     reviews: Option<i64>,
     verdict: Option<Verdict>,
+    footprint: Footprint,
 ) -> Text<'static> {
     let marker = match task.priority {
         p if p > 0 => Span::styled(format!("▲{p} "), Style::default().yellow()),
@@ -242,6 +244,18 @@ fn task_card(
             badges.push(Span::styled("sent back", Style::default().yellow()));
         }
         _ => {}
+    }
+    // What the tree says, which is the one badge on the card nobody wrote
+    // about themselves. Silent where hird was not watching: an empty space
+    // says "no evidence", and `read-only` would be saying something else.
+    //
+    // Last on the line because it is the badge a narrow column can afford to
+    // lose — the ones before it decide whether the card can be worked at all.
+    if let Some(badge) = footprint.badge() {
+        if !badges.is_empty() {
+            badges.push(Span::raw("  "));
+        }
+        badges.push(Span::styled(badge, theme::witness_style()));
     }
     if !badges.is_empty() {
         let mut line = vec![Span::raw("   ")];
@@ -353,6 +367,13 @@ fn agent_card(agent: &AgentRow, width: usize, now: DateTime<Utc>) -> Text<'stati
         lines.push(Line::from(Span::styled(
             format!("   ↳ {}", fmt::truncate(&agent.changed.join(", "), width)),
             theme::witness_style(),
+        )));
+    } else if let Some(label) = agent.footprint.label(true) {
+        // Nothing has moved. Said out loud, because the blank line it would
+        // otherwise be is also what a project hird cannot watch looks like.
+        lines.push(Line::from(Span::styled(
+            format!("   ↳ {label}"),
+            theme::dim_style(),
         )));
     }
     for overlap in &agent.overlaps {
@@ -819,6 +840,14 @@ fn render_task_detail(
             Span::raw(readiness.paths.join(", ")),
         ]));
     }
+    // `files` above is what somebody said would happen; this is what the tree
+    // says did — including the case where the answer is "nothing at all".
+    if let Some(sentence) = readiness.footprint.describe(task.status.is_active()) {
+        lines.push(Line::from(vec![
+            Span::styled("changed    ", theme::focus_style()),
+            Span::styled(sentence, theme::witness_style()),
+        ]));
+    }
     if task.review {
         lines.push(Line::from(vec![
             Span::styled("review     ", theme::focus_style()),
@@ -1049,7 +1078,14 @@ mod tests {
 
     /// Render the app to an off-screen buffer and return it as plain text.
     fn screen(app: &App) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        screen_at(app, 120)
+    }
+
+    /// The same, at a chosen width. A card's badges are truncated by the
+    /// column they sit in, so anything about the last of them has to say what
+    /// terminal it is talking about.
+    fn screen_at(app: &App, width: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, 30)).unwrap();
         terminal
             .draw(|frame| render(frame, app, Utc::now()))
             .unwrap();
@@ -1057,7 +1093,7 @@ mod tests {
             .backend()
             .buffer()
             .content()
-            .chunks(120)
+            .chunks(width as usize)
             .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n")
@@ -1118,6 +1154,53 @@ mod tests {
         assert!(out.contains("write the parser"), "{out}");
         assert!(out.contains("codex"), "holder badge missing:\n{out}");
         assert!(out.contains("left"), "lease countdown missing:\n{out}");
+    }
+
+    /// The card has to distinguish work that left a mark from work that only
+    /// read — and both of those from a task hird was never watching, which is
+    /// what every card on this in-memory board is until a baseline is taken.
+    #[test]
+    fn a_card_says_whether_the_work_moved_anything() {
+        let db = Db::open_in_memory().unwrap();
+        let read = db
+            .tasks()
+            .create(PROJECT, "audit the loader", "", 0, "cli")
+            .unwrap()
+            .seq;
+        let wrote = db
+            .tasks()
+            .create(PROJECT, "port the loader", "", 0, "cli")
+            .unwrap()
+            .seq;
+        let ttl = Config::default().lease_ttl();
+        for seq in [read, wrote] {
+            db.tasks().claim(seq, "codex:9f2c", ttl).unwrap();
+        }
+
+        // Unwatched so far, so the board says nothing either way.
+        let out = screen_at(&app_with(&db), 160);
+        assert!(!out.contains("read-only"), "{out}");
+
+        for seq in [read, wrote] {
+            db.witnessed()
+                .begin(seq, &crate::witness::Tree::default())
+                .unwrap();
+        }
+        db.witnessed()
+            .record(
+                wrote,
+                &[crate::witness::Change {
+                    path: "src/config.rs".into(),
+                    kind: crate::witness::ChangeKind::Modified,
+                    hash: "h1".into(),
+                }],
+                "cli",
+            )
+            .unwrap();
+
+        let out = screen_at(&app_with(&db), 160);
+        assert!(out.contains("read-only"), "{out}");
+        assert!(out.contains("modified 1"), "{out}");
     }
 
     #[test]

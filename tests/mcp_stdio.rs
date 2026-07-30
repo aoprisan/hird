@@ -598,11 +598,17 @@ fn two_harnesses_writing_one_declared_file_are_told_about_each_other() {
         .call("task_complete", json!({"seq": 1, "result": "ported"}))
         .unwrap();
     assert_eq!(done["changed"], json!(["src/config.rs (modified)"]));
+    // The headline says the work left a mark, and hedges it: the other agent
+    // was live in that file too, so the count is not an account of who typed.
+    let footprint = done["footprint"].as_str().unwrap_or_default();
+    assert!(footprint.starts_with("modified 1 file"), "{done}");
+    assert!(footprint.contains("another agent"), "{done}");
 
     // And the human's board says the same thing.
     let shown = sandbox.run(&["show", "1"]);
+    assert!(shown.contains("changed   modified 1 file"), "{shown}");
     assert!(
-        shown.contains("changed   src/config.rs (modified)"),
+        shown.contains("          src/config.rs (modified)"),
         "{shown}"
     );
 

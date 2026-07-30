@@ -79,6 +79,22 @@ say "hird show — the evidence behind the task"
 
 hird show "$port"
 
+say "a task that only read"
+
+# A third agent takes a task, reads the code, and writes nothing at all. Its
+# footprint stays empty — and hird says so out loud, because an empty list is
+# also what a project it cannot watch looks like, and those are opposite claims.
+read_only=$(hird add "Read the loader and report back")
+session_open copilot copilot
+session_call copilot 1 task_claim "{\"seq\": $read_only}"
+session_call copilot 2 task_complete \
+    "{\"seq\": $read_only, \"result\": \"read it; the precedence is already right\"}"
+session_close copilot
+
+say "hird ls — what each task did to the tree"
+
+hird ls
+
 say "next"
 
 cat <<EOF
@@ -93,6 +109,12 @@ The fourth call is the quieter half. src/mcp.rs moved and nobody had declared
 it, so the collision checks the *other* agents are running cannot see it, and
 hird says so — without claiming to know whose edit it was, because with two
 agents live in one checkout it does not.
+
+The last task is the blunt question the same fingerprints answer: did this work
+change anything at all? It finished read-only, and the two before it did not.
+Run the whole thing again outside a git repository and that column disappears
+rather than filling with read-only — hird was not watching, so it says nothing,
+which is not the same claim.
 
 Watch it live:                  HIRD_DB=$HIRD_DB $HIRD_BIN tui
 Turn it off:                    witness = false             (see config.toml)

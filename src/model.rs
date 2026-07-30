@@ -441,6 +441,101 @@ impl Observed {
     }
 }
 
+/// Whether a task left a mark on the working tree, or only read it.
+///
+/// Every other witness type answers "what moved?", and answers it with a list
+/// that comes back empty in two entirely different situations: a task that read
+/// the code and wrote nothing, and a task hird was never watching. Those are
+/// opposite claims — one is evidence, the other is the absence of any — and a
+/// board that prints nothing in both cases invites a reader to take the second
+/// for the first. This is the type that keeps them apart, and the only thing
+/// that lets any front end say "read-only" out loud.
+///
+/// It is the same evidence [`Observed`] is, under the same limit: one checkout
+/// has no keyboards, so `Modified` says the tree moved while the task was held
+/// and not that this task's agent is who moved it. Where another task's
+/// footprint holds one of the same files, `shared` says so rather than letting
+/// a count speak with more confidence than it has earned.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Footprint {
+    /// No baseline was ever taken: the task has not been claimed under a
+    /// witness, or the project is not a git checkout. hird has no opinion
+    /// here, and "read-only" would be inventing one.
+    #[default]
+    Unwatched,
+    /// A baseline was taken and the tree still matches it. Nothing moved while
+    /// the task was held — or whatever moved was put back the way it was.
+    ReadOnly,
+    /// Files differ from the baseline the task was claimed against.
+    Modified {
+        /// How many paths differ.
+        paths: usize,
+        /// Whether another task in the project has one of them in its own
+        /// footprint, which is to say it was live in that file at the same
+        /// time and the change belongs to both records.
+        shared: bool,
+    },
+}
+
+impl Footprint {
+    /// Whether the witness watched this task at all. `false` is the one case
+    /// where nothing may be said either way.
+    pub fn is_watched(self) -> bool {
+        !matches!(self, Footprint::Unwatched)
+    }
+
+    /// A badge for a list — `read-only`, `modified 3 files` — or nothing at
+    /// all where there is nothing to stand on.
+    ///
+    /// `live` is whether the task is still being worked, which is the
+    /// difference between a verdict and a running total: a task that has not
+    /// written anything yet has not finished not writing anything.
+    pub fn label(self, live: bool) -> Option<String> {
+        match self {
+            Footprint::Unwatched => None,
+            Footprint::ReadOnly if live => Some("read-only so far".to_string()),
+            Footprint::ReadOnly => Some("read-only".to_string()),
+            Footprint::Modified { paths, .. } => Some(format!(
+                "modified {paths} file{}",
+                if paths == 1 { "" } else { "s" }
+            )),
+        }
+    }
+
+    /// The compact form, for a board card whose whole width is a couple of
+    /// dozen columns: `read-only`, `modified 3`.
+    ///
+    /// It drops the hedge [`Footprint::label`] carries for a task still being
+    /// worked. Everything on a live board is a running total — the status, the
+    /// lease, the count of open tasks — and a card with room for one badge
+    /// should spend it on the fact rather than on saying so twice.
+    pub fn badge(self) -> Option<String> {
+        match self {
+            Footprint::Unwatched => None,
+            Footprint::ReadOnly => Some("read-only".to_string()),
+            Footprint::Modified { paths, .. } => Some(format!("modified {paths}")),
+        }
+    }
+
+    /// The same thing as a sentence, carrying the caveat where there is one.
+    pub fn describe(self, live: bool) -> Option<String> {
+        let label = self.label(live)?;
+        Some(match self {
+            Footprint::ReadOnly if live => {
+                format!("{label} — nothing in the working tree has moved since it was claimed")
+            }
+            Footprint::ReadOnly => {
+                format!("{label} — nothing in the working tree moved while it was held")
+            }
+            Footprint::Modified { shared: true, .. } => {
+                format!("{label}, though another agent was live in some of them")
+            }
+            _ => label,
+        })
+    }
+}
+
 /// A task together with what the witness saw happen under it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WitnessedTask {
@@ -1115,5 +1210,51 @@ mod tests {
     fn tags_are_normalized_to_a_compact_comma_list() {
         assert_eq!(normalize_tags(" a , ,b,, c "), "a,b,c");
         assert_eq!(normalize_tags(""), "");
+    }
+
+    /// The distinction the type exists for: an unwatched task says nothing,
+    /// and it must not be possible to mistake that for "nothing moved".
+    #[test]
+    fn an_unwatched_task_makes_no_claim_either_way() {
+        assert_eq!(Footprint::Unwatched.label(false), None);
+        assert_eq!(Footprint::Unwatched.describe(false), None);
+        assert_eq!(Footprint::default(), Footprint::Unwatched);
+        assert!(!Footprint::Unwatched.is_watched());
+        assert!(Footprint::ReadOnly.is_watched());
+    }
+
+    /// A task still being worked has not finished not writing anything, and
+    /// the wording has to leave room for its next edit.
+    #[test]
+    fn read_only_is_a_verdict_when_finished_and_a_running_total_while_held() {
+        assert_eq!(Footprint::ReadOnly.label(false).unwrap(), "read-only");
+        assert_eq!(Footprint::ReadOnly.label(true).unwrap(), "read-only so far");
+        assert!(Footprint::ReadOnly
+            .describe(false)
+            .unwrap()
+            .contains("while it was held"));
+        assert!(Footprint::ReadOnly
+            .describe(true)
+            .unwrap()
+            .contains("since it was claimed"));
+    }
+
+    #[test]
+    fn a_shared_file_stops_a_count_from_speaking_for_one_agent() {
+        let alone = Footprint::Modified {
+            paths: 1,
+            shared: false,
+        };
+        assert_eq!(alone.label(false).unwrap(), "modified 1 file");
+        assert_eq!(alone.describe(false).unwrap(), "modified 1 file");
+
+        let shared = Footprint::Modified {
+            paths: 3,
+            shared: true,
+        };
+        assert_eq!(shared.label(true).unwrap(), "modified 3 files");
+        let sentence = shared.describe(true).unwrap();
+        assert!(sentence.starts_with("modified 3 files,"), "{sentence}");
+        assert!(sentence.contains("another agent"), "{sentence}");
     }
 }
