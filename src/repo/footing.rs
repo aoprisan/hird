@@ -540,7 +540,9 @@ mod tests {
             )
             .unwrap();
         db.tasks().claim(seq, "codex:9f2c", TTL).unwrap();
-        db.witnessed().begin(seq, &Tree::default()).unwrap();
+        db.witnessed()
+            .begin(seq, &Tree::default(), "codex:9f2c")
+            .unwrap();
         db.witnessed()
             .record(
                 seq,

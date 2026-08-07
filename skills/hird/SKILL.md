@@ -21,6 +21,11 @@ agents and a human may be using it at the same time.
   they finished — the context the dependency order exists to hand you. An
   entry marked `provisional` is done but still under review; its work could be
   sent back and reopened while you build on it.
+- If the claim carries `previously`, the task has been held before, and
+  whatever that holder left uncommitted is in your working tree looking like
+  code that was always there. Re-read the files it names before building on
+  or over them; `hird diff <seq> --tenure <n>` (named in the sentence) shows
+  exactly what that round changed.
 
 ## Work safely
 

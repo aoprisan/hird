@@ -235,14 +235,20 @@ impl<'a> Recall<'a> {
         // Territory is whatever an earlier task said it would touch *or* was
         // seen to touch. The second half is what reaches an agent whose
         // predecessor never declared anything — most of them, in practice —
-        // and it needs no cooperation from that predecessor at all.
+        // and it needs no cooperation from that predecessor at all. Archived
+        // tenures count as seen too: a re-claim moves a task's footprint into
+        // the archive, and what round one learned in a file must still reach
+        // whoever works that file next.
         let sql = format!(
             "SELECT {ASSERTION_COLUMNS}, t.seq, t.title, p.pattern, p.observed
              FROM assertions a
              JOIN tasks t ON t.id = a.task_id
              JOIN (SELECT task_id, pattern, 0 AS observed, rowid AS ord FROM task_paths
                    UNION ALL
-                   SELECT task_id, path, 1 AS observed, rowid AS ord FROM task_changes) p
+                   SELECT task_id, path, 1 AS observed, rowid AS ord FROM task_changes
+                   UNION ALL
+                   SELECT tt.task_id, tc.path, 1 AS observed, tc.rowid AS ord
+                   FROM tenure_changes tc JOIN task_tenures tt ON tt.id = tc.tenure_id) p
                ON p.task_id = t.id
              WHERE a.project = ?1 AND a.superseded_by IS NULL AND a.task_id <> ?2
              ORDER BY a.created_at DESC, a.rowid DESC, p.observed, p.ord"
@@ -389,7 +395,7 @@ mod tests {
     fn witness(db: &Db, seq: i64, paths: &[&str]) {
         db.tasks().claim(seq, "codex:9f2c", TTL).unwrap();
         db.witnessed()
-            .begin(seq, &crate::witness::Tree::default())
+            .begin(seq, &crate::witness::Tree::default(), "codex:9f2c")
             .unwrap();
         let changes: Vec<crate::witness::Change> = paths
             .iter()

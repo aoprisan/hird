@@ -40,6 +40,12 @@ the redo files a fresh review, and the loop runs until one is *upheld*, with
 you nowhere in the transport. Every verdict lands on a record, so `hird
 record` can tell you whose work survives a reading by a different model.
 
+And when a task outlives a holder — a lease expires mid-work, work is handed
+back, a review sends it back — the queue archives what each holding did
+instead of forgetting it. The next agent's claim names whose uncommitted
+leavings are in its tree, and every earlier round stays diffable after the
+redo has written over it.
+
 No daemon. No server. No accounts.
 
 - 📖 **Documentation: [aoprisan.github.io/hird](https://aoprisan.github.io/hird/)**
@@ -683,6 +689,34 @@ version is not kept rather than guess at one.
 Kept versions are pruned once nothing references them and they have aged out,
 so the store grows with what actually changed, not with time.
 `exhibit = false` keeps the watching and gives up the keeping.
+
+### A task remembers every hand that held it
+
+An agent claims a task, edits two files, and dies — session killed, laptop
+closed, context burned out. The lease lapses and the task goes back in the
+pool. Whoever picks it up next starts on a working tree carrying a vanished
+agent's uncommitted edits, looking exactly like code that was always there —
+and the record of that first attempt used to be destroyed by the successor's
+own claim, at the moment it mattered most.
+
+Now every holding of a task is archived as a **tenure** — who held it, how
+the holding ended, what moved while they had it — and the successor's claim
+answer says so, unasked:
+
+```json
+{ "claimed": 7,
+  "previously": "codex:9f2c went quiet until the lease expired, and these files moved
+    while they held it: src/config.rs (modified), src/loader.rs (added). Whatever state
+    they left is part of the tree this claim starts from — `hird diff 7 --tenure 1`
+    shows that round's changes before you build on or over them" }
+```
+
+`hird show` numbers the rounds (`held  round 1: codex:9f2c — lease expired;
+saw src/config.rs (modified)`), and `hird diff --tenure` and `hird salvage
+--tenure` keep every earlier round readable and recoverable after the redo
+has written over all of it. A review that sends work back (see the verdict)
+gets the same benefit for free: the redo no longer erases the evidence of the
+round the reviewer judged.
 
 ### It is never in the way
 

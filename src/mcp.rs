@@ -209,6 +209,31 @@ impl HirdMcp {
         let _ = witness::begin(db, witness, &self.project, seq, &self.actor());
     }
 
+    /// What happened to this task before it was this claimant's, if it has
+    /// ever changed hands under the witness.
+    ///
+    /// Read after [`HirdMcp::begin_witnessing`], which is what archives the
+    /// previous holding — so on the claim where a task changes hands, the
+    /// newest tenure is exactly the holding that just ended, and its holder's
+    /// uncommitted leavings are sitting in the tree the new baseline was read
+    /// off. Nobody but the queue is positioned to say so: the previous
+    /// holder's session is gone, the new holder was not there, and the human
+    /// sees two claims on a board that look like one continuous task.
+    fn inheritance(&self, db: &Db, seq: i64) -> Option<String> {
+        self.witness.as_ref()?;
+        let held = db.witnessed().tenures(seq).ok()?;
+        let last = held.last()?;
+        let mut sentence = last.describe(seq);
+        if held.len() > 1 {
+            sentence = format!(
+                "{sentence}. This task has changed hands {} times — `hird show {seq}` \
+                 lists every holding",
+                held.len()
+            );
+        }
+        Some(sentence)
+    }
+
     /// What the witness has to say about a task, as the tools report it.
     fn evidence(&self, db: &Db, seq: i64) -> Evidence {
         if self.witness.is_none() {
@@ -380,7 +405,12 @@ impl HirdMcp {
          `changed` as what happened in your window, not as a list of your own edits. \
          `footprint` is the same evidence in one sentence — `read-only` when nothing has \
          moved, `modified 3 files` when something has — and it is what to tell the human \
-         when they ask whether the work changed anything.\n"
+         when they ask whether the work changed anything. A claim that answers with \
+         `previously` is handing you a task that has been held before — a lease that \
+         expired, work released or sent back — and whatever that holder left uncommitted \
+         is in your working tree now, looking exactly like code that was always there. \
+         The sentence says who held it, how it ended and which files moved; re-read \
+         those files before building on or over them.\n"
     }
 }
 
@@ -889,12 +919,24 @@ struct ClaimResult {
     /// be — so here it is, unasked.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     built_on: Vec<GroundRow>,
+    /// What happened to this task before this claim, when it has changed
+    /// hands: who held it, how that holding ended, and what moved under them
+    /// — because whatever they left uncommitted is in the tree this claim
+    /// starts from, indistinguishable from code that was always there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previously: Option<String>,
     /// Restated so the model does not have to remember the initialize text.
     reminder: String,
 }
 
 impl ClaimResult {
-    fn new(claim: Claim, holder: String, heartbeat: u64, recalled: Vec<Recalled>) -> ClaimResult {
+    fn new(
+        claim: Claim,
+        holder: String,
+        heartbeat: u64,
+        recalled: Vec<Recalled>,
+        previously: Option<String>,
+    ) -> ClaimResult {
         let overlaps = describe_all(&claim.conflicts);
         let provisional: Vec<i64> = claim
             .ground
@@ -934,6 +976,13 @@ impl ClaimResult {
                  and each says where it came from. Then: {reminder}"
             );
         }
+        if previously.is_some() {
+            reminder = format!(
+                "this task has been held before — `previously` says by whom and what moved \
+                 under them; re-read those files rather than assuming the tree is untouched. \
+                 {reminder}"
+            );
+        }
         ClaimResult {
             claimed: claim.task.seq,
             holder,
@@ -946,6 +995,7 @@ impl ClaimResult {
             overlaps,
             recalled: recall_rows(recalled),
             built_on: ground_rows(claim.ground),
+            previously,
             reminder,
         }
     }
@@ -1003,12 +1053,13 @@ impl NextResult {
         holder: String,
         heartbeat: u64,
         recalled: Vec<Recalled>,
+        previously: Option<String>,
     ) -> NextResult {
         let idle = dispatch.claim.is_none().then(|| idle_reason(&dispatch));
         NextResult {
             claimed: dispatch
                 .claim
-                .map(|claim| ClaimResult::new(claim, holder, heartbeat, recalled)),
+                .map(|claim| ClaimResult::new(claim, holder, heartbeat, recalled, previously)),
             idle,
             blocked: dispatch.blocked,
             held: dispatch
@@ -1517,7 +1568,7 @@ impl HirdMcp {
         // Recall runs after the claim, so it sees the paths this call just
         // declared — claiming with `paths` is what makes the file-scope half
         // of recall work on the very first call.
-        let (claim, recalled) = self
+        let (claim, recalled, previously) = self
             .with_db(|db| {
                 let claim = db.tasks().claim_scoped(
                     args.seq,
@@ -1531,7 +1582,11 @@ impl HirdMcp {
                 // that moves from here is inside its window and everything
                 // already dirty is not.
                 self.begin_witnessing(db, args.seq);
-                Ok::<_, Error>((claim, self.recall(db, args.seq, recall_limit)))
+                Ok::<_, Error>((
+                    claim,
+                    self.recall(db, args.seq, recall_limit),
+                    self.inheritance(db, args.seq),
+                ))
             })
             .map_err(stringify)?;
 
@@ -1540,6 +1595,7 @@ impl HirdMcp {
             actor,
             self.heartbeat_minutes(),
             recalled,
+            previously,
         ))
     }
 
@@ -1555,19 +1611,22 @@ impl HirdMcp {
         let scope = self.scope(args.all_projects);
         let avoid = self.config.avoid_conflicts(args.avoid_conflicts);
         let recall_limit = self.config.recall_limit();
-        let (dispatch, recalled) = self
+        let (dispatch, recalled, previously) = self
             .with_db(|db| {
                 let dispatch =
                     db.tasks()
                         .claim_next(&actor, ttl, &scope, avoid, self.config.clearance())?;
-                let recalled = match &dispatch.claim {
+                let (recalled, previously) = match &dispatch.claim {
                     Some(claim) => {
                         self.begin_witnessing(db, claim.task.seq);
-                        self.recall(db, claim.task.seq, recall_limit)
+                        (
+                            self.recall(db, claim.task.seq, recall_limit),
+                            self.inheritance(db, claim.task.seq),
+                        )
                     }
-                    None => Vec::new(),
+                    None => (Vec::new(), None),
                 };
-                Ok::<_, Error>((dispatch, recalled))
+                Ok::<_, Error>((dispatch, recalled, previously))
             })
             .map_err(stringify)?;
 
@@ -1576,6 +1635,7 @@ impl HirdMcp {
             actor,
             self.heartbeat_minutes(),
             recalled,
+            previously,
         ))
     }
 

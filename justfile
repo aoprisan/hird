@@ -59,6 +59,7 @@ examples: build
     ./examples/plan-file.sh
     ./examples/witness.sh
     ./examples/exhibit.sh
+    ./examples/tenure.sh
     ./examples/footing.sh
     ./examples/review.sh
     ./examples/verdict.sh

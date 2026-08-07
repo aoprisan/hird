@@ -746,6 +746,106 @@ fn the_witness_can_be_switched_off_in_the_configuration() {
     codex.shutdown();
 }
 
+// ------------------------------------------------------------- the tenure
+
+/// The hand-over, end to end and through the real binary.
+///
+/// An agent works a task, leaves uncommitted edits in the tree, and is gone —
+/// its session over, its work half-done, nothing committed. Another harness
+/// picks the task up. Before the tenure existed, the re-claim silently
+/// destroyed the record of the first attempt, and the successor started on a
+/// tree carrying a vanished agent's edits with nothing anywhere to say so.
+/// Now the claim answer says so, the first round's diff stays readable after
+/// the successor has rewritten everything, and the overwritten version is
+/// recoverable.
+#[test]
+fn a_successor_inherits_what_the_previous_holder_left_behind() {
+    let sandbox = Sandbox::new();
+    sandbox.git_init();
+    sandbox.run(&["add", "port the config loader"]);
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex
+        .call("task_claim", json!({"seq": 1, "paths": ["src/config.rs"]}))
+        .unwrap();
+    sandbox.write_file("src/config.rs", "// codex got halfway\n");
+    codex
+        .call("task_update", json!({"seq": 1, "note": "halfway there"}))
+        .unwrap();
+    codex
+        .call(
+            "task_release",
+            json!({"seq": 1, "reason": "session ending"}),
+        )
+        .unwrap();
+    codex.shutdown();
+
+    // The successor is told, on the claim itself, whose leavings it is
+    // standing in — the one moment it is guaranteed to be listening.
+    let mut claude = McpSession::start(&sandbox, "claude-code");
+    let claimed = claude.call("task_claim", json!({"seq": 1})).unwrap();
+    let previously = claimed["previously"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the claim carries no inheritance: {claimed}"));
+    assert!(previously.contains("codex:"), "{previously}");
+    assert!(previously.contains("handed it back"), "{previously}");
+    assert!(
+        previously.contains("src/config.rs (modified)"),
+        "{previously}"
+    );
+    assert!(
+        previously.contains("hird diff 1 --tenure 1"),
+        "{previously}"
+    );
+    assert!(
+        claimed["reminder"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("previously"),
+        "{claimed}"
+    );
+
+    // The successor starts over, and the tree moves on from what codex left.
+    sandbox.write_file("src/config.rs", "// claude started over\n");
+    claude
+        .call("task_update", json!({"seq": 1, "note": "starting over"}))
+        .unwrap();
+
+    // Round one's diff is still readable, and it is round one's alone.
+    let diffed = sandbox.run(&["diff", "1", "--tenure", "1"]);
+    assert!(diffed.contains("+// codex got halfway"), "{diffed}");
+    assert!(
+        !diffed.contains("started over"),
+        "round one's diff must not show round two's work:\n{diffed}"
+    );
+
+    // The version the rewrite landed on is recoverable, not just diffable.
+    let salvaged = sandbox.run(&["salvage", "1", "src/config.rs", "--tenure", "1"]);
+    assert_eq!(salvaged, "// codex got halfway\n");
+
+    // And the human's board tells the story of the hand-over.
+    let shown = sandbox.run(&["show", "1"]);
+    assert!(shown.contains("held      round 1: codex:"), "{shown}");
+    assert!(shown.contains("released"), "{shown}");
+    assert!(shown.contains("src/config.rs (modified)"), "{shown}");
+
+    claude.shutdown();
+}
+
+/// A task that has never changed hands must not grow a `previously` field:
+/// an inheritance report on a first claim would teach agents to ignore it.
+#[test]
+fn a_first_claim_carries_no_inheritance() {
+    let sandbox = Sandbox::new();
+    sandbox.git_init();
+    sandbox.run(&["add", "fresh work"]);
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    let claimed = codex.call("task_claim", json!({"seq": 1})).unwrap();
+    assert!(claimed.get("previously").is_none(), "{claimed}");
+    codex.shutdown();
+}
+
 // ------------------------------------------------- the footing under a fact
 
 /// The failure this feature exists for, end to end and over the wire.

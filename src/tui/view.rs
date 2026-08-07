@@ -1233,7 +1233,7 @@ mod tests {
 
         for seq in [read, wrote] {
             db.witnessed()
-                .begin(seq, &crate::witness::Tree::default())
+                .begin(seq, &crate::witness::Tree::default(), "codex:9f2c")
                 .unwrap();
         }
         db.witnessed()
@@ -1589,7 +1589,7 @@ mod tests {
         // under both — recorded here the way a sweep would record it.
         for (seq, hash) in [(1, "old-version"), (2, "current-version")] {
             db.witnessed()
-                .begin(seq, &crate::witness::Tree::default())
+                .begin(seq, &crate::witness::Tree::default(), "codex:9f2c")
                 .unwrap();
             db.witnessed()
                 .record(

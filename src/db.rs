@@ -213,6 +213,47 @@ CREATE TABLE witness_blobs (
   at      TEXT NOT NULL
 );
 "#,
+    // 9 — the tenure: a task remembers every hand that held it. A fresh claim
+    //     used to overwrite the previous holder's baseline and footprint; now
+    //     it archives them first, one row per holding.
+    r#"
+-- Who the baseline was taken for, so an archived tenure can say whose
+-- holding it describes without replaying the event trail.
+ALTER TABLE task_witness ADD COLUMN holder TEXT NOT NULL DEFAULT '';
+
+CREATE TABLE task_tenures (
+  id       TEXT PRIMARY KEY,
+  task_id  TEXT NOT NULL REFERENCES tasks(id),
+  -- 1-based per task, in the order the holdings ended.
+  n        INTEGER NOT NULL,
+  holder   TEXT NOT NULL DEFAULT '',
+  began_at TEXT NOT NULL,
+  -- How the holding ended: completed, failed, released, lease_expired or
+  -- cancelled. Empty when the trail could not say.
+  ended    TEXT NOT NULL DEFAULT '',
+  ended_at TEXT NOT NULL DEFAULT '',
+  -- The baseline the holding was measured against, verbatim from
+  -- task_witness: the commit and the fingerprint of what was dirty.
+  head     TEXT NOT NULL DEFAULT '',
+  tree     TEXT NOT NULL DEFAULT '{}',
+  archived_at TEXT NOT NULL,
+  UNIQUE (task_id, n)
+);
+
+CREATE INDEX idx_task_tenures_task ON task_tenures(task_id);
+
+CREATE TABLE tenure_changes (
+  tenure_id  TEXT NOT NULL REFERENCES task_tenures(id),
+  path       TEXT NOT NULL,
+  kind       TEXT NOT NULL CHECK (kind IN ('added','modified','deleted')),
+  hash       TEXT NOT NULL DEFAULT '',
+  first_seen TEXT NOT NULL,
+  last_seen  TEXT NOT NULL,
+  PRIMARY KEY (tenure_id, path)
+);
+
+CREATE INDEX idx_tenure_changes_hash ON tenure_changes(hash);
+"#,
 ];
 
 /// An open connection to the hird database.

@@ -580,6 +580,111 @@ impl Observed {
     }
 }
 
+/// One earlier holding of a task: who had it, how that ended, and what the
+/// witness saw move while they did.
+///
+/// Archived at the moment a fresh claim would otherwise overwrite the
+/// evidence, which is the only moment there is anything to archive. The
+/// current holding is never in here — `task_witness` and `task_changes` are
+/// its record — so `n` counts finished holdings, in order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tenure {
+    /// 1-based round number, per task.
+    pub n: i64,
+    /// Who held the lease. Empty when the baseline predates the column.
+    pub holder: String,
+    pub began_at: String,
+    /// How the holding ended: `completed`, `failed`, `released`,
+    /// `lease_expired` or `cancelled`. Empty when the trail could not say.
+    pub ended: String,
+    pub ended_at: String,
+    /// What moved while it was held, frozen at the moment of archiving.
+    pub changes: Vec<Observed>,
+}
+
+impl Tenure {
+    /// `codex:9f2c` or, for a row old enough to predate the record, a phrase.
+    fn who(&self) -> &str {
+        if self.holder.is_empty() {
+            "an earlier holder"
+        } else {
+            &self.holder
+        }
+    }
+
+    /// How the holding ended, as the middle of a sentence.
+    fn ending(&self) -> &'static str {
+        match self.ended.as_str() {
+            "completed" => "completed it",
+            "failed" => "failed it",
+            "released" => "handed it back unfinished",
+            "lease_expired" => "went quiet until the lease expired",
+            "cancelled" => "held it when it was cancelled",
+            _ => "held it before this claim",
+        }
+    }
+
+    /// The paths that moved, capped so a long list stays a sentence.
+    fn moved(&self) -> String {
+        const LISTED: usize = 6;
+        let mut listed: Vec<String> = self
+            .changes
+            .iter()
+            .take(LISTED)
+            .map(Observed::describe)
+            .collect();
+        if self.changes.len() > LISTED {
+            listed.push(format!("and {} more", self.changes.len() - LISTED));
+        }
+        listed.join(", ")
+    }
+
+    /// The sentence a successor is handed on claiming: what happened to this
+    /// task before it was theirs, and where to read the details.
+    ///
+    /// The wording is careful about what the record can back. The changes are
+    /// what moved *while the previous holding was live* — whatever state they
+    /// were left in is part of the tree the new baseline was just read off,
+    /// so the successor inherits it silently unless somebody says so. This is
+    /// somebody saying so.
+    pub fn describe(&self, seq: i64) -> String {
+        if self.changes.is_empty() {
+            return format!(
+                "{} {} without the tree moving — there are no leftover edits to inherit",
+                self.who(),
+                self.ending()
+            );
+        }
+        format!(
+            "{} {}, and these files moved while they held it: {}. Whatever state they \
+             left is part of the tree this claim starts from — `hird diff {seq} --tenure \
+             {}` shows that round's changes before you build on or over them",
+            self.who(),
+            self.ending(),
+            self.moved(),
+            self.n
+        )
+    }
+
+    /// The compact form `hird show` prints, one line per finished holding.
+    pub fn label(&self) -> String {
+        let ended = match self.ended.as_str() {
+            "" => "ended".to_string(),
+            kind => kind.replace('_', " "),
+        };
+        if self.changes.is_empty() {
+            format!("round {}: {} — {ended}; read-only", self.n, self.who())
+        } else {
+            format!(
+                "round {}: {} — {ended}; saw {}",
+                self.n,
+                self.who(),
+                self.moved()
+            )
+        }
+    }
+}
+
 /// Whether a task left a mark on the working tree, or only read it.
 ///
 /// Every other witness type answers "what moved?", and answers it with a list
