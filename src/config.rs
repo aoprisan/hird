@@ -95,6 +95,12 @@ pub struct Config {
     /// later reader can be told the code has moved under it. Rides on the same
     /// working-tree access as `witness` and is off wherever that is.
     pub memory_footing: bool,
+    /// Whether the witness keeps the content of the versions it fingerprints,
+    /// so `hird diff` can show what a task changed, reviews carry the diff of
+    /// the work under judgement, and `hird salvage` can recover a version an
+    /// overlapping write discarded. Rides on `witness` and is off wherever
+    /// that is.
+    pub exhibit: bool,
 }
 
 impl Default for Config {
@@ -108,6 +114,7 @@ impl Default for Config {
             recall_limit: DEFAULT_RECALL_LIMIT,
             witness: true,
             memory_footing: true,
+            exhibit: true,
         }
     }
 }
@@ -170,6 +177,10 @@ impl Config {
         self.witness
             .then(|| crate::witness::Witness::discover(root))
             .flatten()
+            // Whether observations also keep the content they hash rides
+            // along on the witness itself, so every sweep — MCP, CLI, TUI —
+            // obeys the same answer without each caller asking.
+            .map(|w| w.keeping(self.exhibit))
     }
 
     /// The witness memory may read the tree through, if it may.

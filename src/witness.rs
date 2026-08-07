@@ -142,6 +142,10 @@ impl Tree {
 #[derive(Debug, Clone)]
 pub struct Witness {
     root: PathBuf,
+    /// Whether observations also keep the content they hashed — the exhibit.
+    /// On by default; `exhibit = false` turns it off without turning off
+    /// watching.
+    keeping: bool,
 }
 
 impl Witness {
@@ -162,7 +166,14 @@ impl Witness {
         }
         Some(Witness {
             root: root.to_path_buf(),
+            keeping: true,
         })
+    }
+
+    /// The same witness, told whether to keep what it sees.
+    pub fn keeping(mut self, keep: bool) -> Witness {
+        self.keeping = keep;
+        self
     }
 
     /// Fingerprint the tree now.
@@ -304,6 +315,31 @@ impl Witness {
             .collect()
     }
 
+    /// The bytes of `path` as they stand, or `None` if it is missing, a
+    /// directory, or larger than the witness will hash — the same files
+    /// [`Witness::fingerprint`] declines to read by content are the ones the
+    /// exhibit declines to keep.
+    pub fn read(&self, path: &str) -> Option<Vec<u8>> {
+        let full = self.root.join(path);
+        let meta = std::fs::metadata(&full).ok()?;
+        if meta.is_dir() || meta.len() > MAX_HASH_BYTES {
+            return None;
+        }
+        std::fs::read(&full).ok()
+    }
+
+    /// The bytes of `path` as commit `head` had them, if git can say.
+    ///
+    /// This is the "before" side of a diff for a file that was clean when the
+    /// task started: the witness never fingerprinted it, because git was
+    /// already holding that version.
+    pub fn content_at(&self, head: &str, path: &str) -> Option<Vec<u8>> {
+        if head.is_empty() {
+            return None;
+        }
+        git_bytes(&self.root, &["show", &format!("{head}:{path}")])
+    }
+
     /// A hash standing for the current content of `path`, or `""` if it is not
     /// there. Oversized files are fingerprinted by their metadata instead.
     ///
@@ -407,6 +443,15 @@ pub fn sweep(
         }
         sweep.changes.push((baseline.seq, changes));
     }
+    keep_versions(
+        db,
+        witness,
+        sweep
+            .changes
+            .iter()
+            .flat_map(|(_, changes)| changes.iter())
+            .map(|c| (c.path.as_str(), c.hash.as_str())),
+    );
     Ok(sweep)
 }
 
@@ -431,11 +476,77 @@ pub fn begin(
         .filter(|b| b.seq != seq)
         .collect();
     let tree = observe_against(witness, &baselines);
+    let mut seen: Vec<Change> = Vec::new();
     for baseline in &baselines {
         let changes = witness.diff(&baseline.tree, &tree);
         db.witnessed().record(baseline.seq, &changes, actor)?;
+        seen.extend(changes);
     }
+    // The versions worth keeping at a claim: whatever just moved under the
+    // tasks already running, and the dirty files this task's own baseline was
+    // read off — those are the "before" of anything it goes on to edit.
+    keep_versions(
+        db,
+        witness,
+        seen.iter()
+            .map(|c| (c.path.as_str(), c.hash.as_str()))
+            .chain(tree.entries.iter().map(|(p, h)| (p.as_str(), h.as_str()))),
+    );
+    // A claim is rare enough to carry the housekeeping: kept versions nothing
+    // references any more age out here, so the store cannot grow without
+    // bound and no command has to exist to empty it.
+    let cutoff = crate::model::fmt_ts(chrono::Utc::now() - chrono::Duration::days(KEEP_DAYS));
+    let _ = db.witnessed().prune_blobs(&cutoff);
     db.witnessed().begin(seq, &tree)
+}
+
+/// How long an unreferenced kept version survives before a claim's
+/// housekeeping lets it go. Versions still named by some task's change record
+/// are evidence and are never pruned, whatever their age.
+const KEEP_DAYS: i64 = 90;
+
+/// Keep the content behind these `(path, hash)` sightings, best-effort.
+///
+/// Only versions the witness has never kept are read, so after the first
+/// sighting of a version this costs one indexed query and no I/O. A hash the
+/// witness would not stand behind — empty, or a metadata fingerprint for an
+/// oversized file — is not content and is skipped. The file is re-read and
+/// re-hashed rather than trusted to still match: if it moved between the
+/// observation and this read, the version stored is the one actually read,
+/// filed under its own hash, and the next sweep squares the record.
+fn keep_versions<'k>(
+    db: &crate::db::Db,
+    witness: &Witness,
+    sightings: impl Iterator<Item = (&'k str, &'k str)>,
+) {
+    if !witness.keeping {
+        return;
+    }
+    let mut by_hash: BTreeMap<String, String> = BTreeMap::new();
+    for (path, hash) in sightings {
+        if hash.is_empty() || hash.starts_with("size:") {
+            continue;
+        }
+        by_hash
+            .entry(hash.to_string())
+            .or_insert_with(|| path.to_string());
+    }
+    if by_hash.is_empty() {
+        return;
+    }
+    let hashes: Vec<String> = by_hash.keys().cloned().collect();
+    let Ok(missing) = db.witnessed().missing_blobs(&hashes) else {
+        return;
+    };
+    let mut blobs: Vec<(String, Vec<u8>)> = Vec::new();
+    for hash in missing {
+        let path = &by_hash[&hash];
+        let Some(bytes) = witness.read(path) else {
+            continue;
+        };
+        blobs.push((sha256_hex(&bytes), bytes));
+    }
+    let _ = db.witnessed().keep(&blobs);
 }
 
 /// Observe the tree with everything the given baselines will need to compare
@@ -459,6 +570,11 @@ fn observe_against(witness: &Witness, baselines: &[crate::repo::Baseline]) -> Tr
 /// Every git failure is the same failure here — the witness cannot see — so
 /// there is nothing to distinguish and nothing to report.
 fn git(root: &Path, args: &[&str]) -> Option<String> {
+    String::from_utf8(git_bytes(root, args)?).ok()
+}
+
+/// [`git`], but the raw bytes: file content is not obliged to be UTF-8.
+fn git_bytes(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
     let output = Command::new("git")
         .args(args)
         .current_dir(root)
@@ -473,7 +589,7 @@ fn git(root: &Path, args: &[&str]) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    String::from_utf8(output.stdout).ok()
+    Some(output.stdout)
 }
 
 #[cfg(test)]
@@ -958,6 +1074,151 @@ mod tests {
     fn a_project_without_git_simply_has_no_witness() {
         let dir = tempfile::tempdir().unwrap();
         assert!(Witness::discover(dir.path()).is_none());
+    }
+
+    // --------------------------------------------------------- the exhibit
+
+    /// The store behind `hird diff` and `hird salvage`: whatever a sweep
+    /// hashes, it also keeps, keyed by the same hash.
+    #[test]
+    fn sweeps_keep_the_versions_they_hash() {
+        let project = Project::new();
+        let seq = project.claim("port the loader", "codex:9f2c", &[]);
+        project.repo.write("src/config.rs", "// ported\n");
+        project.check_in(seq, "codex:9f2c");
+
+        let kept = project
+            .db
+            .witnessed()
+            .blob(&sha256_hex(b"// ported\n"))
+            .unwrap();
+        assert_eq!(kept.as_deref(), Some(b"// ported\n".as_slice()));
+    }
+
+    /// A file already dirty at claim time holds a version that exists nowhere
+    /// but the working tree, so the claim is the last chance to keep it.
+    #[test]
+    fn the_dirty_baseline_is_kept_at_claim_time() {
+        let project = Project::new();
+        project
+            .repo
+            .write("src/config.rs", "// the human's uncommitted edit\n");
+        project.claim("work", "codex:9f2c", &[]);
+
+        let kept = project
+            .db
+            .witnessed()
+            .blob(&sha256_hex(b"// the human's uncommitted edit\n"))
+            .unwrap();
+        assert!(kept.is_some(), "the baseline version must be kept");
+    }
+
+    /// `exhibit = false` watches without keeping: the record of what moved is
+    /// unchanged, and no content lands in the store.
+    #[test]
+    fn a_witness_told_not_to_keep_still_watches() {
+        let project = Project::new();
+        let witness = project.repo.witness().keeping(false);
+        let seq = project
+            .db
+            .tasks()
+            .create(&project.root(), "t", "", 0, "cli")
+            .unwrap()
+            .seq;
+        project.db.tasks().claim(seq, "codex:9f2c", TTL).unwrap();
+        begin(&project.db, &witness, &project.root(), seq, "codex:9f2c").unwrap();
+
+        project.repo.write("src/config.rs", "// edited\n");
+        let swept = sweep(&project.db, &witness, &project.root(), "codex:9f2c").unwrap();
+        assert_eq!(swept.fresh_for(seq), ["src/config.rs".to_string()]);
+        assert!(
+            project
+                .db
+                .witnessed()
+                .blob(&sha256_hex(b"// edited\n"))
+                .unwrap()
+                .is_none(),
+            "keeping is off, so the content must not be stored"
+        );
+    }
+
+    /// The whole reason to keep anything: the diff of a task's uncommitted
+    /// work survives the task finishing and the tree moving on.
+    #[test]
+    fn a_finished_tasks_diff_survives_the_tree_moving_on() {
+        let project = Project::new();
+        let seq = project.claim("port the loader", "codex:9f2c", &[]);
+        project.repo.write("src/config.rs", "// ported\n");
+        project.check_in(seq, "codex:9f2c");
+        project
+            .db
+            .tasks()
+            .complete(seq, "codex:9f2c", "done")
+            .unwrap();
+
+        // Somebody else rewrites the file after the task is over.
+        project.repo.write("src/config.rs", "// later, unrelated\n");
+
+        let shown = crate::exhibit::assemble(&project.db, &project.repo.witness(), seq).unwrap();
+        let text = crate::exhibit::render(&shown);
+        assert!(text.contains("a/src/config.rs"), "{text}");
+        assert!(text.contains("-// config"), "{text}");
+        assert!(text.contains("+// ported"), "{text}");
+        assert!(
+            !text.contains("later, unrelated"),
+            "the diff is the task's, not the tree's:\n{text}"
+        );
+    }
+
+    /// The witness's headline scenario, taken one step further than detection:
+    /// the version the second write landed on is retrievable.
+    #[test]
+    fn a_version_written_over_is_salvageable() {
+        let project = Project::new();
+        let first = project.claim("rewrite the loader", "codex:9f2c", &["src/config.rs"]);
+        project
+            .repo
+            .write("src/config.rs", "// codex's careful work\n");
+        project.check_in(first, "codex:9f2c");
+
+        let second = project.claim("audit the loader", "claude-code:af31", &["src/*.rs"]);
+        project
+            .repo
+            .write("src/config.rs", "// claude wrote over it\n");
+        project.check_in(second, "claude-code:af31");
+
+        let witness = project.repo.witness();
+        let lost =
+            crate::exhibit::salvage(&project.db, &witness, first, "src/config.rs", false).unwrap();
+        assert_eq!(lost, b"// codex's careful work\n");
+        let started_from =
+            crate::exhibit::salvage(&project.db, &witness, first, "src/config.rs", true).unwrap();
+        assert_eq!(started_from, b"// config\n");
+    }
+
+    /// A salvage the witness cannot make is refused in a sentence, never
+    /// guessed at.
+    #[test]
+    fn salvage_refuses_what_was_never_seen() {
+        let project = Project::new();
+        let seq = project.claim("quiet task", "codex:9f2c", &[]);
+        let witness = project.repo.witness();
+
+        let err = crate::exhibit::salvage(&project.db, &witness, seq, "src/config.rs", false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("saw nothing move"), "{err}");
+
+        let unwatched = project
+            .db
+            .tasks()
+            .create(&project.root(), "never watched", "", 0, "cli")
+            .unwrap()
+            .seq;
+        let err = crate::exhibit::salvage(&project.db, &witness, unwatched, "x", false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("was not watching"), "{err}");
     }
 
     #[test]

@@ -200,6 +200,19 @@ CREATE TABLE task_verdicts (
 CREATE INDEX idx_task_verdicts_task ON task_verdicts(task_id);
 CREATE INDEX idx_task_verdicts_review ON task_verdicts(review_id);
 "#,
+    // 8 — the exhibit: the file versions the witness saw, kept by content
+    r#"
+CREATE TABLE witness_blobs (
+  -- The same content hash the witness records everywhere else, so a hash in
+  -- a baseline or a change row is also the key to what the file said.
+  hash    TEXT PRIMARY KEY,
+  content BLOB NOT NULL,
+  size    INTEGER NOT NULL,
+  -- When this version was last seen, not first: re-sighting refreshes it,
+  -- which is what keeps pruning from throwing away versions still in play.
+  at      TEXT NOT NULL
+);
+"#,
 ];
 
 /// An open connection to the hird database.

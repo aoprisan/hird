@@ -1795,13 +1795,37 @@ impl HirdMcp {
                 // Last look, taken while the task is still live so its
                 // footprint is complete and any contention is still true.
                 let evidence = self.witnessed(db, args.seq);
+                // If finishing will file a review, resolve the diff of the
+                // work now — the sweep above has just brought the record and
+                // the kept versions up to date, and the reviewer should be
+                // handed the change itself rather than a list of file names.
+                let exhibit = self.witness.as_ref().and_then(|witness| {
+                    let marked = db.tasks().get(args.seq).map(|t| t.review).unwrap_or(false);
+                    if !marked {
+                        return None;
+                    }
+                    let shown = crate::exhibit::assemble(db, witness, args.seq).ok()?;
+                    let text = crate::exhibit::render(&shown);
+                    if text.trim().is_empty() {
+                        return None;
+                    }
+                    Some(crate::exhibit::clipped(
+                        &text,
+                        crate::exhibit::BRIEF_MAX_BYTES,
+                        args.seq,
+                    ))
+                });
                 // And the last word on what this task learned: its facts are
                 // statements about the tree it is leaving behind, not the one
                 // it found halfway through its own edits.
                 footing::settle(db, self.footing(), args.seq);
-                let task = db
-                    .tasks()
-                    .complete_with(args.seq, &actor, &args.result, verdict)?;
+                let task = db.tasks().complete_showing(
+                    args.seq,
+                    &actor,
+                    &args.result,
+                    verdict,
+                    exhibit.as_deref(),
+                )?;
                 Ok::<_, Error>((task, evidence))
             })
             .map_err(stringify)?;

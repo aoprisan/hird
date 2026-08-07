@@ -1054,6 +1054,11 @@ fn work_marked_for_review_is_handed_to_a_different_harness() {
     assert!(body.contains("ported it; env still wins"), "{body}");
     assert!(body.contains("src/config.rs (modified)"), "{body}");
     assert!(body.contains("not the summary"), "{body}");
+    // And the change itself, as the witness kept it — the reviewer is handed
+    // the diff, not a list of file names to reconstruct it from.
+    assert!(body.contains("```diff"), "{body}");
+    assert!(body.contains("--- a/src/config.rs"), "{body}");
+    assert!(body.contains("+fn load() { ported() }"), "{body}");
 
     codex.shutdown();
     claude.shutdown();

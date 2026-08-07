@@ -663,12 +663,30 @@ impl<'a> Tasks<'a> {
         result: &str,
         verdict: Option<crate::model::Verdict>,
     ) -> Result<Finished> {
-        self.finish(seq, actor, Transition::Complete, result, verdict)
+        self.complete_showing(seq, actor, result, verdict, None)
+    }
+
+    /// [`Tasks::complete_with`], carrying the diff of the work being finished.
+    ///
+    /// `exhibit` is the rendered diff of what the witness saw this task
+    /// change, computed by the caller while the task was still live. If the
+    /// completion files a review, the brief carries it — the reviewer is
+    /// handed the change itself rather than a list of file names to go and
+    /// guess it from.
+    pub fn complete_showing(
+        &self,
+        seq: i64,
+        actor: &str,
+        result: &str,
+        verdict: Option<crate::model::Verdict>,
+        exhibit: Option<&str>,
+    ) -> Result<Finished> {
+        self.finish(seq, actor, Transition::Complete, result, verdict, exhibit)
     }
 
     /// Give up on a held task.
     pub fn fail(&self, seq: i64, actor: &str, reason: &str) -> Result<Finished> {
-        self.finish(seq, actor, Transition::Fail, reason, None)
+        self.finish(seq, actor, Transition::Fail, reason, None, None)
     }
 
     /// Whether finishing this task should file a review of its work.
@@ -686,6 +704,7 @@ impl<'a> Tasks<'a> {
         transition: Transition,
         result: &str,
         verdict: Option<crate::model::Verdict>,
+        exhibit: Option<&str>,
     ) -> Result<Finished> {
         let result = result.trim();
         if result.is_empty() {
@@ -734,7 +753,7 @@ impl<'a> Tasks<'a> {
         // work has nothing to check, and a review of it would be the human's
         // call, not the queue's.
         let review = if transition == Transition::Complete {
-            recusal::file_review(&tx, &task, actor, result)?
+            recusal::file_review(&tx, &task, actor, result, exhibit)?
         } else {
             None
         };

@@ -11,6 +11,8 @@
 //! - [`db`] — connection setup and schema migrations
 //! - [`repo`] — the only place SQL is written
 //! - [`witness`] — the only place the working tree is read
+//! - [`exhibit`] — reading back the versions the witness kept: diffs of
+//!   uncommitted work, and salvage of what was written over
 //! - [`footing`] — the second reader of it, on memory's behalf: what an
 //!   assertion was learned against, and whether that has moved since
 //! - [`plan`] — a dependency graph as a file, which [`repo`] turns into rows
@@ -20,6 +22,7 @@ pub mod cli;
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod exhibit;
 pub mod fmt;
 pub mod footing;
 pub mod glob;

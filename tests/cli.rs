@@ -672,6 +672,91 @@ fn the_board_says_whether_a_task_wrote_anything_or_only_read() {
     codex.shutdown();
 }
 
+/// The witness keeps what it sees: `hird diff` shows a task's uncommitted
+/// change after the task is done and the tree has moved on, and
+/// `hird salvage` brings back the version another agent's write landed on.
+#[test]
+fn the_exhibit_diffs_finished_work_and_salvages_what_was_written_over() {
+    let sandbox = Sandbox::new();
+    sandbox.git_init();
+    sandbox.run(&["add", "port the loader", "--path", "src/config.rs"]);
+    sandbox.run(&["add", "audit the loader", "--path", "src/*.rs"]);
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex.claim(1);
+    sandbox.write_file("src/config.rs", "// codex ported it\n");
+    codex
+        .call(
+            "task_complete",
+            serde_json::json!({"seq": 1, "result": "ported"}),
+        )
+        .unwrap();
+
+    // A second agent then writes over the same file, uncommitted.
+    let mut claude = McpSession::start(&sandbox, "claude-code");
+    claude.claim(2);
+    sandbox.write_file("src/config.rs", "// claude wrote over it\n");
+    claude
+        .call(
+            "task_update",
+            serde_json::json!({"seq": 2, "note": "auditing"}),
+        )
+        .unwrap();
+
+    // Task 1's diff is still task 1's: baseline to the version it left, not
+    // to whatever the tree says today.
+    let diff = sandbox.run(&["diff", "1"]);
+    assert!(diff.contains("a/src/config.rs"), "{diff}");
+    assert!(diff.contains("-// config"), "{diff}");
+    assert!(diff.contains("+// codex ported it"), "{diff}");
+    assert!(!diff.contains("claude"), "{diff}");
+
+    // A live task's diff runs to the tree as it stands: claude started from
+    // codex's uncommitted version and the disk now holds claude's.
+    let live = sandbox.run(&["diff", "2"]);
+    assert!(live.contains("-// codex ported it"), "{live}");
+    assert!(live.contains("+// claude wrote over it"), "{live}");
+
+    // The version claude's write landed on is not gone.
+    let salvaged = sandbox.run(&["salvage", "1", "src/config.rs"]);
+    assert_eq!(salvaged, "// codex ported it\n");
+    let original = sandbox.run(&["salvage", "1", "src/config.rs", "--baseline"]);
+    assert_eq!(original, "// config\n");
+
+    // Written out, it refuses to land on an existing file unless told to.
+    sandbox.run(&["salvage", "1", "src/config.rs", "--out", "recovered.rs"]);
+    assert_eq!(
+        std::fs::read_to_string(sandbox.project().join("recovered.rs")).unwrap(),
+        "// codex ported it\n"
+    );
+    let refused = sandbox.run_failing(&["salvage", "1", "src/config.rs", "--out", "recovered.rs"]);
+    assert!(refused.contains("--force"), "{refused}");
+
+    // A file the witness never saw move under the task is refused by name.
+    let refused = sandbox.run_failing(&["salvage", "1", "README.md"]);
+    assert!(refused.contains("never saw README.md"), "{refused}");
+
+    codex.shutdown();
+    claude.shutdown();
+}
+
+/// Outside git nothing was kept, and both commands say so instead of showing
+/// an empty diff that would read as "this task changed nothing".
+#[test]
+fn the_exhibit_outside_git_refuses_rather_than_showing_nothing() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["add", "port the loader"]);
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex.claim(1);
+
+    let refused = sandbox.run_failing(&["diff", "1"]);
+    assert!(refused.contains("not watching"), "{refused}");
+    let refused = sandbox.run_failing(&["salvage", "1", "src/config.rs"]);
+    assert!(refused.contains("not watching"), "{refused}");
+
+    codex.shutdown();
+}
+
 /// Outside git there is nothing watching, and "read-only" would be a claim
 /// hird is in no position to make. Silence is the only honest answer.
 #[test]

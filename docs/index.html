@@ -30,6 +30,7 @@
     <li><a href="#scope">File scope and collisions</a></li>
     <li><a href="#witness">What actually happened</a></li>
     <li class="sub"><a href="#footprint">Modified, or read-only</a></li>
+    <li class="sub"><a href="#exhibit">The witness keeps what it saw</a></li>
     <li><a href="#split">Splitting a task</a></li>
     <li><a href="#review">No agent reviews its own work</a></li>
     <li><a href="#verdict">The review closes its own loop</a></li>
@@ -828,6 +829,60 @@ changed   modified 2 files, though another agent was live in some of them
   under them; the queue board badges every card with what it did to the tree.
 </p>
 
+<h3 id="exhibit">The witness keeps what it saw</h3>
+
+<p>
+  Detection is half an answer. The witness could tell you
+  <code>src/config.rs</code> moved under task 1; it could not show you the
+  change, and when a second agent's write landed on the first's uncommitted
+  work it could name the loss but not undo it. So every file version the
+  witness fingerprints is also <strong>kept</strong> — content-addressed,
+  deduplicated, in the same SQLite file as everything else — and three things
+  read it back.
+</p>
+
+<pre><code>$ <span class="k">hird</span> diff 1
+diff --git a/src/config.rs b/src/config.rs
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -1 +1 @@
+-fn load() {}
++fn load() { ported() }</code></pre>
+
+<p>
+  That is the uncommitted diff of what actually moved under task 1 — while the
+  work is live, after it is done, and after the tree has moved on to something
+  else. Git remembers what was committed; the exhibit remembers what happened
+  between commits, which is where agents live. <code>--path</code> narrows it
+  to one file.
+</p>
+
+<p>
+  The <a href="#review">review</a> a completion files is the second reader:
+  its brief now carries the diff of the work under judgement, clipped to a
+  size a context window can afford and pointing at <code>hird diff</code> for
+  the rest — so the reviewing agent reads the change itself rather than
+  reconstructing it from a list of file names.
+</p>
+
+<pre><code>$ <span class="k">hird</span> salvage 1 src/config.rs --out recovered.rs
+salvaged src/config.rs as the witness last saw it under the task — 24 bytes into recovered.rs</code></pre>
+
+<p>
+  And <code>salvage</code> is the third: the last version the witness saw of a
+  file under a task, which is exactly the version another agent's write landed
+  on in the collision the witness was built to catch. <code>--baseline</code>
+  asks instead for the version the task started from. The name is the honest
+  limit — a version that came and went between two observations was never
+  seen, and hird will say a version is not kept rather than guess at one.
+</p>
+
+<p>
+  Kept versions are pruned once nothing references them and they have aged
+  out, so the store grows with what actually changed, not with time.
+  <code>exhibit = false</code> keeps the watching and gives up the keeping.
+</p>
+
 <h3 id="witness-cost">It is never in the way</h3>
 
 <p>
@@ -1308,6 +1363,8 @@ shaky     the renderer redraws on every poll
                  [--needs &lt;seq&gt;,…] [--path &lt;glob&gt;]… [--review]
 hird ls [--status &lt;status&gt;] [--all-projects]
 hird show &lt;seq&gt;
+hird diff &lt;seq&gt; [--path &lt;file&gt;]
+hird salvage &lt;seq&gt; &lt;path&gt; [--baseline] [--out &lt;file&gt; [--force]]
 hird cancel &lt;seq&gt; [--reason &lt;text&gt;]
 hird reopen &lt;seq&gt; [--reason &lt;text&gt;]
 hird dep add &lt;seq&gt; --needs &lt;seq&gt;,…
@@ -1333,6 +1390,8 @@ hird db-path</code></pre>
     <tr><td><code>add</code></td><td>File a task. Prints the number, which is how you and the agents refer to it.</td></tr>
     <tr><td><code>ls</code></td><td>The queue as rows: status, holder, lease countdown, what it waits for, and whether it <a href="#footprint">changed anything</a>.</td></tr>
     <tr><td><code>show</code></td><td>One task in full — body, dependencies, scope, history, what was learned on it, and what the working tree says it did.</td></tr>
+    <tr><td><code>diff</code></td><td>The uncommitted diff of what moved under a task, from the versions the <a href="#exhibit">witness kept</a> — even after the task is done and the tree has moved on.</td></tr>
+    <tr><td><code>salvage</code></td><td>Recover a version of a file as it stood under a task: the last one the witness saw, or with <code>--baseline</code> the one the task started from.</td></tr>
     <tr><td><code>cancel</code> / <code>reopen</code></td><td>Human overrides. They work regardless of who holds the task.</td></tr>
     <tr><td><code>dep</code></td><td>Add or remove "must wait for" edges after the fact.</td></tr>
     <tr><td><code>plan</code></td><td>File a whole graph from a <a href="#plan-files">plan file</a>, in one transaction. <code>--dry-run</code> reads it out — waves, overlaps and all — and writes nothing.</td></tr>
@@ -1522,7 +1581,14 @@ witness = true
 <span class="c"># Whether an assertion remembers the files it was learned against, so a later
 # reader is told when that code has moved. Rides on the same working-tree
 # access as `witness` and is off wherever that is. Default true.</span>
-memory_footing = true</code></pre>
+memory_footing = true
+
+<span class="c"># Whether the witness keeps the content of the versions it fingerprints, so
+# `hird diff` can show what a task changed, reviews carry the diff of the
+# work under judgement, and `hird salvage` can recover a version an
+# overlapping write discarded. Rides on `witness` and is off wherever that
+# is. Default true.</span>
+exhibit = true</code></pre>
 
 <p>
   Unknown keys are an error rather than a shrug, so a typo is reported instead of
@@ -1588,6 +1654,10 @@ memory_footing = true</code></pre>
     <tr>
       <td><a href="https://github.com/aoprisan/hird/blob/main/examples/witness.sh"><code>witness.sh</code></a></td>
       <td>Two agents, one checkout, one file — the <a href="#witness">witness</a> catching a lost edit while there is still time to act on it, and a third task that finishes <a href="#footprint">read-only</a>. Makes its own throwaway git repository.</td>
+    </tr>
+    <tr>
+      <td><a href="https://github.com/aoprisan/hird/blob/main/examples/exhibit.sh"><code>exhibit.sh</code></a></td>
+      <td>A finished task's uncommitted diff shown after the tree has moved on, and a written-over version brought back — the <a href="#exhibit">exhibit</a>, end to end. Makes its own throwaway git repository.</td>
     </tr>
     <tr>
       <td><a href="https://github.com/aoprisan/hird/blob/main/examples/footing.sh"><code>footing.sh</code></a></td>

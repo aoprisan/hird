@@ -1190,3 +1190,113 @@ record actually is that sent-back.
 receive; the policy is a configuration key; the event is a row in a table
 that existed in v1. Nothing new to call, because an agent that had to ask
 "has my ground moved?" is an agent that would not ask.
+
+## 19. (v2.0) The exhibit — the witness keeps what it saw
+
+§12 made hird go and look. Every look ends in a hash: the witness reads a
+file, fingerprints it, and throws the content away. That is enough to say
+*that* `src/config.rs` moved under task 1, and it is not enough for the three
+questions that follow immediately from saying so. *What* changed? — the
+change rows name files, and a human or a reviewing agent is left to
+reconstruct the edit from the tree as it stands, which by then may say
+something else. *What did the review actually judge?* — §15 scopes the review
+to the files that moved and hands the reviewer everything except the change
+itself. And *where did the overwritten version go?* — §12's contention
+warning exists precisely because a write can land on another agent's
+uncommitted work, and when the warning comes too late the work is simply
+gone. Git cannot help with any of these: nothing was committed. That is not
+an edge case of agent work, it is the normal case — agents live between
+commits.
+
+So the witness keeps what it sees. The content it was already holding in
+memory to hash is written, keyed by that same hash, into the database
+everything else lives in.
+
+### Migration 8
+
+```sql
+CREATE TABLE witness_blobs (
+  hash    TEXT PRIMARY KEY,
+  content BLOB NOT NULL,
+  size    INTEGER NOT NULL,
+  at      TEXT NOT NULL   -- last sighting, refreshed on re-sight
+);
+```
+
+Content-addressed, so the store is deduplicated by construction — a version
+seen under three tasks is one row, a file put back the way it was costs
+nothing new — and the hash a baseline or a change row already carries is also
+the key to what the file said. Only content the witness fingerprints by
+content is kept: an oversized file was never hashed, so it is never stored,
+and the exhibit inherits §12's size discipline without a second knob.
+
+Capture rides on the sweeps that already exist. A check-in keeps the versions
+its changes name; a claim keeps whatever just moved under the running tasks
+plus the dirty entries of its own fresh baseline — those are the versions
+that exist nowhere but the working tree, and the claim is the last moment to
+keep them. A version already kept costs one indexed existence check and no
+I/O, so the steady state of a sweep stores nothing.
+
+A claim also prunes: kept versions that nothing references and that have aged
+out (90 days) are deleted. A hash still named on some task's change record is
+somebody's evidence and is never pruned, whatever its age. Housekeeping rides
+on a rare, already-heavy call rather than on a daemon or a maintenance
+command, neither of which this design will grow.
+
+### Reading it back
+
+The "before" of a diff is resolved from two sources, matching §12's two kinds
+of knowledge: a file dirty at claim time was fingerprinted then, and its kept
+version is the only copy anywhere; a file clean at claim time is asked of git
+at the baseline's recorded `HEAD`, because git already holds that version and
+a copy would have been redundant. The "after" is the kept version on the
+task's change record — for a live task, the disk as it stands, because a
+diff that stops at the last heartbeat understates what the tree already
+knows.
+
+Three readers, no new tools:
+
+- **`hird diff <seq>`** — the uncommitted diff of what moved under a task,
+  rendered by `git diff --no-index` over the kept versions so it reads
+  exactly like the diffs every reader already knows. It keeps answering after
+  the task is done and the tree has moved on, which is when the question is
+  usually asked.
+- **The review brief.** §15's review is now handed the diff of the work under
+  judgement, clipped to a bounded size with the cut named and pointed at
+  `hird diff` — an unmarked bound reads exactly like a diff that found
+  nothing more. The completion computes it after the final sweep, while the
+  record and the kept versions describe the instant the work ended, and
+  passes it into the same transaction that files the review.
+- **`hird salvage <seq> <path>`** — the last version the witness saw of a
+  file under a task, or with `--baseline` the version the task started from.
+  This is §12's headline collision carried one step past detection: the
+  version the second write landed on is retrievable.
+
+### What it can and cannot promise
+
+The honest name is "the last version the witness saw". The witness observes
+at claims, check-ins and renders, not continuously; a version that came and
+went between two observations was never seen and cannot be salvaged. The
+exhibit widens no observation and narrows no silence — it keeps exactly what
+§12 already read, and where a version was not kept (too large, pruned,
+observed before the exhibit existed) every reader says so in as many words
+rather than serving the nearest thing it has. `Unkept` is a reason, not an
+empty diff: a missing side rendered as "unchanged" would be the one lie this
+feature exists to not tell.
+
+### Off is off
+
+`exhibit = false` keeps the watching and gives up the keeping: sweeps store
+nothing, and the readers answer with "not kept" for versions only the store
+could supply. It rides on `witness` and is off wherever that is, and a
+project outside git never had either. The MCP surface is untouched — the
+review diff lands in a task body, and the two commands are CLI verbs, because
+recovering lost work and reading finished work are human acts.
+
+### Still twelve tools
+
+The exhibit adds two CLI verbs and a column of evidence to a brief that
+already existed. Nothing an agent calls has changed, because nothing here is
+something an agent would know to ask for — it is what the human reaches for
+when the board says `modified 2 files, though another agent was live in some
+of them`, and what the reviewer is handed so it does not have to ask.
