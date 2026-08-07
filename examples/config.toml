@@ -94,3 +94,19 @@ witness = true
 # Rides on the same working-tree access as `witness` and is off wherever that
 # is; this switch is for keeping the witness while giving up the footing.
 memory_footing = true
+
+# Whether the witness keeps what it sees.
+#
+# On, every file version the witness fingerprints is also kept, content-
+# addressed, in the same database as everything else. That is what lets
+# `hird diff` show the uncommitted diff of what a task actually changed —
+# during the work and after it — lets the review a completion files carry the
+# diff of the work under judgement instead of a list of file names, and lets
+# `hird salvage` bring back the last version the witness saw of a file that
+# another agent's write has since landed on.
+#
+# Versions are deduplicated by content and pruned once nothing references
+# them, so the store grows with what actually changed, not with time. Rides
+# on `witness` and is off wherever that is; this switch is for keeping the
+# watching while giving up the keeping.
+exhibit = true

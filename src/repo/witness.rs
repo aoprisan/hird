@@ -417,6 +417,100 @@ impl<'a> Witnessed<'a> {
             .collect())
     }
 
+    // ------------------------------------------------------------ the exhibit
+
+    /// Keep these versions: one row per content hash, refreshed on re-sight.
+    ///
+    /// Content-addressed, so keeping the same version twice costs one UPDATE
+    /// of a timestamp, and two files with identical content cost one row.
+    pub fn keep(&self, blobs: &[(String, Vec<u8>)]) -> Result<()> {
+        if blobs.is_empty() {
+            return Ok(());
+        }
+        let tx = Transaction::new_unchecked(self.conn, TransactionBehavior::Immediate)?;
+        let now = now_ts();
+        for (hash, content) in blobs {
+            tx.execute(
+                "INSERT INTO witness_blobs (hash, content, size, at) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(hash) DO UPDATE SET at = excluded.at",
+                params![hash, content, content.len() as i64, now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The content that hashes to `hash`, if the witness kept it.
+    pub fn blob(&self, hash: &str) -> Result<Option<Vec<u8>>> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT content FROM witness_blobs WHERE hash = ?1",
+                [hash],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Which of `hashes` have no kept content yet.
+    ///
+    /// Asked before reading files, so a sweep only re-reads the versions it
+    /// has never seen — which after the first sighting is none of them.
+    pub fn missing_blobs(&self, hashes: &[String]) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT EXISTS(SELECT 1 FROM witness_blobs WHERE hash = ?1)")?;
+        let mut missing = Vec::new();
+        for hash in hashes {
+            let kept: bool = stmt.query_row([hash], |row| row.get(0))?;
+            if !kept {
+                missing.push(hash.clone());
+            }
+        }
+        Ok(missing)
+    }
+
+    /// Drop kept versions nothing points at any more.
+    ///
+    /// A hash still on some task's change record is somebody's evidence and
+    /// stays whatever its age; everything else — baseline versions of work
+    /// long finished, versions observed and then superseded — goes once it is
+    /// older than the cutoff. Returns how many rows went.
+    pub fn prune_blobs(&self, before: &str) -> Result<usize> {
+        Ok(self.conn.execute(
+            "DELETE FROM witness_blobs
+             WHERE at < ?1
+               AND hash NOT IN (SELECT hash FROM task_changes)",
+            [before],
+        )?)
+    }
+
+    /// The baseline task `seq` was measured against, whatever its status now.
+    ///
+    /// [`Witnessed::baselines`] answers for live tasks because that is what a
+    /// sweep needs; this answers for one task after the fact, which is what
+    /// reading its diff needs.
+    pub fn baseline_of(&self, seq: i64) -> Result<Option<Baseline>> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT t.seq, w.task_id, w.head, w.tree
+                 FROM task_witness w JOIN tasks t ON t.id = w.task_id
+                 WHERE t.seq = ?1",
+                [seq],
+                |row| {
+                    Ok(Baseline {
+                        seq: row.get(0)?,
+                        task_id: row.get(1)?,
+                        tree: decode(row.get::<_, String>(2)?, row.get::<_, String>(3)?),
+                    })
+                },
+            )
+            .optional()?)
+    }
+
     /// Every task in `scope` the witness has something on, newest first.
     ///
     /// The radar's second data source: the TUI paints these next to what the
@@ -1002,6 +1096,76 @@ mod tests {
         // treats as the same "nothing to say" as `Unwatched`.
         let never = seed(&db, "never claimed under a witness", "codex:9f2c");
         assert_eq!(db.witnessed().footprints(&scope).unwrap().get(&never), None);
+    }
+
+    #[test]
+    fn kept_versions_round_trip_and_deduplicate() {
+        let db = db();
+        assert_eq!(
+            db.witnessed().missing_blobs(&["h1".into()]).unwrap(),
+            vec!["h1".to_string()]
+        );
+        db.witnessed()
+            .keep(&[("h1".into(), b"content".to_vec())])
+            .unwrap();
+        // Keeping the same version again is a refresh, not a duplicate.
+        db.witnessed()
+            .keep(&[("h1".into(), b"content".to_vec())])
+            .unwrap();
+
+        assert!(db
+            .witnessed()
+            .missing_blobs(&["h1".into()])
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            db.witnessed().blob("h1").unwrap().as_deref(),
+            Some(b"content".as_slice())
+        );
+        assert_eq!(db.witnessed().blob("absent").unwrap(), None);
+    }
+
+    /// Pruning is housekeeping, not forgetting: a version still named on some
+    /// task's change record is evidence and stays, whatever its age.
+    #[test]
+    fn pruning_spares_versions_still_on_a_record() {
+        let db = db();
+        let seq = seed(&db, "t", "codex:9f2c");
+        db.witnessed().begin(seq, &tree(&[])).unwrap();
+        db.witnessed()
+            .record(seq, &[change("src/a.rs", "h-referenced")], "codex:9f2c")
+            .unwrap();
+        db.witnessed()
+            .keep(&[
+                ("h-referenced".into(), b"kept".to_vec()),
+                ("h-orphan".into(), b"orphan".to_vec()),
+            ])
+            .unwrap();
+
+        // A cutoff after "now" ages everything, so only the reference saves a row.
+        let gone = db
+            .witnessed()
+            .prune_blobs("9999-01-01T00:00:00.000Z")
+            .unwrap();
+        assert_eq!(gone, 1);
+        assert!(db.witnessed().blob("h-referenced").unwrap().is_some());
+        assert!(db.witnessed().blob("h-orphan").unwrap().is_none());
+    }
+
+    /// `hird diff` on a finished task needs the fingerprint it was measured
+    /// against, which `baselines` — scoped to live tasks — no longer serves.
+    #[test]
+    fn the_baseline_is_readable_after_the_task_is_done() {
+        let db = db();
+        let seq = seed(&db, "t", "codex:9f2c");
+        let snapshot = tree(&[("src/a.rs", "hash-a")]);
+        db.witnessed().begin(seq, &snapshot).unwrap();
+        db.tasks().complete(seq, "codex:9f2c", "done").unwrap();
+
+        assert!(db.witnessed().baselines(PROJECT).unwrap().is_empty());
+        let found = db.witnessed().baseline_of(seq).unwrap().unwrap();
+        assert_eq!(found.tree, snapshot);
+        assert!(db.witnessed().baseline_of(999).unwrap().is_none());
     }
 
     #[test]

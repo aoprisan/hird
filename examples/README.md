@@ -15,6 +15,7 @@ installed, but nothing requires it.
 | [`plan-file.sh`](plan-file.sh) | **The plan as a file** — read it before it is filed, file the whole graph in one transaction, edit it and file it again. |
 | [`plan.toml`](plan.toml) | The plan format, annotated, every field at work. |
 | [`witness.sh`](witness.sh) | **What actually happened** — two agents, one checkout, one file, and the warning that arrives while there is still time to act on it. |
+| [`exhibit.sh`](exhibit.sh) | **The witness keeps what it saw** — a finished task's uncommitted diff shown after the tree has moved on, and a written-over version brought back with one command. |
 | [`footing.sh`](footing.sh) | **Memory that knows when it went stale** — a fact recorded against a file, that file rewritten, and every later reader told so without anybody curating anything. |
 | [`review.sh`](review.sh) | **No agent reviews its own work** — finishing files the review, scoped to what actually moved, and the queue refuses it to the harness that did it. |
 | [`verdict.sh`](verdict.sh) | **The review closes its own loop** — a `sent_back` verdict reopens the work carrying the findings, the redo files a fresh review, and `hird record` keeps score per harness. |
@@ -29,6 +30,7 @@ installed, but nothing requires it.
 ./examples/swarm-plan.sh
 ./examples/plan-file.sh
 ./examples/witness.sh          # needs git; makes its own throwaway repository
+./examples/exhibit.sh          # likewise
 ./examples/footing.sh          # likewise
 ./examples/review.sh           # likewise
 ./examples/verdict.sh          # likewise
@@ -51,7 +53,7 @@ next session in the script is handed something else.
 a session on MCP 2026-07-28, which has no handshake at all, and every request
 carries in `_meta` what `initialize` used to say once.
 
-`witness.sh`, `footing.sh`, `review.sh` and `verdict.sh` need more than that. To show two agents taking turns in one file
+`witness.sh`, `exhibit.sh`, `footing.sh`, `review.sh` and `verdict.sh` need more than that. To show two agents taking turns in one file
 it has to keep both sessions open and edit the tree *between* their calls, so it
 uses `session_open` / `session_call` instead: a pair of fifos per session, and
 every call waiting for its own answer. A heredoc will not do it — a script

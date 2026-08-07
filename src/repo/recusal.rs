@@ -197,6 +197,7 @@ pub(super) fn file_review(
     task: &crate::model::Task,
     actor: &str,
     result: &str,
+    exhibit: Option<&str>,
 ) -> Result<Option<i64>> {
     if !task.review || already_under_review(tx, &task.id)? {
         return Ok(None);
@@ -213,7 +214,7 @@ pub(super) fn file_review(
         return Ok(None);
     }
 
-    let body = review_body(task, result, &observed, &declared);
+    let body = review_body(task, result, &observed, &declared, exhibit);
     let review = super::tasks::create_in_tx(
         tx,
         &task.project,
@@ -271,6 +272,7 @@ fn review_body(
     result: &str,
     observed: &[String],
     declared: &[String],
+    exhibit: Option<&str>,
 ) -> String {
     let mut out = format!(
         "Review the work done on task {} ({}).\n\nWhat its agent said it did:\n\n> {}\n",
@@ -287,6 +289,14 @@ fn review_body(
         out.push_str(&format!(
             "\nThe files it said it would touch (nothing was witnessed):\n\n- {}\n",
             declared.join("\n- ")
+        ));
+    }
+    // The change itself, as the witness kept it — not as anybody described
+    // it. This is what makes the review a reading of the work rather than a
+    // reading of the summary.
+    if let Some(diff) = exhibit.map(str::trim).filter(|d| !d.is_empty()) {
+        out.push_str(&format!(
+            "\nThe change under review, as the witness kept it:\n\n```diff\n{diff}\n```\n"
         ));
     }
     if !task.body.trim().is_empty() {
@@ -564,6 +574,74 @@ mod tests {
         // And the author cannot take it.
         assert!(db.tasks().claim(review, "codex:1a2b", TTL).is_err());
         db.tasks().claim(review, "claude-code:af31", TTL).unwrap();
+    }
+
+    /// A completion that carries the diff of its work hands it to the review:
+    /// the reviewer reads the change itself, not a list of file names.
+    #[test]
+    fn the_review_brief_carries_the_diff_when_the_completion_brought_one() {
+        let db = db();
+        let seq = task(&db, "Port the config loader");
+        db.tasks().set_review(seq, true, "cli").unwrap();
+        db.tasks().claim(seq, "codex:9f2c", TTL).unwrap();
+        db.witnessed()
+            .begin(seq, &crate::witness::Tree::default())
+            .unwrap();
+        db.witnessed()
+            .record(
+                seq,
+                &[crate::witness::Change {
+                    path: "src/config.rs".into(),
+                    kind: crate::witness::ChangeKind::Modified,
+                    hash: "h1".into(),
+                }],
+                "codex:9f2c",
+            )
+            .unwrap();
+
+        let diff = "--- a/src/config.rs\n+++ b/src/config.rs\n-old\n+new\n";
+        let finished = db
+            .tasks()
+            .complete_showing(seq, "codex:9f2c", "ported", None, Some(diff))
+            .unwrap();
+        let filed = db
+            .tasks()
+            .get(finished.review.expect("a review was filed"))
+            .unwrap();
+        assert!(
+            filed.body.contains("as the witness kept it"),
+            "{}",
+            filed.body
+        );
+        assert!(filed.body.contains("```diff"), "{}", filed.body);
+        assert!(filed.body.contains("+new"), "{}", filed.body);
+        // And a completion with nothing to show adds no empty section.
+        let quiet = task(&db, "Port it again");
+        db.tasks().set_review(quiet, true, "cli").unwrap();
+        db.tasks().claim(quiet, "codex:9f2c", TTL).unwrap();
+        db.witnessed()
+            .begin(quiet, &crate::witness::Tree::default())
+            .unwrap();
+        db.witnessed()
+            .record(
+                quiet,
+                &[crate::witness::Change {
+                    path: "src/config.rs".into(),
+                    kind: crate::witness::ChangeKind::Modified,
+                    hash: "h2".into(),
+                }],
+                "codex:9f2c",
+            )
+            .unwrap();
+        let finished = db
+            .tasks()
+            .complete_showing(quiet, "codex:9f2c", "ported", None, Some("  "))
+            .unwrap();
+        let filed = db
+            .tasks()
+            .get(finished.review.expect("a review was filed"))
+            .unwrap();
+        assert!(!filed.body.contains("```diff"), "{}", filed.body);
     }
 
     /// A review with nothing to read is busywork on somebody's board.

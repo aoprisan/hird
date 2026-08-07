@@ -13,6 +13,7 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::config::{self, Config};
 use crate::db::Db;
+use crate::exhibit;
 use crate::fmt;
 use crate::footing;
 use crate::glob;
@@ -59,6 +60,28 @@ pub enum Command {
     Ls(LsArgs),
     /// Show one task in full, with its history.
     Show { seq: i64 },
+    /// The diff of what moved under a task, from the versions the witness kept.
+    Diff {
+        seq: i64,
+        /// Only this file, project-relative.
+        #[arg(long)]
+        path: Option<String>,
+    },
+    /// Recover a version of a file as it stood under a task.
+    Salvage {
+        seq: i64,
+        /// Project-relative path, as `hird show` lists it.
+        path: String,
+        /// The version the task started from, instead of the last one seen.
+        #[arg(long)]
+        baseline: bool,
+        /// Write to this file instead of stdout.
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+        /// Overwrite an existing --out file.
+        #[arg(long)]
+        force: bool,
+    },
     /// Abandon a task.
     Cancel {
         seq: i64,
@@ -361,6 +384,23 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
             look(&db, &config, &project);
             show(&db, *seq, &config, out)
         }
+        Command::Diff { seq, path } => diff(&db, *seq, path.as_deref(), &config, out),
+        Command::Salvage {
+            seq,
+            path,
+            baseline,
+            out: to,
+            force,
+        } => salvage(
+            &db,
+            *seq,
+            path,
+            *baseline,
+            to.as_deref(),
+            *force,
+            &config,
+            out,
+        ),
         Command::Recall { seq, limit } => recall(
             &db,
             &config,
@@ -1060,6 +1100,102 @@ fn recall(
         if let Some(voices) = &item.corroboration {
             writeln!(out, "    {voices}")?;
         }
+    }
+    Ok(())
+}
+
+/// The uncommitted diff of what moved under a task, off the kept versions.
+fn diff(
+    db: &Db,
+    seq: i64,
+    only: Option<&str>,
+    config: &Config,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
+    let task = db.tasks().get(seq)?;
+    let Some(witness) = config.witness(Path::new(&task.project)) else {
+        anyhow::bail!(
+            "hird is not watching {} — no git repository there, or the witness is off — \
+             so there is no diff to show",
+            task.project
+        );
+    };
+    // Bring the record up to the tree as it stands first: a diff that stops
+    // at the last heartbeat shows less than the disk already knows.
+    let _ = witness::sweep(db, &witness, &task.project, ACTOR_CLI);
+    let mut shown = exhibit::assemble(db, &witness, seq)?;
+    if let Some(only) = only {
+        shown.retain(|e| e.path == only);
+        if shown.is_empty() {
+            writeln!(
+                out,
+                "the witness saw nothing move at {only} under task {seq}"
+            )?;
+            return Ok(());
+        }
+    }
+    let text = exhibit::render(&shown);
+    if text.trim().is_empty() {
+        writeln!(
+            out,
+            "nothing moved under task {seq} while the witness was watching"
+        )?;
+        return Ok(());
+    }
+    write!(out, "{text}")?;
+    Ok(())
+}
+
+/// Recover a version of a file as it stood under a task.
+#[allow(clippy::too_many_arguments)]
+fn salvage(
+    db: &Db,
+    seq: i64,
+    path: &str,
+    baseline: bool,
+    to: Option<&Path>,
+    force: bool,
+    config: &Config,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
+    let task = db.tasks().get(seq)?;
+    let Some(witness) = config.witness(Path::new(&task.project)) else {
+        anyhow::bail!(
+            "hird is not watching {} — no git repository there, or the witness is off — \
+             so nothing was kept to salvage",
+            task.project
+        );
+    };
+    let _ = witness::sweep(db, &witness, &task.project, ACTOR_CLI);
+    let bytes = exhibit::salvage(db, &witness, seq, path, baseline)?;
+    let which = if baseline {
+        "as it stood when the task was claimed"
+    } else {
+        "as the witness last saw it under the task"
+    };
+    match to {
+        Some(dest) => {
+            if dest.exists() && !force {
+                anyhow::bail!(
+                    "{} already exists; --force to say you meant to overwrite it",
+                    dest.display()
+                );
+            }
+            if let Some(parent) = dest.parent().filter(|p| !p.as_os_str().is_empty()) {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("creating {}", parent.display()))?;
+            }
+            std::fs::write(dest, &bytes).with_context(|| format!("writing {}", dest.display()))?;
+            writeln!(
+                out,
+                "salvaged {path} {which} — {} bytes into {}",
+                bytes.len(),
+                dest.display()
+            )?;
+        }
+        // To stdout raw, so it can be redirected or piped into a pager —
+        // salvage is recovery, and recovery wants the bytes, not a report.
+        None => out.write_all(&bytes)?,
     }
     Ok(())
 }

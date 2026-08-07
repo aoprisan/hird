@@ -639,6 +639,51 @@ written by the agent that wrote it. The TUI's Swarm screen shows both, and
 titles the pane with how many agents are standing in a file that is moving
 under them; the queue board badges every card with what it did to the tree.
 
+### The witness keeps what it saw
+
+Detection is half an answer. The witness could tell you `src/config.rs` moved
+under task 1; it could not show you the change, and when a second agent's
+write landed on the first's uncommitted work it could name the loss but not
+undo it. So every file version the witness fingerprints is also **kept** —
+content-addressed, deduplicated, in the same SQLite file as everything else —
+and three things read it back.
+
+```
+$ hird diff 1
+diff --git a/src/config.rs b/src/config.rs
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -1 +1 @@
+-fn load() {}
++fn load() { ported() }
+```
+
+That is the uncommitted diff of what actually moved under task 1 — while the
+work is live, after it is done, and after the tree has moved on to something
+else. Git remembers what was committed; the exhibit remembers what happened
+between commits, which is where agents live. `--path` narrows it to one file.
+
+The review a completion files is the second reader: its brief carries the
+diff of the work under judgement, clipped to a size a context window can
+afford and pointing at `hird diff` for the rest — so the reviewing agent
+reads the change itself instead of reconstructing it from file names.
+
+```
+$ hird salvage 1 src/config.rs --out recovered.rs
+salvaged src/config.rs as the witness last saw it under the task — 24 bytes into recovered.rs
+```
+
+And `salvage` is the third: the last version the witness saw of a file under
+a task, which is exactly the version another agent's write landed on in the
+collision the witness was built to catch. `--baseline` asks instead for the
+version the task started from. The name is the honest limit — a version that
+came and went between two observations was never seen, and hird will say a
+version is not kept rather than guess at one.
+
+Kept versions are pruned once nothing references them and they have aged out,
+so the store grows with what actually changed, not with time.
+`exhibit = false` keeps the watching and gives up the keeping.
+
 ### It is never in the way
 
 Watching needs git, and a project without it is not a degraded project — every
@@ -682,7 +727,8 @@ task_complete { seq: 1, result: "ported; env still wins over the file" }
 Task 2 was filed by the completion. It is titled after the work, scoped to the
 file the **witness saw move** rather than the one anybody declared, and its body
 carries codex's own summary marked as the thing under review rather than as the
-brief. Then:
+brief — along with [the diff of the change itself](#the-witness-keeps-what-it-saw),
+so the reviewer reads the work and not a reconstruction of it. Then:
 
 ```
 task_next {}                       # asked by codex
@@ -1020,6 +1066,8 @@ hird add <title> [--body <md>|--body-file <path>] [--priority N] [--project <pat
                  [--needs <seq>,…] [--path <glob>]… [--review]
 hird ls [--status <status>] [--all-projects]
 hird show <seq>
+hird diff <seq> [--path <file>]
+hird salvage <seq> <path> [--baseline] [--out <file> [--force]]
 hird cancel <seq> [--reason <text>]
 hird reopen <seq> [--reason <text>]
 hird dep add <seq> --needs <seq>,…
@@ -1154,6 +1202,12 @@ witness = true
 # reader is told when that code has moved. Rides on the same working-tree access
 # as `witness` and is off wherever that is. Default true.
 memory_footing = true
+
+# Whether the witness keeps the content of the versions it fingerprints, so
+# `hird diff` can show what a task changed, reviews carry the diff of the work
+# under judgement, and `hird salvage` can recover a version an overlapping
+# write discarded. Rides on `witness` and is off wherever that is. Default true.
+exhibit = true
 ```
 
 Agents are told the configured TTL in the MCP handshake and asked to check in at
@@ -1207,6 +1261,8 @@ points `HIRD_DB` at a throwaway file, so running one cannot disturb your board.
 ./examples/plan-file.sh         # the same plan as a file: read it, file it, edit it
 ./examples/witness.sh           # two agents in one file, caught in the act —
                                 #   and a third task that finishes read-only
+./examples/exhibit.sh           # a finished task's uncommitted diff, and a
+                                #   written-over version brought back
 ./examples/footing.sh           # a fact, the file it came from, and that file rewritten
 ./examples/review.sh            # work that files its own review, barred to whoever did it
 ./examples/verdict.sh           # the sent-back loop, and the per-harness record it leaves
@@ -1279,7 +1335,11 @@ that same look at the working tree turned on the memory: an assertion is a
 statement about code, code changes, and until now nothing anywhere noticed.
 Recusal (§15) is the third application of the same idea: the one thing an agent
 cannot honestly report is whether its own work is any good, and hird is the only
-process in the room that knows whose work it is. Still absent: multi-machine sync and vector search. The append-only event trail
+process in the room that knows whose work it is. The exhibit (§19) is the
+witness given a memory of its own: every version it fingerprints is kept, so
+"a file moved" becomes "this is the change", a review is handed the diff it is
+judging, and the write that lands on uncommitted work stops being a loss.
+Still absent: multi-machine sync and vector search. The append-only event trail
 is meant to make sync tractable later.
 
 ## Licence
