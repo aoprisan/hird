@@ -518,7 +518,7 @@ mod tests {
         db.tasks().claim(seq, "codex:9f2c", TTL).unwrap();
         // The witness saw two files move under it.
         db.witnessed()
-            .begin(seq, &crate::witness::Tree::default())
+            .begin(seq, &crate::witness::Tree::default(), "codex:9f2c")
             .unwrap();
         db.witnessed()
             .record(
@@ -585,7 +585,7 @@ mod tests {
         db.tasks().set_review(seq, true, "cli").unwrap();
         db.tasks().claim(seq, "codex:9f2c", TTL).unwrap();
         db.witnessed()
-            .begin(seq, &crate::witness::Tree::default())
+            .begin(seq, &crate::witness::Tree::default(), "codex:9f2c")
             .unwrap();
         db.witnessed()
             .record(
@@ -620,7 +620,7 @@ mod tests {
         db.tasks().set_review(quiet, true, "cli").unwrap();
         db.tasks().claim(quiet, "codex:9f2c", TTL).unwrap();
         db.witnessed()
-            .begin(quiet, &crate::witness::Tree::default())
+            .begin(quiet, &crate::witness::Tree::default(), "codex:9f2c")
             .unwrap();
         db.witnessed()
             .record(

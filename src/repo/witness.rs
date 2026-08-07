@@ -52,25 +52,93 @@ impl<'a> Witnessed<'a> {
         Witnessed { conn }
     }
 
-    /// Start measuring task `seq` against `tree`.
+    /// Start measuring task `seq` against `tree`, held by `holder`.
     ///
     /// Called once, when the task is claimed. Re-claiming after a lease lapse
     /// starts a fresh measurement: the previous holder's footprint is not the
-    /// new holder's doing, and keeping it would blame them for it.
-    pub fn begin(&self, seq: i64, tree: &Tree) -> Result<()> {
+    /// new holder's doing, and keeping it would blame them for it. But the
+    /// evidence is not destroyed — it is archived as a finished *tenure*, in
+    /// the same transaction that replaces it, because the moment a task
+    /// changes hands is exactly the moment its history starts to matter: the
+    /// tree the new baseline was just read off may be carrying whatever the
+    /// previous holder left uncommitted, and this record is the only account
+    /// of what that was.
+    pub fn begin(&self, seq: i64, tree: &Tree, holder: &str) -> Result<()> {
         let tx = Transaction::new_unchecked(self.conn, TransactionBehavior::Immediate)?;
         let task_id = id_for_seq(&tx, seq)?;
         let now = now_ts();
+        archive_tenure(&tx, &task_id, &now)?;
         let encoded = encode(tree);
         tx.execute("DELETE FROM task_changes WHERE task_id = ?1", [&task_id])?;
         tx.execute(
-            "INSERT INTO task_witness (task_id, head, tree, at) VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO task_witness (task_id, head, tree, at, holder)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(task_id) DO UPDATE SET
-               head = excluded.head, tree = excluded.tree, at = excluded.at",
-            params![task_id, tree.head, encoded, now],
+               head = excluded.head, tree = excluded.tree, at = excluded.at,
+               holder = excluded.holder",
+            params![task_id, tree.head, encoded, now, holder],
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// The finished holdings of task `seq`, oldest first, each with what the
+    /// witness saw move while it was live.
+    pub fn tenures(&self, seq: i64) -> Result<Vec<crate::model::Tenure>> {
+        let task_id = id_for_seq(self.conn, seq)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, n, holder, began_at, ended, ended_at FROM task_tenures
+             WHERE task_id = ?1 ORDER BY n",
+        )?;
+        let rows = stmt.query_map([&task_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                crate::model::Tenure {
+                    n: row.get(1)?,
+                    holder: row.get(2)?,
+                    began_at: row.get(3)?,
+                    ended: row.get(4)?,
+                    ended_at: row.get(5)?,
+                    changes: Vec::new(),
+                },
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (tenure_id, mut tenure) = row?;
+            let mut stmt = self.conn.prepare(
+                "SELECT path, kind, hash, first_seen, last_seen FROM tenure_changes
+                 WHERE tenure_id = ?1 ORDER BY path",
+            )?;
+            let changes = stmt.query_map([&tenure_id], row_to_observed)?;
+            tenure.changes = changes.collect::<rusqlite::Result<Vec<_>>>()?;
+            out.push(tenure);
+        }
+        Ok(out)
+    }
+
+    /// The baseline tenure `n` of task `seq` was measured against, if that
+    /// round was archived. This is what lets `hird diff --tenure` resolve the
+    /// "before" side of a finished holding the same way it does for the
+    /// current one.
+    pub fn tenure_baseline(&self, seq: i64, n: i64) -> Result<Option<Baseline>> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT t.seq, w.task_id, w.head, w.tree
+                 FROM task_tenures w JOIN tasks t ON t.id = w.task_id
+                 WHERE t.seq = ?1 AND w.n = ?2",
+                params![seq, n],
+                |row| {
+                    Ok(Baseline {
+                        seq: row.get(0)?,
+                        task_id: row.get(1)?,
+                        tree: decode(row.get::<_, String>(2)?, row.get::<_, String>(3)?),
+                    })
+                },
+            )
+            .optional()?)
     }
 
     /// Every task in `project` that currently holds a lease and has a baseline.
@@ -473,15 +541,17 @@ impl<'a> Witnessed<'a> {
 
     /// Drop kept versions nothing points at any more.
     ///
-    /// A hash still on some task's change record is somebody's evidence and
-    /// stays whatever its age; everything else — baseline versions of work
-    /// long finished, versions observed and then superseded — goes once it is
-    /// older than the cutoff. Returns how many rows went.
+    /// A hash still on some task's change record — the current holding's or
+    /// an archived tenure's — is somebody's evidence and stays whatever its
+    /// age; everything else — baseline versions of work long finished,
+    /// versions observed and then superseded — goes once it is older than the
+    /// cutoff. Returns how many rows went.
     pub fn prune_blobs(&self, before: &str) -> Result<usize> {
         Ok(self.conn.execute(
             "DELETE FROM witness_blobs
              WHERE at < ?1
-               AND hash NOT IN (SELECT hash FROM task_changes)",
+               AND hash NOT IN (SELECT hash FROM task_changes)
+               AND hash NOT IN (SELECT hash FROM tenure_changes)",
             [before],
         )?)
     }
@@ -574,6 +644,67 @@ impl<'a> Witnessed<'a> {
 
 // -------------------------------------------------------------------- helpers
 
+/// Archive the baseline and footprint a fresh measurement is about to
+/// replace, as one finished tenure. A task with no baseline has nothing to
+/// archive, which is the ordinary first claim.
+///
+/// How the holding ended is read from the event trail rather than stored as
+/// it happens: the ending transitions are many and this is the one place the
+/// answer is needed. The new claim's own `claimed` event is already on the
+/// trail by now, but `claimed` is not an ending, so the newest ending event
+/// since the baseline was taken is exactly the one that ended this holding.
+fn archive_tenure(tx: &Connection, task_id: &str, now: &str) -> Result<()> {
+    use rusqlite::OptionalExtension;
+    let Some((head, tree, began_at, holder)) = tx
+        .query_row(
+            "SELECT head, tree, at, holder FROM task_witness WHERE task_id = ?1",
+            [task_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()?
+    else {
+        return Ok(());
+    };
+    let (ended, ended_at) = tx
+        .query_row(
+            "SELECT kind, at FROM task_events
+             WHERE task_id = ?1
+               AND kind IN ('completed','failed','released','lease_expired','cancelled')
+               AND at >= ?2
+             ORDER BY at DESC, id DESC LIMIT 1",
+            params![task_id, began_at],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?
+        .unwrap_or_default();
+    let n: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(n), 0) + 1 FROM task_tenures WHERE task_id = ?1",
+        [task_id],
+        |row| row.get(0),
+    )?;
+    let tenure_id = new_id();
+    tx.execute(
+        "INSERT INTO task_tenures
+           (id, task_id, n, holder, began_at, ended, ended_at, head, tree, archived_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![tenure_id, task_id, n, holder, began_at, ended, ended_at, head, tree, now],
+    )?;
+    tx.execute(
+        "INSERT INTO tenure_changes (tenure_id, path, kind, hash, first_seen, last_seen)
+         SELECT ?1, path, kind, hash, first_seen, last_seen
+         FROM task_changes WHERE task_id = ?2",
+        params![tenure_id, task_id],
+    )?;
+    Ok(())
+}
+
 fn row_to_observed(row: &Row<'_>) -> rusqlite::Result<Observed> {
     Ok(Observed {
         path: row.get(0)?,
@@ -654,7 +785,7 @@ mod tests {
         let db = db();
         let seq = seed(&db, "t", "codex:9f2c");
         let snapshot = tree(&[("src/a.rs", "hash-a"), ("src/b.rs", "")]);
-        db.witnessed().begin(seq, &snapshot).unwrap();
+        db.witnessed().begin(seq, &snapshot, "codex:9f2c").unwrap();
 
         let live = db.witnessed().baselines(PROJECT).unwrap();
         assert_eq!(live.len(), 1);
@@ -667,8 +798,12 @@ mod tests {
         let db = db();
         let live = seed(&db, "live", "codex:9f2c");
         let finished = seed(&db, "finished", "codex:9f2c");
-        db.witnessed().begin(live, &tree(&[])).unwrap();
-        db.witnessed().begin(finished, &tree(&[])).unwrap();
+        db.witnessed()
+            .begin(live, &tree(&[]), "codex:9f2c")
+            .unwrap();
+        db.witnessed()
+            .begin(finished, &tree(&[]), "codex:9f2c")
+            .unwrap();
         db.tasks().complete(finished, "codex:9f2c", "done").unwrap();
 
         let seqs: Vec<i64> = db
@@ -685,7 +820,7 @@ mod tests {
     fn recording_reports_only_paths_it_had_not_seen_before() {
         let db = db();
         let seq = seed(&db, "t", "codex:9f2c");
-        db.witnessed().begin(seq, &tree(&[])).unwrap();
+        db.witnessed().begin(seq, &tree(&[]), "codex:9f2c").unwrap();
 
         let first = db
             .witnessed()
@@ -723,7 +858,7 @@ mod tests {
     fn a_path_that_goes_back_to_normal_leaves_no_row() {
         let db = db();
         let seq = seed(&db, "t", "codex:9f2c");
-        db.witnessed().begin(seq, &tree(&[])).unwrap();
+        db.witnessed().begin(seq, &tree(&[]), "codex:9f2c").unwrap();
         db.witnessed()
             .record(seq, &[change("src/a.rs", "h1")], "codex:9f2c")
             .unwrap();
@@ -737,7 +872,7 @@ mod tests {
     fn the_first_sighting_of_a_path_is_written_into_the_history() {
         let db = db();
         let seq = seed(&db, "t", "codex:9f2c");
-        db.witnessed().begin(seq, &tree(&[])).unwrap();
+        db.witnessed().begin(seq, &tree(&[]), "codex:9f2c").unwrap();
         db.witnessed()
             .record(seq, &[change("src/a.rs", "h1")], "codex:9f2c")
             .unwrap();
@@ -763,7 +898,7 @@ mod tests {
     fn observing_does_not_confirm_a_version_but_confirming_does() {
         let db = db();
         let seq = seed(&db, "t", "codex:9f2c");
-        db.witnessed().begin(seq, &tree(&[])).unwrap();
+        db.witnessed().begin(seq, &tree(&[]), "codex:9f2c").unwrap();
         db.witnessed()
             .record(seq, &[change("src/a.rs", "mine")], "codex:9f2c")
             .unwrap();
@@ -788,8 +923,12 @@ mod tests {
         let db = db();
         let mine = seed(&db, "mine", "claude-code:af31");
         let theirs = seed(&db, "theirs", "codex:9f2c");
-        db.witnessed().begin(mine, &tree(&[])).unwrap();
-        db.witnessed().begin(theirs, &tree(&[])).unwrap();
+        db.witnessed()
+            .begin(mine, &tree(&[]), "codex:9f2c")
+            .unwrap();
+        db.witnessed()
+            .begin(theirs, &tree(&[]), "codex:9f2c")
+            .unwrap();
         declare(&db, mine, &["src/shared.rs"]);
         declare(&db, theirs, &["src/*.rs"]);
 
@@ -821,8 +960,12 @@ mod tests {
         let db = db();
         let mine = seed(&db, "mine", "claude-code:af31");
         let theirs = seed(&db, "theirs", "codex:9f2c");
-        db.witnessed().begin(mine, &tree(&[])).unwrap();
-        db.witnessed().begin(theirs, &tree(&[])).unwrap();
+        db.witnessed()
+            .begin(mine, &tree(&[]), "codex:9f2c")
+            .unwrap();
+        db.witnessed()
+            .begin(theirs, &tree(&[]), "codex:9f2c")
+            .unwrap();
         declare(&db, mine, &["src/shared.rs"]);
         declare(&db, theirs, &["src/shared.rs"]);
         db.witnessed()
@@ -851,8 +994,12 @@ mod tests {
         let db = db();
         let mine = seed(&db, "mine", "claude-code:af31");
         let theirs = seed(&db, "theirs", "codex:9f2c");
-        db.witnessed().begin(mine, &tree(&[])).unwrap();
-        db.witnessed().begin(theirs, &tree(&[])).unwrap();
+        db.witnessed()
+            .begin(mine, &tree(&[]), "codex:9f2c")
+            .unwrap();
+        db.witnessed()
+            .begin(theirs, &tree(&[]), "codex:9f2c")
+            .unwrap();
         declare(&db, mine, &["src/shared.rs"]);
         declare(&db, theirs, &["src/shared.rs"]);
         db.witnessed()
@@ -879,8 +1026,12 @@ mod tests {
             .unwrap()
             .seq;
         db.tasks().claim(elsewhere, "codex:9f2c", TTL).unwrap();
-        db.witnessed().begin(mine, &tree(&[])).unwrap();
-        db.witnessed().begin(elsewhere, &tree(&[])).unwrap();
+        db.witnessed()
+            .begin(mine, &tree(&[]), "codex:9f2c")
+            .unwrap();
+        db.witnessed()
+            .begin(elsewhere, &tree(&[]), "codex:9f2c")
+            .unwrap();
         declare(&db, mine, &["src/shared.rs"]);
         declare(&db, elsewhere, &["src/shared.rs"]);
         db.witnessed()
@@ -897,7 +1048,7 @@ mod tests {
     fn drift_is_the_gap_between_what_was_declared_and_what_moved() {
         let db = db();
         let seq = seed(&db, "t", "codex:9f2c");
-        db.witnessed().begin(seq, &tree(&[])).unwrap();
+        db.witnessed().begin(seq, &tree(&[]), "codex:9f2c").unwrap();
         db.scopes()
             .declare(
                 seq,
@@ -921,7 +1072,7 @@ mod tests {
     fn a_glob_covers_everything_it_describes() {
         let db = db();
         let seq = seed(&db, "t", "codex:9f2c");
-        db.witnessed().begin(seq, &tree(&[])).unwrap();
+        db.witnessed().begin(seq, &tree(&[]), "codex:9f2c").unwrap();
         db.scopes()
             .declare(
                 seq,
@@ -945,7 +1096,7 @@ mod tests {
     fn declaring_nothing_cannot_drift() {
         let db = db();
         let seq = seed(&db, "t", "codex:9f2c");
-        db.witnessed().begin(seq, &tree(&[])).unwrap();
+        db.witnessed().begin(seq, &tree(&[]), "codex:9f2c").unwrap();
         db.witnessed()
             .record(seq, &[change("src/anything.rs", "h1")], "codex:9f2c")
             .unwrap();
@@ -958,7 +1109,7 @@ mod tests {
     fn a_fresh_claim_starts_a_fresh_measurement() {
         let db = db();
         let seq = seed(&db, "t", "codex:9f2c");
-        db.witnessed().begin(seq, &tree(&[])).unwrap();
+        db.witnessed().begin(seq, &tree(&[]), "codex:9f2c").unwrap();
         db.witnessed()
             .record(seq, &[change("src/a.rs", "h1")], "codex:9f2c")
             .unwrap();
@@ -968,9 +1119,205 @@ mod tests {
 
         db.tasks().claim(seq, "claude-code:af31", TTL).unwrap();
         db.witnessed()
-            .begin(seq, &tree(&[("src/a.rs", "h1")]))
+            .begin(seq, &tree(&[("src/a.rs", "h1")]), "claude-code:af31")
             .unwrap();
         assert!(db.witnessed().touched(seq).unwrap().is_empty());
+    }
+
+    /// The fresh measurement does not destroy the old one: the previous
+    /// holding is archived — who held it, how it ended, what moved — in the
+    /// same transaction that replaces it. This is the record the successor's
+    /// claim answer is written from.
+    #[test]
+    fn a_fresh_claim_archives_the_previous_holding_as_a_tenure() {
+        let db = db();
+        let seq = seed(&db, "t", "codex:9f2c");
+        assert!(db.witnessed().tenures(seq).unwrap().is_empty());
+
+        db.witnessed().begin(seq, &tree(&[]), "codex:9f2c").unwrap();
+        db.witnessed()
+            .record(seq, &[change("src/a.rs", "h1")], "codex:9f2c")
+            .unwrap();
+        db.tasks()
+            .release(seq, "codex:9f2c", "handing back")
+            .unwrap();
+        // Nothing is archived until somebody replaces the measurement: the
+        // released task's footprint is still the current record.
+        assert!(db.witnessed().tenures(seq).unwrap().is_empty());
+
+        db.tasks().claim(seq, "claude-code:af31", TTL).unwrap();
+        db.witnessed()
+            .begin(seq, &tree(&[]), "claude-code:af31")
+            .unwrap();
+
+        let held = db.witnessed().tenures(seq).unwrap();
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].n, 1);
+        assert_eq!(held[0].holder, "codex:9f2c");
+        assert_eq!(held[0].ended, "released");
+        assert!(!held[0].ended_at.is_empty());
+        assert_eq!(held[0].changes.len(), 1);
+        assert_eq!(held[0].changes[0].path, "src/a.rs");
+        assert_eq!(held[0].changes[0].hash, "h1");
+
+        let sentence = held[0].describe(seq);
+        assert!(sentence.contains("codex:9f2c"), "{sentence}");
+        assert!(sentence.contains("src/a.rs"), "{sentence}");
+        assert!(sentence.contains("handed it back"), "{sentence}");
+        assert!(
+            sentence.contains(&format!("hird diff {seq} --tenure 1")),
+            "{sentence}"
+        );
+    }
+
+    /// Each hand-over is its own round, its changes frozen at the moment the
+    /// next claim replaced them, and the current holding is never in the list.
+    #[test]
+    fn rounds_count_up_and_each_keeps_its_own_changes() {
+        let db = db();
+        let seq = seed(&db, "t", "codex:9f2c");
+        db.witnessed().begin(seq, &tree(&[]), "codex:9f2c").unwrap();
+        db.witnessed()
+            .record(seq, &[change("src/a.rs", "h1")], "codex:9f2c")
+            .unwrap();
+        db.tasks().release(seq, "codex:9f2c", "first").unwrap();
+
+        db.tasks().claim(seq, "claude-code:af31", TTL).unwrap();
+        db.witnessed()
+            .begin(seq, &tree(&[]), "claude-code:af31")
+            .unwrap();
+        db.witnessed()
+            .record(seq, &[change("src/b.rs", "h2")], "claude-code:af31")
+            .unwrap();
+        db.tasks()
+            .complete(seq, "claude-code:af31", "done")
+            .unwrap();
+        db.tasks().reopen(seq, "cli", "look again").unwrap();
+
+        db.tasks().claim(seq, "copilot:11", TTL).unwrap();
+        db.witnessed().begin(seq, &tree(&[]), "copilot:11").unwrap();
+
+        let held = db.witnessed().tenures(seq).unwrap();
+        assert_eq!(held.len(), 2);
+        assert_eq!((held[0].n, held[0].holder.as_str()), (1, "codex:9f2c"));
+        assert_eq!(held[0].ended, "released");
+        assert_eq!(held[0].changes[0].path, "src/a.rs");
+        assert_eq!(
+            (held[1].n, held[1].holder.as_str()),
+            (2, "claude-code:af31")
+        );
+        // The holding ended with the completion; the human reopen that
+        // followed is the task's business, not the tenure's.
+        assert_eq!(held[1].ended, "completed");
+        assert_eq!(held[1].changes[0].path, "src/b.rs");
+
+        // The current holder's record is the live tables, not the archive.
+        assert!(db.witnessed().touched(seq).unwrap().is_empty());
+    }
+
+    /// The tenure's founding scenario: a holder that vanishes. The lease
+    /// lapses, the sweep returns the task, and the successor's archive says
+    /// the holding ended with an expiry rather than by anybody's decision —
+    /// which is exactly the difference between "they handed it back" and
+    /// "they may have died mid-edit".
+    #[test]
+    fn a_vanished_holders_tenure_ends_with_the_lease_expiry() {
+        let db = db();
+        let seq = seed(&db, "t", "codex:dead");
+        db.witnessed().begin(seq, &tree(&[]), "codex:dead").unwrap();
+        db.witnessed()
+            .record(seq, &[change("src/a.rs", "h1")], "codex:dead")
+            .unwrap();
+        let past = crate::model::fmt_ts(chrono::Utc::now() - chrono::Duration::hours(1));
+        db.conn()
+            .execute(
+                "UPDATE tasks SET lease_expires_at = ?1 WHERE seq = ?2",
+                params![past, seq],
+            )
+            .unwrap();
+        db.tasks().sweep_leases().unwrap();
+
+        db.tasks().claim(seq, "claude-code:af31", TTL).unwrap();
+        db.witnessed()
+            .begin(seq, &tree(&[]), "claude-code:af31")
+            .unwrap();
+
+        let held = db.witnessed().tenures(seq).unwrap();
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].holder, "codex:dead");
+        assert_eq!(held[0].ended, "lease_expired");
+        let sentence = held[0].describe(seq);
+        assert!(sentence.contains("lease expired"), "{sentence}");
+        assert!(sentence.contains("src/a.rs"), "{sentence}");
+    }
+
+    /// A holding that wrote nothing archives as read-only rather than not at
+    /// all: "the previous attempt verifiably left nothing behind" is exactly
+    /// what its successor wants to know.
+    #[test]
+    fn a_read_only_holding_is_archived_and_says_so() {
+        let db = db();
+        let seq = seed(&db, "t", "codex:9f2c");
+        db.witnessed().begin(seq, &tree(&[]), "codex:9f2c").unwrap();
+        db.tasks().release(seq, "codex:9f2c", "nope").unwrap();
+        db.tasks().claim(seq, "claude-code:af31", TTL).unwrap();
+        db.witnessed()
+            .begin(seq, &tree(&[]), "claude-code:af31")
+            .unwrap();
+
+        let held = db.witnessed().tenures(seq).unwrap();
+        assert_eq!(held.len(), 1);
+        assert!(held[0].changes.is_empty());
+        let sentence = held[0].describe(seq);
+        assert!(sentence.contains("no leftover edits"), "{sentence}");
+    }
+
+    /// The archived baseline is still resolvable, which is what `hird diff
+    /// --tenure` stands on after the live baseline has been replaced.
+    #[test]
+    fn an_archived_rounds_baseline_is_still_resolvable() {
+        let db = db();
+        let seq = seed(&db, "t", "codex:9f2c");
+        let snapshot = tree(&[("src/a.rs", "hash-at-claim")]);
+        db.witnessed().begin(seq, &snapshot, "codex:9f2c").unwrap();
+        db.tasks().release(seq, "codex:9f2c", "back").unwrap();
+        db.tasks().claim(seq, "claude-code:af31", TTL).unwrap();
+        db.witnessed()
+            .begin(seq, &tree(&[]), "claude-code:af31")
+            .unwrap();
+
+        let archived = db.witnessed().tenure_baseline(seq, 1).unwrap().unwrap();
+        assert_eq!(archived.tree, snapshot);
+        assert!(db.witnessed().tenure_baseline(seq, 2).unwrap().is_none());
+        assert!(db.witnessed().tenure_baseline(999, 1).unwrap().is_none());
+    }
+
+    /// A version named on an archived tenure is somebody's evidence: pruning
+    /// must spare it exactly as it spares the live records'.
+    #[test]
+    fn pruning_spares_versions_on_an_archived_tenure() {
+        let db = db();
+        let seq = seed(&db, "t", "codex:9f2c");
+        db.witnessed().begin(seq, &tree(&[]), "codex:9f2c").unwrap();
+        db.witnessed()
+            .record(seq, &[change("src/a.rs", "h-tenure")], "codex:9f2c")
+            .unwrap();
+        db.witnessed()
+            .keep(&[("h-tenure".into(), b"round one's work".to_vec())])
+            .unwrap();
+        db.tasks().release(seq, "codex:9f2c", "back").unwrap();
+        db.tasks().claim(seq, "claude-code:af31", TTL).unwrap();
+        db.witnessed()
+            .begin(seq, &tree(&[]), "claude-code:af31")
+            .unwrap();
+
+        db.witnessed()
+            .prune_blobs("9999-01-01T00:00:00.000Z")
+            .unwrap();
+        assert!(
+            db.witnessed().blob("h-tenure").unwrap().is_some(),
+            "an archived round's version is evidence, not housekeeping"
+        );
     }
 
     /// The three answers, and the one that must never be guessed: a task
@@ -985,7 +1332,7 @@ mod tests {
         );
 
         let seq = seed(&db, "read the config", "codex:9f2c");
-        db.witnessed().begin(seq, &tree(&[])).unwrap();
+        db.witnessed().begin(seq, &tree(&[]), "codex:9f2c").unwrap();
         assert_eq!(db.witnessed().footprint(seq).unwrap(), Footprint::ReadOnly);
 
         db.witnessed()
@@ -1012,7 +1359,7 @@ mod tests {
         let mine = seed(&db, "mine", "claude-code:af31");
         let theirs = seed(&db, "theirs", "codex:9f2c");
         for seq in [mine, theirs] {
-            db.witnessed().begin(seq, &tree(&[])).unwrap();
+            db.witnessed().begin(seq, &tree(&[]), "codex:9f2c").unwrap();
         }
         db.witnessed()
             .record(mine, &[change("src/shared.rs", "h1")], "a")
@@ -1033,7 +1380,9 @@ mod tests {
 
         // A file only one of them ever saw is still that one's own.
         let solo = seed(&db, "solo", "copilot:11");
-        db.witnessed().begin(solo, &tree(&[])).unwrap();
+        db.witnessed()
+            .begin(solo, &tree(&[]), "codex:9f2c")
+            .unwrap();
         db.witnessed()
             .record(solo, &[change("docs/index.md", "h3")], "c")
             .unwrap();
@@ -1060,7 +1409,7 @@ mod tests {
             .seq;
         db.tasks().claim(elsewhere, "copilot:11", TTL).unwrap();
         for seq in [read_only, wrote, elsewhere] {
-            db.witnessed().begin(seq, &tree(&[])).unwrap();
+            db.witnessed().begin(seq, &tree(&[]), "codex:9f2c").unwrap();
         }
         db.witnessed()
             .record(
@@ -1131,7 +1480,7 @@ mod tests {
     fn pruning_spares_versions_still_on_a_record() {
         let db = db();
         let seq = seed(&db, "t", "codex:9f2c");
-        db.witnessed().begin(seq, &tree(&[])).unwrap();
+        db.witnessed().begin(seq, &tree(&[]), "codex:9f2c").unwrap();
         db.witnessed()
             .record(seq, &[change("src/a.rs", "h-referenced")], "codex:9f2c")
             .unwrap();
@@ -1159,7 +1508,7 @@ mod tests {
         let db = db();
         let seq = seed(&db, "t", "codex:9f2c");
         let snapshot = tree(&[("src/a.rs", "hash-a")]);
-        db.witnessed().begin(seq, &snapshot).unwrap();
+        db.witnessed().begin(seq, &snapshot, "codex:9f2c").unwrap();
         db.tasks().complete(seq, "codex:9f2c", "done").unwrap();
 
         assert!(db.witnessed().baselines(PROJECT).unwrap().is_empty());
@@ -1173,8 +1522,8 @@ mod tests {
         let db = db();
         let a = seed(&db, "a", "codex:9f2c");
         let b = seed(&db, "b", "claude-code:af31");
-        db.witnessed().begin(a, &tree(&[])).unwrap();
-        db.witnessed().begin(b, &tree(&[])).unwrap();
+        db.witnessed().begin(a, &tree(&[]), "codex:9f2c").unwrap();
+        db.witnessed().begin(b, &tree(&[]), "codex:9f2c").unwrap();
         db.witnessed()
             .record(
                 a,

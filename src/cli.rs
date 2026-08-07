@@ -66,6 +66,10 @@ pub enum Command {
         /// Only this file, project-relative.
         #[arg(long)]
         path: Option<String>,
+        /// An archived holding instead of the current record: what round N
+        /// changed, as `hird show` numbers the rounds.
+        #[arg(long, value_name = "N")]
+        tenure: Option<i64>,
     },
     /// Recover a version of a file as it stood under a task.
     Salvage {
@@ -75,6 +79,10 @@ pub enum Command {
         /// The version the task started from, instead of the last one seen.
         #[arg(long)]
         baseline: bool,
+        /// Reach an archived holding instead of the current record: the last
+        /// version round N saw, as `hird show` numbers the rounds.
+        #[arg(long, value_name = "N")]
+        tenure: Option<i64>,
         /// Write to this file instead of stdout.
         #[arg(long, value_name = "FILE")]
         out: Option<PathBuf>,
@@ -384,11 +392,14 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
             look(&db, &config, &project);
             show(&db, *seq, &config, out)
         }
-        Command::Diff { seq, path } => diff(&db, *seq, path.as_deref(), &config, out),
+        Command::Diff { seq, path, tenure } => {
+            diff(&db, *seq, path.as_deref(), *tenure, &config, out)
+        }
         Command::Salvage {
             seq,
             path,
             baseline,
+            tenure,
             out: to,
             force,
         } => salvage(
@@ -396,6 +407,7 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
             *seq,
             path,
             *baseline,
+            *tenure,
             to.as_deref(),
             *force,
             &config,
@@ -1109,6 +1121,7 @@ fn diff(
     db: &Db,
     seq: i64,
     only: Option<&str>,
+    tenure: Option<i64>,
     config: &Config,
     out: &mut impl Write,
 ) -> anyhow::Result<()> {
@@ -1121,15 +1134,24 @@ fn diff(
         );
     };
     // Bring the record up to the tree as it stands first: a diff that stops
-    // at the last heartbeat shows less than the disk already knows.
-    let _ = witness::sweep(db, &witness, &task.project, ACTOR_CLI);
-    let mut shown = exhibit::assemble(db, &witness, seq)?;
+    // at the last heartbeat shows less than the disk already knows. An
+    // archived round is already over, so there is nothing to bring up to date.
+    let mut shown = match tenure {
+        Some(n) => exhibit::assemble_tenure(db, &witness, seq, n)?,
+        None => {
+            let _ = witness::sweep(db, &witness, &task.project, ACTOR_CLI);
+            exhibit::assemble(db, &witness, seq)?
+        }
+    };
+    let round = tenure
+        .map(|n| format!(" in holding {n}"))
+        .unwrap_or_default();
     if let Some(only) = only {
         shown.retain(|e| e.path == only);
         if shown.is_empty() {
             writeln!(
                 out,
-                "the witness saw nothing move at {only} under task {seq}"
+                "the witness saw nothing move at {only} under task {seq}{round}"
             )?;
             return Ok(());
         }
@@ -1138,7 +1160,7 @@ fn diff(
     if text.trim().is_empty() {
         writeln!(
             out,
-            "nothing moved under task {seq} while the witness was watching"
+            "nothing moved under task {seq}{round} while the witness was watching"
         )?;
         return Ok(());
     }
@@ -1153,6 +1175,7 @@ fn salvage(
     seq: i64,
     path: &str,
     baseline: bool,
+    tenure: Option<i64>,
     to: Option<&Path>,
     force: bool,
     config: &Config,
@@ -1166,12 +1189,15 @@ fn salvage(
             task.project
         );
     };
-    let _ = witness::sweep(db, &witness, &task.project, ACTOR_CLI);
-    let bytes = exhibit::salvage(db, &witness, seq, path, baseline)?;
-    let which = if baseline {
-        "as it stood when the task was claimed"
-    } else {
-        "as the witness last saw it under the task"
+    if tenure.is_none() {
+        let _ = witness::sweep(db, &witness, &task.project, ACTOR_CLI);
+    }
+    let bytes = exhibit::salvage(db, &witness, seq, path, baseline, tenure)?;
+    let which = match (baseline, tenure) {
+        (true, Some(n)) => format!("as it stood when holding {n} began"),
+        (false, Some(n)) => format!("as the witness last saw it under holding {n}"),
+        (true, None) => "as it stood when the task was claimed".to_string(),
+        (false, None) => "as the witness last saw it under the task".to_string(),
     };
     match to {
         Some(dest) => {
@@ -1303,6 +1329,13 @@ fn show(db: &Db, seq: i64, config: &Config, out: &mut impl Write) -> anyhow::Res
     }
     for found in db.witnessed().contention(seq).unwrap_or_default() {
         writeln!(out, "contended {}", found.describe())?;
+    }
+    // Earlier holdings, where the task has changed hands: who had it, how
+    // that ended, what moved under them. `changed` above is the current
+    // record; these are the rounds it replaced, still readable with
+    // `hird diff <seq> --tenure <n>`.
+    for held in db.witnessed().tenures(seq).unwrap_or_default() {
+        writeln!(out, "held      {}", held.label())?;
     }
 
     if !task.body.trim().is_empty() {

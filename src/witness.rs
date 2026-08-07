@@ -497,7 +497,10 @@ pub fn begin(
     // bound and no command has to exist to empty it.
     let cutoff = crate::model::fmt_ts(chrono::Utc::now() - chrono::Duration::days(KEEP_DAYS));
     let _ = db.witnessed().prune_blobs(&cutoff);
-    db.witnessed().begin(seq, &tree)
+    // `actor` is the claimant here — `begin` runs on the heels of a
+    // successful claim, on the claimant's own call — so it is the name an
+    // archived tenure will answer with when this holding is over.
+    db.witnessed().begin(seq, &tree, actor)
 }
 
 /// How long an unreferenced kept version survives before a claim's
@@ -1189,10 +1192,12 @@ mod tests {
 
         let witness = project.repo.witness();
         let lost =
-            crate::exhibit::salvage(&project.db, &witness, first, "src/config.rs", false).unwrap();
+            crate::exhibit::salvage(&project.db, &witness, first, "src/config.rs", false, None)
+                .unwrap();
         assert_eq!(lost, b"// codex's careful work\n");
         let started_from =
-            crate::exhibit::salvage(&project.db, &witness, first, "src/config.rs", true).unwrap();
+            crate::exhibit::salvage(&project.db, &witness, first, "src/config.rs", true, None)
+                .unwrap();
         assert_eq!(started_from, b"// config\n");
     }
 
@@ -1204,7 +1209,7 @@ mod tests {
         let seq = project.claim("quiet task", "codex:9f2c", &[]);
         let witness = project.repo.witness();
 
-        let err = crate::exhibit::salvage(&project.db, &witness, seq, "src/config.rs", false)
+        let err = crate::exhibit::salvage(&project.db, &witness, seq, "src/config.rs", false, None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("saw nothing move"), "{err}");
@@ -1215,7 +1220,7 @@ mod tests {
             .create(&project.root(), "never watched", "", 0, "cli")
             .unwrap()
             .seq;
-        let err = crate::exhibit::salvage(&project.db, &witness, unwatched, "x", false)
+        let err = crate::exhibit::salvage(&project.db, &witness, unwatched, "x", false, None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("was not watching"), "{err}");

@@ -878,6 +878,18 @@ salvaged src/config.rs as the witness last saw it under the task — 24 bytes in
 </p>
 
 <p>
+  The record survives the task changing hands. When a lease expires mid-work,
+  work is released, or a review sends it back, the next claim archives the
+  previous holding as a <em>tenure</em> — who held it, how it ended, what
+  moved — instead of overwriting it, and the successor's claim answer carries
+  <code>previously</code>: whose uncommitted leavings are in the tree it
+  starts from, and which files to re-read before building on or over them.
+  <code>hird show</code> numbers the rounds, and <code>hird diff --tenure
+  N</code> and <code>hird salvage --tenure N</code> read them back after the
+  redo has written over everything.
+</p>
+
+<p>
   Kept versions are pruned once nothing references them and they have aged
   out, so the store grows with what actually changed, not with time.
   <code>exhibit = false</code> keeps the watching and gives up the keeping.
@@ -1363,8 +1375,8 @@ shaky     the renderer redraws on every poll
                  [--needs &lt;seq&gt;,…] [--path &lt;glob&gt;]… [--review]
 hird ls [--status &lt;status&gt;] [--all-projects]
 hird show &lt;seq&gt;
-hird diff &lt;seq&gt; [--path &lt;file&gt;]
-hird salvage &lt;seq&gt; &lt;path&gt; [--baseline] [--out &lt;file&gt; [--force]]
+hird diff &lt;seq&gt; [--path &lt;file&gt;] [--tenure N]
+hird salvage &lt;seq&gt; &lt;path&gt; [--baseline] [--tenure N] [--out &lt;file&gt; [--force]]
 hird cancel &lt;seq&gt; [--reason &lt;text&gt;]
 hird reopen &lt;seq&gt; [--reason &lt;text&gt;]
 hird dep add &lt;seq&gt; --needs &lt;seq&gt;,…
@@ -1390,8 +1402,8 @@ hird db-path</code></pre>
     <tr><td><code>add</code></td><td>File a task. Prints the number, which is how you and the agents refer to it.</td></tr>
     <tr><td><code>ls</code></td><td>The queue as rows: status, holder, lease countdown, what it waits for, and whether it <a href="#footprint">changed anything</a>.</td></tr>
     <tr><td><code>show</code></td><td>One task in full — body, dependencies, scope, history, what was learned on it, and what the working tree says it did.</td></tr>
-    <tr><td><code>diff</code></td><td>The uncommitted diff of what moved under a task, from the versions the <a href="#exhibit">witness kept</a> — even after the task is done and the tree has moved on.</td></tr>
-    <tr><td><code>salvage</code></td><td>Recover a version of a file as it stood under a task: the last one the witness saw, or with <code>--baseline</code> the one the task started from.</td></tr>
+    <tr><td><code>diff</code></td><td>The uncommitted diff of what moved under a task, from the versions the <a href="#exhibit">witness kept</a> — even after the task is done and the tree has moved on. <code>--tenure N</code> reads an archived round instead, after the task has changed hands.</td></tr>
+    <tr><td><code>salvage</code></td><td>Recover a version of a file as it stood under a task: the last one the witness saw, or with <code>--baseline</code> the one the task started from. <code>--tenure N</code> reaches an earlier holding's record.</td></tr>
     <tr><td><code>cancel</code> / <code>reopen</code></td><td>Human overrides. They work regardless of who holds the task.</td></tr>
     <tr><td><code>dep</code></td><td>Add or remove "must wait for" edges after the fact.</td></tr>
     <tr><td><code>plan</code></td><td>File a whole graph from a <a href="#plan-files">plan file</a>, in one transaction. <code>--dry-run</code> reads it out — waves, overlaps and all — and writes nothing.</td></tr>

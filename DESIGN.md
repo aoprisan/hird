@@ -1300,3 +1300,131 @@ already existed. Nothing an agent calls has changed, because nothing here is
 something an agent would know to ask for — it is what the human reaches for
 when the board says `modified 2 files, though another agent was live in some
 of them`, and what the reviewer is handed so it does not have to ask.
+
+## 20. (v2.1) The tenure — a task remembers every hand that held it
+
+Every mechanism from §12 on assumes a task and its holder are one story. The
+witness measures *the task* against a baseline taken at *the claim*; the
+footprint is *the task's*; the diff is *the task's*. That identification is
+right until the first time a task changes hands — a lease expires, work is
+released, a verdict sends it back — and then it is exactly wrong, and the
+code knew it: `Witnessed::begin` on a re-claim deleted the previous holder's
+baseline and footprint, because crediting the new holder with the old one's
+edits would have been worse.
+
+Deleting was the bug. Consider the founding scenario of the lease: an agent
+claims a task, edits three files, and dies — session killed, laptop lid,
+context window burned out. The lease lapses, the sweep returns the task to
+the pool, and another harness picks it up. That successor starts on a working
+tree *carrying a dead agent's uncommitted edits*, indistinguishable from code
+that was always there; the human sees one green-ish card and two claims that
+look like one continuous task; and the only record that could have said
+otherwise was destroyed by the successor's own claim, at the precise moment
+it became the most valuable row in the database. The verdict loop (§16) made
+this the *normal* case rather than the crash case: every `sent_back` reopens
+work whose redo begins by overwriting the evidence of the round the reviewer
+judged.
+
+So the fresh measurement stops destroying and starts archiving. Each holding
+of a task is a **tenure**: who held it, how the holding ended, the baseline
+it was measured against, and what the witness saw move while it was live —
+frozen in the same `IMMEDIATE` transaction that replaces them, which is the
+only moment there is anything to freeze.
+
+### Migration 9
+
+```sql
+ALTER TABLE task_witness ADD COLUMN holder TEXT NOT NULL DEFAULT '';
+
+CREATE TABLE task_tenures (
+  id       TEXT PRIMARY KEY,
+  task_id  TEXT NOT NULL REFERENCES tasks(id),
+  n        INTEGER NOT NULL,          -- 1-based round, per task
+  holder   TEXT NOT NULL DEFAULT '',
+  began_at TEXT NOT NULL,
+  ended    TEXT NOT NULL DEFAULT '',  -- completed|failed|released|lease_expired|cancelled
+  ended_at TEXT NOT NULL DEFAULT '',
+  head     TEXT NOT NULL DEFAULT '',
+  tree     TEXT NOT NULL DEFAULT '{}',
+  archived_at TEXT NOT NULL,
+  UNIQUE (task_id, n)
+);
+
+CREATE TABLE tenure_changes (
+  tenure_id  TEXT NOT NULL REFERENCES task_tenures(id),
+  path       TEXT NOT NULL,
+  kind       TEXT NOT NULL CHECK (kind IN ('added','modified','deleted')),
+  hash       TEXT NOT NULL DEFAULT '',
+  first_seen TEXT NOT NULL,
+  last_seen  TEXT NOT NULL,
+  PRIMARY KEY (tenure_id, path)
+);
+```
+
+Three decisions, each the cheaper honest one:
+
+- **The holder is written at the claim, not reconstructed at the archive.**
+  `task_witness` gains a `holder` column filled by the same call that takes
+  the baseline; by archive time the task row's `claimed_by` is already the
+  successor. How the holding *ended* is the one fact read from the trail —
+  the newest `completed`/`failed`/`released`/`lease_expired`/`cancelled`
+  event since the baseline — because the ending transitions are many and the
+  archive is the one place the answer is needed.
+- **The current holding is never in the archive.** `task_witness` and
+  `task_changes` remain the live record and every existing reader of them is
+  untouched; `n` counts finished holdings only. A task that never changes
+  hands never grows a tenure row, and a project without a witness never grows
+  any of this — off is off, as always.
+- **Archived hashes are evidence.** The blob pruner spares anything named by
+  a `tenure_changes` row, exactly as it spares the live change records, so
+  `hird diff --tenure` keeps answering for as long as the round is on record.
+
+### The handover
+
+`task_claim` and `task_next` answer with `previously` when the task has
+changed hands: one sentence naming the previous holder, how their holding
+ended, and which files moved under them, ending in the `hird diff <seq>
+--tenure <n>` that shows the round in full. It is computed after the archive
+in the same call, so on the claim where a task changes hands the newest
+tenure is exactly the holding that just ended. The claim is where every rider
+in hird lives, and this one more than most: the previous holder's session is
+gone, the successor was not there, and the human is looking at a board where
+two claims read as one task. The queue is the only participant that saw both.
+
+The sentence is careful the way the footprint is careful. What is on record
+is what moved *while the holding was live* — not that the holder typed it,
+and not that the edits are still in the tree (they may have been committed,
+or reverted). What is certain is that whatever state those files were left in
+is part of the tree the new baseline was just read off, so the advice is the
+one that is always right: re-read those files before building on or over
+them. A holding that moved nothing says so — *"there are no leftover edits to
+inherit"* — because a successor told nothing would go hunting for
+half-finished work that verifiably does not exist.
+
+### The readers
+
+- **`hird diff <seq> --tenure <n>`** — what round *n* changed, resolved from
+  the archived baseline and the archived record exactly the way the live diff
+  is resolved from the live ones, and stable by construction: an archived
+  round is over, so its "after" is the last version the witness saw under it,
+  never the disk. Round one's diff reads the same after round two rewrites
+  everything, which is when somebody finally asks for it.
+- **`hird salvage <seq> <path> --tenure <n>`** — §19's recovery, reaching
+  rounds the live record no longer describes. The version a vanished agent
+  left behind is retrievable *after* its successor has claimed, worked and
+  overwritten it — the case where the old code deleted the only pointer.
+- **`hird show`** — one `held` line per finished round: who, how it ended,
+  what moved. The board's answer to "why does this file mention a port nobody
+  finished?"
+- **Recall** treats archived footprints as observed territory alongside live
+  ones, so what round one learned in a file still reaches whoever works that
+  file next — previously, the re-claim that archived the footprint would have
+  silently cut that channel.
+
+### Still twelve tools
+
+`previously` is a field on an answer agents already receive, at the only
+moment it can matter; `--tenure` is a flag on two CLI verbs that already
+existed; the archive writes itself on a call that already ran. Nothing new to
+call, because a successor that had to ask "did anyone hold this before me?"
+is a successor that would not ask.

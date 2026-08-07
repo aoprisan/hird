@@ -80,19 +80,64 @@ pub fn assemble(db: &Db, witness: &Witness, seq: i64) -> Result<Vec<FileExhibit>
     };
     let task = db.tasks().get(seq)?;
     let live = task.status.is_active();
+    Ok(assemble_from(
+        db,
+        witness,
+        &baseline,
+        db.witnessed().touched(seq)?,
+        live,
+    ))
+}
 
-    let mut out = Vec::new();
-    for observed in db.witnessed().touched(seq)? {
-        let before = before_side(db, witness, &baseline, &observed);
-        let after = after_side(db, witness, &observed, live);
-        out.push(FileExhibit {
-            path: observed.path,
-            kind: observed.kind,
-            before,
-            after,
-        });
-    }
-    Ok(out)
+/// The same answer for an archived round of the task — a holding that ended
+/// and was replaced by a later claim.
+///
+/// Never live: an archived tenure is over by definition, so its "after" is
+/// the last version the witness saw under it, not the disk as it stands. This
+/// is what makes the answer stable — the diff of what round one did reads the
+/// same before and after round two rewrites everything.
+pub fn assemble_tenure(db: &Db, witness: &Witness, seq: i64, n: i64) -> Result<Vec<FileExhibit>> {
+    let Some(baseline) = db.witnessed().tenure_baseline(seq, n)? else {
+        let held = db.witnessed().tenures(seq)?;
+        return Err(Error::invalid(if held.is_empty() {
+            format!("task {seq} has no archived holdings — it has never changed hands under the witness")
+        } else {
+            format!(
+                "task {seq} has no archived holding {n}; it has {} — `hird show {seq}` lists them",
+                held.len()
+            )
+        }));
+    };
+    let changes = db
+        .witnessed()
+        .tenures(seq)?
+        .into_iter()
+        .find(|t| t.n == n)
+        .map(|t| t.changes)
+        .unwrap_or_default();
+    Ok(assemble_from(db, witness, &baseline, changes, false))
+}
+
+fn assemble_from(
+    db: &Db,
+    witness: &Witness,
+    baseline: &crate::repo::Baseline,
+    observed: Vec<Observed>,
+    live: bool,
+) -> Vec<FileExhibit> {
+    observed
+        .into_iter()
+        .map(|observed| {
+            let before = before_side(db, witness, baseline, &observed);
+            let after = after_side(db, witness, &observed, live);
+            FileExhibit {
+                path: observed.path,
+                kind: observed.kind,
+                before,
+                after,
+            }
+        })
+        .collect()
 }
 
 /// The content of `observed.path` as task `seq` found it at claim time.
@@ -163,20 +208,57 @@ fn after_side(db: &Db, witness: &Witness, observed: &Observed, live: bool) -> Si
 /// `at_claim` asks for the version the task started from; otherwise the
 /// answer is the last version the witness saw on the task's record — which
 /// is the version about to be lost, or already lost, when another agent's
-/// write lands on the same file. Every refusal names what the witness can
-/// and cannot say, because a salvage that guessed would be worse than none.
+/// write lands on the same file. `tenure` reaches an archived round instead
+/// of the current record: the version a vanished holder left behind is
+/// salvageable after its successor has claimed, worked and overwritten it.
+/// Every refusal names what the witness can and cannot say, because a
+/// salvage that guessed would be worse than none.
 pub fn salvage(
     db: &Db,
     witness: &Witness,
     seq: i64,
     path: &str,
     at_claim: bool,
+    tenure: Option<i64>,
 ) -> Result<Vec<u8>> {
+    if let Some(n) = tenure {
+        return salvage_from(
+            db,
+            witness,
+            seq,
+            path,
+            at_claim,
+            db.witnessed().tenure_baseline(seq, n)?.ok_or_else(|| {
+                Error::invalid(format!(
+                    "task {seq} has no archived holding {n} — `hird show {seq}` lists what it has"
+                ))
+            })?,
+            db.witnessed()
+                .tenures(seq)?
+                .into_iter()
+                .find(|t| t.n == n)
+                .map(|t| t.changes)
+                .unwrap_or_default(),
+        );
+    }
     let Some(baseline) = db.witnessed().baseline_of(seq)? else {
         return Err(Error::invalid(format!(
             "hird was not watching task {seq} — no baseline was taken, so nothing was kept"
         )));
     };
+    let observed = db.witnessed().touched(seq)?;
+    salvage_from(db, witness, seq, path, at_claim, baseline, observed)
+}
+
+fn salvage_from(
+    db: &Db,
+    witness: &Witness,
+    seq: i64,
+    path: &str,
+    at_claim: bool,
+    baseline: crate::repo::Baseline,
+    observed: Vec<Observed>,
+) -> Result<Vec<u8>> {
     if at_claim {
         return match baseline.tree.entries.get(path) {
             Some(hash) if hash.is_empty() => Err(Error::invalid(format!(
@@ -201,7 +283,6 @@ pub fn salvage(
                 }),
         };
     }
-    let observed = db.witnessed().touched(seq)?;
     let Some(row) = observed.iter().find(|o| o.path == path) else {
         let saw: Vec<&str> = observed.iter().map(|o| o.path.as_str()).collect();
         return Err(Error::invalid(if saw.is_empty() {
