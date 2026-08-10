@@ -366,6 +366,10 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let project = identity::resolve_project(&cwd);
     let herald = config.herald(&db_path);
+    // Every queue verb below sweeps expired leases anyway; sweeping here
+    // first keeps the outcome, so an expiry is announced by whichever
+    // invocation notices it — `hird ls` glanced at by a human included.
+    sweep_announcing(&db, &config, herald.as_ref());
 
     match cli
         .command
@@ -447,11 +451,6 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
         Command::Scope(args) => scope_cmd(&db, args, out),
         Command::Agents(args) => {
             look(&db, &config, &project);
-            // This is a sweep site, and expiry is announced by whichever
-            // sweep first notices it.
-            for seq in db.tasks().sweep_leases()?.expired {
-                announce(herald.as_ref(), &db, &config, Cause::LeaseExpired, seq);
-            }
             agents(&db, &scope_of(&project, &config, args.all_projects), out)
         }
         Command::Recuse(args) => recuse(&db, args, out),
@@ -528,6 +527,23 @@ fn scope_of(project: &str, config: &Config, all_projects: bool) -> ProjectScope 
 /// time this runs, an agent may already have taken the task, and announcing
 /// work that is no longer waiting would send a summoned agent to an empty
 /// queue.
+/// Heal expired leases and tell the herald what came back to the pool.
+///
+/// Runs once per invocation, before the verb: the sweep would happen inside
+/// whatever repository call the verb makes anyway, but done there its outcome
+/// is discarded, and an expiry nobody hears about defeats the hook's purpose.
+fn sweep_announcing(db: &Db, config: &Config, herald: Option<&Herald>) {
+    if herald.is_none() {
+        return;
+    }
+    let Ok(outcome) = db.tasks().sweep_leases() else {
+        return;
+    };
+    for seq in outcome.expired {
+        announce(herald, db, config, Cause::LeaseExpired, seq);
+    }
+}
+
 fn announce(herald: Option<&Herald>, db: &Db, config: &Config, cause: Cause, seq: i64) {
     let Some(herald) = herald else {
         return;

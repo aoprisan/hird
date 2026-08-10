@@ -109,8 +109,8 @@ cat <<EOF
 Each line above was one detached run of the configured command, told about one
 claimable task through HIRD_EVENT, HIRD_TASK, HIRD_TITLE, HIRD_PROJECT and
 HIRD_DB. Two events did not appear because nothing here caused them: released
-(a holder handing work back) and lease_expired (a holder going quiet —
-announced by whichever sweep notices, since expiry is enforced lazily).
+(a holder handing work back) and lease_expired (a holder going quiet — expiry
+is enforced lazily, and announced by the next queue call that notices it).
 
 Point the same key at your multiplexer and the log lines become summonses:
 

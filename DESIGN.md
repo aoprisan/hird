@@ -1474,8 +1474,15 @@ released and the review it filed, a verdict announces the work it sent back
 (and, under `under_review = "holds"`, the dependents its upholding released),
 `task_release`/`reopen`/`dep rm` announce what they put back in reach. Expiry
 has no write of its own — it is enforced lazily by sweeps (§4) — so it is
-announced by whichever sweep first notices, with the latency expiry already
-has.
+announced by whichever sweep first notices. Since every queue-touching repo
+method already sweeps, every MCP tool and every CLI invocation performs that
+sweep *keeping the outcome* before its real work: in a working swarm the very
+next call any agent makes — a `task_update` heartbeat included — is the one
+that announces a dead colleague's task, whether or not that call then
+succeeds. The one cost is a small race on the claim path: a task whose own
+lease just lapsed can be announced in the instant before the same call
+re-claims it, which is why the skill tells a summoned agent to fall back to
+`task_next`.
 
 ### Why a command and not an integration
 

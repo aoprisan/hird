@@ -182,6 +182,43 @@ impl HirdMcp {
         Some(announcement(cause, claimable))
     }
 
+    /// Announcements for tasks a sweep just returned to the pool.
+    ///
+    /// The claimable check screens each one: a task that came back with a
+    /// dependency meanwhile unmet, or that another agent grabbed already, is
+    /// not waiting for hands.
+    fn expired_announcements(&self, db: &Db, expired: &[i64]) -> Vec<Announcement> {
+        expired
+            .iter()
+            .filter_map(|&seq| self.dispatchable(db, Cause::LeaseExpired, seq))
+            .collect()
+    }
+
+    /// Sweep expired leases and announce what the sweep put back in the pool.
+    ///
+    /// Every queue-touching tool runs this before its real work. The repo
+    /// method it is about to call would sweep anyway; sweeping here first
+    /// keeps the outcome, so an expiry is announced by the call that notices
+    /// it — including a call that then goes on to fail. The cost is a small
+    /// window on `task_claim`: a task whose own lease just expired is
+    /// announced in the instant before this call re-claims it, and the agent
+    /// the hook summons finds `task_next` empty-handed. That is the race the
+    /// skill's fallback exists for, and cheaper than an expiry nobody hears.
+    fn sweep_announcing(&self) {
+        if self.herald.is_none() {
+            return;
+        }
+        let announcements = self.with_db(|db| {
+            let expired = db
+                .tasks()
+                .sweep_leases()
+                .map(|s| s.expired)
+                .unwrap_or_default();
+            self.expired_announcements(db, &expired)
+        });
+        self.announce(&announcements);
+    }
+
     /// Everything `finished` just made claimable, ready for the herald.
     ///
     /// Three kinds of becoming: dependents whose last unmet blocker this
@@ -1547,10 +1584,7 @@ impl HirdMcp {
             // Expiry is enforced lazily, so this sweep is the moment the
             // queue first knows these tasks are back in the pool — which
             // makes it the herald's moment too.
-            let dispatched: Vec<Announcement> = released
-                .iter()
-                .filter_map(|seq| self.dispatchable(db, Cause::LeaseExpired, *seq))
-                .collect();
+            let dispatched = self.expired_announcements(db, &released);
             let listed = db.tasks().list(&scope, status);
             // Which of these this session is barred from. Only the open ones
             // are worth asking about: a claimed or finished task's claimability
@@ -1605,6 +1639,7 @@ impl HirdMcp {
     /// Read one task in full: instructions, dependencies, file scope and history.
     #[tool(name = "task_get")]
     async fn task_get(&self, Parameters(args): Parameters<SeqArgs>) -> Result<String, String> {
+        self.sweep_announcing();
         let recall_limit = self.config.recall_limit();
         let detail = self.with_db(|db| {
             let task = db.tasks().get(args.seq)?;
@@ -1642,6 +1677,7 @@ impl HirdMcp {
         &self,
         Parameters(args): Parameters<TaskClaimArgs>,
     ) -> Result<String, String> {
+        self.sweep_announcing();
         let actor = self.actor();
         let ttl = self.config.lease_ttl();
         let paths = args.paths.unwrap_or_default();
@@ -1688,6 +1724,7 @@ impl HirdMcp {
         &self,
         Parameters(args): Parameters<TaskNextArgs>,
     ) -> Result<String, String> {
+        self.sweep_announcing();
         let actor = self.actor();
         let ttl = self.config.lease_ttl();
         let scope = self.scope(args.all_projects);
@@ -1728,6 +1765,7 @@ impl HirdMcp {
         &self,
         Parameters(args): Parameters<TaskScopeArgs>,
     ) -> Result<String, String> {
+        self.sweep_announcing();
         let actor = self.actor();
         let policy = self.config.on_conflict();
         let (paths, conflicts, evidence) = self
@@ -1778,6 +1816,7 @@ impl HirdMcp {
         &self,
         Parameters(args): Parameters<TaskSplitArgs>,
     ) -> Result<String, String> {
+        self.sweep_announcing();
         let actor = self.actor();
         let empty: Vec<String> = Vec::new();
         let subtasks: Vec<Subtask<'_>> = args
@@ -1844,6 +1883,7 @@ impl HirdMcp {
         &self,
         Parameters(args): Parameters<TaskReleaseArgs>,
     ) -> Result<String, String> {
+        self.sweep_announcing();
         let actor = self.actor();
         let (task, evidence, dispatched) = self
             .with_db(|db| {
@@ -1875,6 +1915,7 @@ impl HirdMcp {
         &self,
         Parameters(args): Parameters<TaskUpdateArgs>,
     ) -> Result<String, String> {
+        self.sweep_announcing();
         let start = match args
             .status
             .as_deref()
@@ -1937,6 +1978,7 @@ impl HirdMcp {
         &self,
         Parameters(args): Parameters<TaskCompleteArgs>,
     ) -> Result<String, String> {
+        self.sweep_announcing();
         let verdict = match args
             .verdict
             .as_deref()
@@ -2004,6 +2046,7 @@ impl HirdMcp {
         &self,
         Parameters(args): Parameters<TaskFailArgs>,
     ) -> Result<String, String> {
+        self.sweep_announcing();
         let actor = self.actor();
         let (task, evidence) = self
             .with_db(|db| {
@@ -2790,6 +2833,68 @@ mod tests {
             .await,
         );
         assert_eq!(out["count"], 1, "limit 0 is clamped to 1, not to nothing");
+    }
+
+    /// The autonomous gap the herald must not have: a swarm working entirely
+    /// through claim/next/complete never calls `task_list`, so the sweep
+    /// those calls already perform has to be the one that announces.
+    #[tokio::test]
+    async fn an_expiry_noticed_by_task_next_is_announced() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("herald.log");
+        let s = HirdMcp::new(
+            Db::open_in_memory().unwrap(),
+            AgentId::new("claude-code", "af31"),
+            PROJECT.to_string(),
+            Config {
+                dispatch_hook: format!("echo \"$HIRD_EVENT $HIRD_TASK\" >> {}", log.display()),
+                ..Config::default()
+            },
+        );
+        let dead = seed(&s, "abandoned", "");
+        let other = seed(&s, "other work", "");
+        s.with_db(|db| {
+            db.tasks()
+                .claim(dead, "codex:dead", Config::default().lease_ttl())
+                .unwrap();
+            db.conn()
+                .execute(
+                    "UPDATE tasks SET lease_expires_at = '2000-01-01T00:00:00.000Z' WHERE seq = ?1",
+                    [dead],
+                )
+                .unwrap();
+        });
+
+        // The agent asking for work is handed one task; the sweep inside the
+        // same call is what noticed the other one coming back.
+        let out = parse(
+            s.task_next(Parameters(TaskNextArgs {
+                all_projects: None,
+                avoid_conflicts: None,
+            }))
+            .await,
+        );
+        assert!(out["claimed"]["claimed"].is_i64(), "{out}");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let contents = loop {
+            let contents = std::fs::read_to_string(&log).unwrap_or_default();
+            if contents.contains("lease_expired") {
+                break contents;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the hook never heard the expiry; log so far:\n{contents}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        // Exactly one of the two open tasks expired; the herald names it and
+        // does not announce the one the sweep never touched.
+        assert!(
+            contents.contains(&format!("lease_expired {dead}")),
+            "{contents}"
+        );
+        assert!(!contents.contains(&format!(" {other}")), "{contents}");
     }
 
     #[tokio::test]
