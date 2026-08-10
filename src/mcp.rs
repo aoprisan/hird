@@ -32,13 +32,15 @@ use crate::db::Db;
 use crate::error::Error;
 
 use crate::footing;
+use crate::herald::{Announcement, Cause, Herald};
 use crate::identity::{self, AgentId};
 use crate::model::{
     Assertion, Blocker, Conflict, Contention, Footprint, Ground, Observed, Recusal, Shifted,
     Standing, Status, Task, TaskEvent, TaskSummary, Verdict, VerdictRecord,
 };
 use crate::repo::{
-    Claim, Delivered, Dispatch, MemoryQuery, NewAssertion, ProjectScope, Recalled, Subtask,
+    Claim, Claimable, Delivered, Dispatch, Finished, MemoryQuery, NewAssertion, ProjectScope,
+    Recalled, Subtask,
 };
 use crate::witness::{self, Witness};
 
@@ -115,17 +117,22 @@ pub struct HirdMcp {
     /// Resolved once at startup: whether this project is somewhere the working
     /// tree can be watched. `None` is an ordinary state, not a degraded one.
     witness: Option<Witness>,
+    /// Likewise resolved once: the dispatch hook, if one is configured, ready
+    /// to announce tasks this session's calls make claimable.
+    herald: Option<Herald>,
 }
 
 impl HirdMcp {
     pub fn new(db: Db, agent: AgentId, project: String, config: Config) -> HirdMcp {
         let witness = config.witness(Path::new(&project));
+        let herald = config.herald(db.path());
         HirdMcp {
             db: Mutex::new(db),
             agent,
             project,
             config,
             witness,
+            herald,
         }
     }
 
@@ -150,6 +157,109 @@ impl HirdMcp {
 
     fn scope(&self, all_projects: Option<bool>) -> ProjectScope {
         ProjectScope::resolve(&self.project, self.config.all_projects(all_projects))
+    }
+
+    /// Run the dispatch hook for each announcement, if a hook is configured.
+    ///
+    /// Called after `with_db` returns, never inside it: the hook's own `hird`
+    /// invocations read the same database, and must find both the lock free
+    /// and the write they are being told about already committed.
+    fn announce(&self, list: &[Announcement]) {
+        crate::herald::announce(self.herald.as_ref(), list);
+    }
+
+    /// Task `seq` as an announcement with `cause`, if it is claimable now.
+    ///
+    /// Read against the committed board, so a task another agent has taken in
+    /// the meantime — or one that still waits for something — stays quiet.
+    fn dispatchable(&self, db: &Db, cause: Cause, seq: i64) -> Option<Announcement> {
+        self.herald.as_ref()?;
+        let claimable = db
+            .deps()
+            .claimable(seq, self.config.clearance())
+            .ok()
+            .flatten()?;
+        Some(announcement(cause, claimable))
+    }
+
+    /// Announcements for tasks a sweep just returned to the pool.
+    ///
+    /// The claimable check screens each one: a task that came back with a
+    /// dependency meanwhile unmet, or that another agent grabbed already, is
+    /// not waiting for hands.
+    fn expired_announcements(&self, db: &Db, expired: &[i64]) -> Vec<Announcement> {
+        expired
+            .iter()
+            .filter_map(|&seq| self.dispatchable(db, Cause::LeaseExpired, seq))
+            .collect()
+    }
+
+    /// Sweep expired leases and announce what the sweep put back in the pool.
+    ///
+    /// Every queue-touching tool runs this before its real work. The repo
+    /// method it is about to call would sweep anyway; sweeping here first
+    /// keeps the outcome, so an expiry is announced by the call that notices
+    /// it — including a call that then goes on to fail. The cost is a small
+    /// window on `task_claim`: a task whose own lease just expired is
+    /// announced in the instant before this call re-claims it, and the agent
+    /// the hook summons finds `task_next` empty-handed. That is the race the
+    /// skill's fallback exists for, and cheaper than an expiry nobody hears.
+    fn sweep_announcing(&self) {
+        if self.herald.is_none() {
+            return;
+        }
+        let announcements = self.with_db(|db| {
+            let expired = db
+                .tasks()
+                .sweep_leases()
+                .map(|s| s.expired)
+                .unwrap_or_default();
+            self.expired_announcements(db, &expired)
+        });
+        self.announce(&announcements);
+    }
+
+    /// Everything `finished` just made claimable, ready for the herald.
+    ///
+    /// Three kinds of becoming: dependents whose last unmet blocker this
+    /// finish cleared — through `done` itself, or through an `upheld` verdict
+    /// where `under_review = "holds"` had dependents waiting on it; work a
+    /// `sent_back` verdict reopened; and the review the finish filed, which
+    /// is itself an open task waiting for a harness that did not do the work.
+    fn dispatched(&self, db: &Db, finished: &Finished) -> Vec<Announcement> {
+        if self.herald.is_none() {
+            return Vec::new();
+        }
+        let clearance = self.config.clearance();
+        let mut released = db
+            .deps()
+            .released_by(finished.task.seq, clearance)
+            .unwrap_or_default();
+        for delivered in &finished.verdicts {
+            if delivered.verdict == Verdict::Upheld {
+                released.extend(
+                    db.deps()
+                        .released_by(delivered.seq, clearance)
+                        .unwrap_or_default(),
+                );
+            }
+        }
+        released.sort_by_key(|c| c.seq);
+        released.dedup_by_key(|c| c.seq);
+
+        let mut out: Vec<Announcement> = released
+            .into_iter()
+            .map(|c| announcement(Cause::Unblocked, c))
+            .collect();
+        for delivered in &finished.verdicts {
+            if delivered.reopened {
+                out.extend(self.dispatchable(db, Cause::SentBack, delivered.seq));
+            }
+        }
+        if let Some(review) = finished.review {
+            out.extend(self.dispatchable(db, Cause::ReviewFiled, review));
+        }
+        out
     }
 
     /// Look at the working tree on this task's behalf and report what it says.
@@ -1465,12 +1575,16 @@ impl HirdMcp {
         let show_project = scope.is_all();
 
         let actor = self.actor();
-        let (released, tasks, unmet, recused, standing) = self.with_db(|db| {
+        let (released, dispatched, tasks, unmet, recused, standing) = self.with_db(|db| {
             let released = db
                 .tasks()
                 .sweep_leases()
                 .map(|s| s.expired)
                 .unwrap_or_default();
+            // Expiry is enforced lazily, so this sweep is the moment the
+            // queue first knows these tasks are back in the pool — which
+            // makes it the herald's moment too.
+            let dispatched = self.expired_announcements(db, &released);
             let listed = db.tasks().list(&scope, status);
             // Which of these this session is barred from. Only the open ones
             // are worth asking about: a claimed or finished task's claimability
@@ -1493,6 +1607,7 @@ impl HirdMcp {
                 .unwrap_or_default();
             (
                 released,
+                dispatched,
                 listed,
                 db.deps()
                     .unmet_map(&scope, self.config.clearance())
@@ -1501,6 +1616,7 @@ impl HirdMcp {
                 db.verdicts().standing(&scope).unwrap_or_default(),
             )
         });
+        self.announce(&dispatched);
         let tasks = tasks.map_err(stringify)?;
 
         json(&TaskListResult {
@@ -1523,6 +1639,7 @@ impl HirdMcp {
     /// Read one task in full: instructions, dependencies, file scope and history.
     #[tool(name = "task_get")]
     async fn task_get(&self, Parameters(args): Parameters<SeqArgs>) -> Result<String, String> {
+        self.sweep_announcing();
         let recall_limit = self.config.recall_limit();
         let detail = self.with_db(|db| {
             let task = db.tasks().get(args.seq)?;
@@ -1560,6 +1677,7 @@ impl HirdMcp {
         &self,
         Parameters(args): Parameters<TaskClaimArgs>,
     ) -> Result<String, String> {
+        self.sweep_announcing();
         let actor = self.actor();
         let ttl = self.config.lease_ttl();
         let paths = args.paths.unwrap_or_default();
@@ -1606,6 +1724,7 @@ impl HirdMcp {
         &self,
         Parameters(args): Parameters<TaskNextArgs>,
     ) -> Result<String, String> {
+        self.sweep_announcing();
         let actor = self.actor();
         let ttl = self.config.lease_ttl();
         let scope = self.scope(args.all_projects);
@@ -1646,6 +1765,7 @@ impl HirdMcp {
         &self,
         Parameters(args): Parameters<TaskScopeArgs>,
     ) -> Result<String, String> {
+        self.sweep_announcing();
         let actor = self.actor();
         let policy = self.config.on_conflict();
         let (paths, conflicts, evidence) = self
@@ -1696,6 +1816,7 @@ impl HirdMcp {
         &self,
         Parameters(args): Parameters<TaskSplitArgs>,
     ) -> Result<String, String> {
+        self.sweep_announcing();
         let actor = self.actor();
         let empty: Vec<String> = Vec::new();
         let subtasks: Vec<Subtask<'_>> = args
@@ -1710,9 +1831,20 @@ impl HirdMcp {
             .collect();
         let sequential = args.sequential.unwrap_or(false);
 
-        let (parent, children) = self
-            .with_db(|db| db.tasks().split(args.seq, &actor, &subtasks, sequential))
+        let (parent, children, dispatched) = self
+            .with_db(|db| {
+                let (parent, children) =
+                    db.tasks().split(args.seq, &actor, &subtasks, sequential)?;
+                // The pieces are open the moment the split commits — all of
+                // them workable at once, or only the first of a sequence.
+                let dispatched: Vec<Announcement> = children
+                    .iter()
+                    .filter_map(|child| self.dispatchable(db, Cause::Filed, child.seq))
+                    .collect();
+                Ok::<_, Error>((parent, children, dispatched))
+            })
             .map_err(stringify)?;
+        self.announce(&dispatched);
 
         let mut previous: Option<i64> = None;
         let rows = children
@@ -1751,16 +1883,21 @@ impl HirdMcp {
         &self,
         Parameters(args): Parameters<TaskReleaseArgs>,
     ) -> Result<String, String> {
+        self.sweep_announcing();
         let actor = self.actor();
-        let (task, evidence) = self
+        let (task, evidence, dispatched) = self
             .with_db(|db| {
                 // Before the release, while this session still holds the lease
                 // and the record of what moved under it is still its own.
                 let evidence = self.witnessed(db, args.seq);
                 let task = db.tasks().release(args.seq, &actor, &args.reason)?;
-                Ok::<_, Error>((task, evidence))
+                // The task is back in the pool, waiting for hands other than
+                // the ones that just let go of it.
+                let dispatched = self.dispatchable(db, Cause::Released, task.seq);
+                Ok::<_, Error>((task, evidence, dispatched))
             })
             .map_err(stringify)?;
+        self.announce(dispatched.as_slice());
         json(&FinishResult::new(
             task.seq,
             task.status,
@@ -1778,6 +1915,7 @@ impl HirdMcp {
         &self,
         Parameters(args): Parameters<TaskUpdateArgs>,
     ) -> Result<String, String> {
+        self.sweep_announcing();
         let start = match args
             .status
             .as_deref()
@@ -1840,6 +1978,7 @@ impl HirdMcp {
         &self,
         Parameters(args): Parameters<TaskCompleteArgs>,
     ) -> Result<String, String> {
+        self.sweep_announcing();
         let verdict = match args
             .verdict
             .as_deref()
@@ -1850,7 +1989,7 @@ impl HirdMcp {
             None => None,
         };
         let actor = self.actor();
-        let (task, evidence) = self
+        let (task, evidence, dispatched) = self
             .with_db(|db| {
                 // Last look, taken while the task is still live so its
                 // footprint is complete and any contention is still true.
@@ -1886,9 +2025,11 @@ impl HirdMcp {
                     verdict,
                     exhibit.as_deref(),
                 )?;
-                Ok::<_, Error>((task, evidence))
+                let dispatched = self.dispatched(db, &task);
+                Ok::<_, Error>((task, evidence, dispatched))
             })
             .map_err(stringify)?;
+        self.announce(&dispatched);
         json(&FinishResult::new(
             task.task.seq,
             task.task.status,
@@ -1905,6 +2046,7 @@ impl HirdMcp {
         &self,
         Parameters(args): Parameters<TaskFailArgs>,
     ) -> Result<String, String> {
+        self.sweep_announcing();
         let actor = self.actor();
         let (task, evidence) = self
             .with_db(|db| {
@@ -2077,6 +2219,16 @@ impl ServerHandler for HirdMcp {
         )
         .with_ttl_ms(0)
         .with_cache_scope(CacheScope::Private))
+    }
+}
+
+/// A claimable task as the herald will tell it.
+fn announcement(cause: Cause, claimable: Claimable) -> Announcement {
+    Announcement {
+        cause,
+        seq: claimable.seq,
+        title: claimable.title,
+        project: claimable.project,
     }
 }
 
@@ -2681,6 +2833,68 @@ mod tests {
             .await,
         );
         assert_eq!(out["count"], 1, "limit 0 is clamped to 1, not to nothing");
+    }
+
+    /// The autonomous gap the herald must not have: a swarm working entirely
+    /// through claim/next/complete never calls `task_list`, so the sweep
+    /// those calls already perform has to be the one that announces.
+    #[tokio::test]
+    async fn an_expiry_noticed_by_task_next_is_announced() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("herald.log");
+        let s = HirdMcp::new(
+            Db::open_in_memory().unwrap(),
+            AgentId::new("claude-code", "af31"),
+            PROJECT.to_string(),
+            Config {
+                dispatch_hook: format!("echo \"$HIRD_EVENT $HIRD_TASK\" >> {}", log.display()),
+                ..Config::default()
+            },
+        );
+        let dead = seed(&s, "abandoned", "");
+        let other = seed(&s, "other work", "");
+        s.with_db(|db| {
+            db.tasks()
+                .claim(dead, "codex:dead", Config::default().lease_ttl())
+                .unwrap();
+            db.conn()
+                .execute(
+                    "UPDATE tasks SET lease_expires_at = '2000-01-01T00:00:00.000Z' WHERE seq = ?1",
+                    [dead],
+                )
+                .unwrap();
+        });
+
+        // The agent asking for work is handed one task; the sweep inside the
+        // same call is what noticed the other one coming back.
+        let out = parse(
+            s.task_next(Parameters(TaskNextArgs {
+                all_projects: None,
+                avoid_conflicts: None,
+            }))
+            .await,
+        );
+        assert!(out["claimed"]["claimed"].is_i64(), "{out}");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let contents = loop {
+            let contents = std::fs::read_to_string(&log).unwrap_or_default();
+            if contents.contains("lease_expired") {
+                break contents;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the hook never heard the expiry; log so far:\n{contents}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        // Exactly one of the two open tasks expired; the herald names it and
+        // does not announce the one the sweep never touched.
+        assert!(
+            contents.contains(&format!("lease_expired {dead}")),
+            "{contents}"
+        );
+        assert!(!contents.contains(&format!(" {other}")), "{contents}");
     }
 
     #[tokio::test]

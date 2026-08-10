@@ -44,3 +44,4 @@ jobs:
           bash -n examples/*.sh examples/lib/*.sh examples/harness/*.sh
           ./examples/manual-dispatch.sh
           ./examples/swarm-plan.sh
+          ./examples/dispatch-hook.sh

@@ -17,6 +17,7 @@ use crate::exhibit;
 use crate::fmt;
 use crate::footing;
 use crate::glob;
+use crate::herald::{Announcement, Cause, Herald};
 use crate::identity::{self, ACTOR_CLI};
 use crate::model::{Footprint, Standing, Status, TaskSummary};
 use crate::plan;
@@ -364,6 +365,11 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
     let db = Db::open(&db_path).with_context(|| format!("opening {}", db_path.display()))?;
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let project = identity::resolve_project(&cwd);
+    let herald = config.herald(&db_path);
+    // Every queue verb below sweeps expired leases anyway; sweeping here
+    // first keeps the outcome, so an expiry is announced by whichever
+    // invocation notices it — `hird ls` glanced at by a human included.
+    sweep_announcing(&db, &config, herald.as_ref());
 
     match cli
         .command
@@ -380,7 +386,13 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
                 }
             )
         }
-        Command::Add(args) => add(&db, &project, args, out),
+        Command::Add(args) => {
+            let seq = add(&db, &project, args, out)?;
+            // Filed ready to work — unless `--needs` queued it behind
+            // something, in which case the finish that clears it will speak.
+            announce(herald.as_ref(), &db, &config, Cause::Filed, seq);
+            Ok(())
+        }
         Command::Ls(args) => {
             // The listing now says whether each task has changed anything, and
             // a stale answer to that is worse than none: a task that has been
@@ -429,11 +441,12 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
         Command::Reopen { seq, reason } => {
             let task = db.tasks().reopen(*seq, ACTOR_CLI, reason)?;
             writeln!(out, "task {} reopened", task.seq)?;
+            announce(herald.as_ref(), &db, &config, Cause::Reopened, task.seq);
             Ok(())
         }
         Command::Mem(cmd) => mem(&db, &project, &config, cmd, out),
-        Command::Dep(cmd) => dep(&db, cmd, out),
-        Command::Plan(cmd) => plan_cmd(&db, &project, cmd, out),
+        Command::Dep(cmd) => dep(&db, &config, herald.as_ref(), cmd, out),
+        Command::Plan(cmd) => plan_cmd(&db, &project, &config, herald.as_ref(), cmd, out),
         Command::Graph(args) => graph(&db, &scope_of(&project, &config, args.all_projects), out),
         Command::Scope(args) => scope_cmd(&db, args, out),
         Command::Agents(args) => {
@@ -508,7 +521,45 @@ fn scope_of(project: &str, config: &Config, all_projects: bool) -> ProjectScope 
     ProjectScope::resolve(project, config.all_projects(Some(all_projects)))
 }
 
-fn add(db: &Db, project: &str, args: &AddArgs, out: &mut impl Write) -> anyhow::Result<()> {
+/// Tell the herald task `seq` is claimable, if it is and there is one.
+///
+/// Read back from the database rather than trusted from the caller: by the
+/// time this runs, an agent may already have taken the task, and announcing
+/// work that is no longer waiting would send a summoned agent to an empty
+/// queue.
+/// Heal expired leases and tell the herald what came back to the pool.
+///
+/// Runs once per invocation, before the verb: the sweep would happen inside
+/// whatever repository call the verb makes anyway, but done there its outcome
+/// is discarded, and an expiry nobody hears about defeats the hook's purpose.
+fn sweep_announcing(db: &Db, config: &Config, herald: Option<&Herald>) {
+    if herald.is_none() {
+        return;
+    }
+    let Ok(outcome) = db.tasks().sweep_leases() else {
+        return;
+    };
+    for seq in outcome.expired {
+        announce(herald, db, config, Cause::LeaseExpired, seq);
+    }
+}
+
+fn announce(herald: Option<&Herald>, db: &Db, config: &Config, cause: Cause, seq: i64) {
+    let Some(herald) = herald else {
+        return;
+    };
+    let Ok(Some(claimable)) = db.deps().claimable(seq, config.clearance()) else {
+        return;
+    };
+    herald.announce(&Announcement {
+        cause,
+        seq: claimable.seq,
+        title: claimable.title,
+        project: claimable.project,
+    });
+}
+
+fn add(db: &Db, project: &str, args: &AddArgs, out: &mut impl Write) -> anyhow::Result<i64> {
     let body = match (&args.body, &args.body_file) {
         (Some(body), _) => body.clone(),
         (None, Some(path)) => read_text(path)?,
@@ -534,10 +585,16 @@ fn add(db: &Db, project: &str, args: &AddArgs, out: &mut impl Write) -> anyhow::
         db.tasks().set_review(task.seq, true, ACTOR_CLI)?;
     }
     writeln!(out, "{}", task.seq)?;
-    Ok(())
+    Ok(task.seq)
 }
 
-fn dep(db: &Db, cmd: &DepCommand, out: &mut impl Write) -> anyhow::Result<()> {
+fn dep(
+    db: &Db,
+    config: &Config,
+    herald: Option<&Herald>,
+    cmd: &DepCommand,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
     match cmd {
         DepCommand::Add { seq, needs } => {
             for needed in needs {
@@ -556,13 +613,23 @@ fn dep(db: &Db, cmd: &DepCommand, out: &mut impl Write) -> anyhow::Result<()> {
                     writeln!(out, "task {seq} was not waiting for task {needed}")?;
                 }
             }
+            // Removing an edge is a human re-plan, and it can be the thing
+            // that leaves the task waiting for nothing.
+            announce(herald, db, config, Cause::Unblocked, *seq);
         }
     }
     Ok(())
 }
 
 /// File a plan, or work out what filing it would do.
-fn plan_cmd(db: &Db, project: &str, cmd: &PlanCommand, out: &mut impl Write) -> anyhow::Result<()> {
+fn plan_cmd(
+    db: &Db,
+    project: &str,
+    config: &Config,
+    herald: Option<&Herald>,
+    cmd: &PlanCommand,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
     let PlanCommand::Apply {
         file,
         dry_run,
@@ -581,6 +648,11 @@ fn plan_cmd(db: &Db, project: &str, cmd: &PlanCommand, out: &mut impl Write) -> 
     }
 
     let applied = db.plans().apply(&project, &parsed, ACTOR_CLI)?;
+    // The first wave is workable the moment the plan commits; the claimable
+    // check inside `announce` is what keeps the later waves quiet.
+    for placed in &applied.created {
+        announce(herald, db, config, Cause::Filed, placed.seq);
+    }
     if applied.created.is_empty() {
         writeln!(
             out,

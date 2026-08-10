@@ -110,3 +110,36 @@ memory_footing = true
 # on `witness` and is off wherever that is; this switch is for keeping the
 # watching while giving up the keeping.
 exhibit = true
+
+# A command to run whenever a task becomes claimable. Empty means no hook.
+#
+# hird is pull: agents call `task_next` when they want work, and a task that
+# becomes ready while every agent is idle waits in silence. This hook is the
+# one push in that design — hird runs the command, detached, at the moment a
+# task becomes claimable: filed with nothing blocking it, unblocked by a
+# finished dependency, reopened by a `sent_back` verdict or a human, handed
+# back by its holder, filed as a review of finished work, or dropped by an
+# expired lease (announced by whichever sweep notices, since expiry itself is
+# enforced lazily).
+#
+# The command runs through `sh -c` with the announcement in its environment:
+#
+#   HIRD_EVENT    filed | unblocked | review_filed | sent_back | reopened |
+#                 released | lease_expired
+#   HIRD_TASK     the task number
+#   HIRD_TITLE    its title
+#   HIRD_PROJECT  its project root
+#   HIRD_DB       the database, so the hook's own `hird` calls read the same
+#                 board
+#
+# hird does not wait for it and does not read its answer; stdout and stderr
+# are closed. What it does is your business: append to a log, post a
+# notification, or — the case it was built for — prompt an idle agent through
+# a terminal multiplexer that can address them, e.g. under herdr
+# (https://herdr.dev):
+#
+#   dispatch_hook = 'herdr agent prompt worker "hird task $HIRD_TASK (\"$HIRD_TITLE\") is ready; work the hird queue."'
+#
+# examples/dispatch-hook.sh shows the announcements land; the FAQ covers the
+# herdr pairing.
+dispatch_hook = ""

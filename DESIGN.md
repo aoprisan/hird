@@ -1428,3 +1428,75 @@ moment it can matter; `--tenure` is a flag on two CLI verbs that already
 existed; the archive writes itself on a call that already ran. Nothing new to
 call, because a successor that had to ask "did anyone hold this before me?"
 is a successor that would not ask.
+
+## 21. (v2.2) The herald — the one push in a pull design
+
+Everything above is pull. `task_next` is a tool an agent chooses to call, and
+that is a load-bearing decision (§11 kept it through the swarm rework): hird
+never pushes work at an agent, so an agent nobody points at the queue stays
+idle, and a human can always reason about who is being driven by what.
+
+But keeping the *transport* pull left one job on the human that everything
+else had been busy removing: noticing. A task that becomes claimable while
+every agent is idle — the plan's next wave, a filed review, work sent back by
+a verdict, a lease that lapsed — sits on the board, correct and visible and
+silent, until the human sees it and goes to find an agent. The queue knew the
+moment it happened; the design gave it no way to say so.
+
+### The hook
+
+`dispatch_hook` (config, default empty) names a command. Whenever a task
+becomes claimable, hird runs it — detached, through `sh -c`, all three stdio
+streams closed — with the announcement in its environment: `HIRD_EVENT` (the
+cause: `filed`, `unblocked`, `review_filed`, `sent_back`, `reopened`,
+`released`, `lease_expired`), `HIRD_TASK`, `HIRD_TITLE`, `HIRD_PROJECT`, and
+`HIRD_DB` so the hook's own `hird` invocations read the same board.
+
+Three rules keep this from becoming the daemon the design forbids:
+
+- **hird never waits and never reads the answer.** The hook is spawned after
+  the transaction commits and reaped from a thread. A broken hook cannot slow
+  a claim, fail a completion, or corrupt an MCP session — stdout is closed
+  precisely because the server's stdout is a JSON-RPC wire.
+- **Every announcement is read back from the committed board.** The repo
+  answers two questions (`Deps::released_by`: which open dependents of a
+  finish now wait for nothing; `Deps::claimable`: is this task open with
+  nothing unmet), both evaluated after the write lands. A task an agent
+  claimed in the race window is not announced; a task filed behind a gate is
+  announced by the finish that clears it, not the filing.
+- **The hook decides nothing.** It is told a task is waiting for hands and
+  why. Scheduling stays where §13 put it: in the graph, read by `task_next`.
+
+Announcement is tied to observation, which for every cause except
+`lease_expired` is the write that causes it: `add`/`plan apply`/`task_split`
+announce what they file workable, a completion announces the dependents it
+released and the review it filed, a verdict announces the work it sent back
+(and, under `under_review = "holds"`, the dependents its upholding released),
+`task_release`/`reopen`/`dep rm` announce what they put back in reach. Expiry
+has no write of its own — it is enforced lazily by sweeps (§4) — so it is
+announced by whichever sweep first notices. Since every queue-touching repo
+method already sweeps, every MCP tool and every CLI invocation performs that
+sweep *keeping the outcome* before its real work: in a working swarm the very
+next call any agent makes — a `task_update` heartbeat included — is the one
+that announces a dead colleague's task, whether or not that call then
+succeeds. The one cost is a small race on the claim path: a task whose own
+lease just lapsed can be announced in the instant before the same call
+re-claims it, which is why the skill tells a summoned agent to fall back to
+`task_next`.
+
+### Why a command and not an integration
+
+The obvious shape was "hird talks to herdr" — the terminal multiplexer whose
+`herdr agent prompt` can wake an idle agent, which is the case this feature
+exists for. But herdr is one answer to "something that can address an agent",
+and a config key holding a command line is all of them at once: a herdr
+prompt, a desktop notification, a log line, a CI trigger. hird stays ignorant
+of every one, the pairing lives in one line of the user's config, and the
+skill teaches agents the herdr side (spawn a sibling in a pane, prompt it to
+work the queue) without the binary knowing herdr exists.
+
+### Still twelve tools
+
+No new MCP tool, no daemon, no schema change. The herald is a field on the
+config, two reads on the repo, and a `Command::spawn` at call sites that were
+already committing the event being announced.
