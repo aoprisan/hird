@@ -23,6 +23,7 @@
     <li class="sub"><a href="#by-hand">By hand, by number</a></li>
     <li class="sub"><a href="#work-the-queue">Letting agents pull</a></li>
     <li class="sub"><a href="#plan-files">The plan as a file</a></li>
+    <li class="sub"><a href="#dispatch-hook">The dispatch hook</a></li>
     <li><a href="#harnesses">Registering a harness</a></li>
     <li class="sub"><a href="#protocol">The protocol</a></li>
     <li><a href="#lifecycle">How a task moves</a></li>
@@ -313,6 +314,61 @@ nothing was written; drop --dry-run to file it</code></pre>
   task is really three jobs has <a href="#split"><code>task_split</code></a>
   instead. The annotated format is
   <a href="https://github.com/aoprisan/hird/blob/main/examples/plan.toml">examples/plan.toml</a>.
+</p>
+
+<h3 id="dispatch-hook">The dispatch hook: the one push in a pull design</h3>
+
+<p>
+  Everything above is pull, and one seam is left by hand: a task that becomes
+  workable while every agent is idle sits on the board, correct and silent,
+  until you notice and go find an agent to point at it. The
+  <code>dispatch_hook</code> config key closes that seam without a daemon.
+  Name a command and hird runs it — detached, through <code>sh -c</code> — at
+  the moment a task becomes claimable, with the announcement in its
+  environment:
+</p>
+
+<pre><code><span class="c"># ${XDG_CONFIG_HOME:-~/.config}/hird/config.toml</span>
+dispatch_hook = <span class="s">'herdr agent prompt worker "hird task $HIRD_TASK is ready; work the hird queue."'</span></code></pre>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Variable</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>HIRD_EVENT</code></td><td>Why the task is claimable: <code>filed</code>, <code>unblocked</code>, <code>review_filed</code>, <code>sent_back</code>, <code>reopened</code>, <code>released</code> or <code>lease_expired</code>.</td></tr>
+    <tr><td><code>HIRD_TASK</code></td><td>The task number.</td></tr>
+    <tr><td><code>HIRD_TITLE</code></td><td>Its title.</td></tr>
+    <tr><td><code>HIRD_PROJECT</code></td><td>Its project root.</td></tr>
+    <tr><td><code>HIRD_DB</code></td><td>The database, so the hook's own <code>hird</code> calls read the same board.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>
+  hird neither waits for the command nor reads its answer — a broken hook
+  cannot slow a claim or fail a completion — and the announcement is read back
+  from the committed board, so a task another agent grabbed in the meantime is
+  never announced. What the command does is your business: append to a log,
+  post a notification, or — the case it was built for — summon an idle agent
+  through a terminal multiplexer that can address one, such as
+  <a href="https://herdr.dev">herdr</a>. Under herdr, the hook above turns the
+  whole loop autonomous: a plan is filed and its first wave prompts agents to
+  pull; a finish frees dependents and prompts for them; a completion files its
+  <a href="#review">review</a> and prompts a <em>different</em> harness to read
+  it; a <a href="#verdict">sent-back verdict</a> reopens the work and prompts
+  for the redo — with you watching the TUI instead of carrying prompts between
+  terminals.
+</p>
+
+<p>
+  Because hird only runs when somebody calls it, an announcement happens when
+  the becoming-claimable is observed — which for every cause except
+  <code>lease_expired</code> is the same write that causes it. Expiry is
+  <a href="#lifecycle">enforced lazily by sweeps</a>, so it is announced by
+  whichever sweep first notices, with the same latency the expiry itself
+  already has.
+  <a href="https://github.com/aoprisan/hird/blob/main/examples/dispatch-hook.sh">examples/dispatch-hook.sh</a>
+  shows every announcement landing, no multiplexer required.
 </p>
 </section>
 
@@ -1600,7 +1656,11 @@ memory_footing = true
 # work under judgement, and `hird salvage` can recover a version an
 # overlapping write discarded. Rides on `witness` and is off wherever that
 # is. Default true.</span>
-exhibit = true</code></pre>
+exhibit = true
+
+<span class="c"># A command to run, detached, whenever a task becomes claimable — see
+# "The dispatch hook" above. Empty (the default) means no hook.</span>
+dispatch_hook = <span class="s">""</span></code></pre>
 
 <p>
   Unknown keys are an error rather than a shrug, so a typo is reported instead of
@@ -1684,6 +1744,10 @@ exhibit = true</code></pre>
       <td>The <a href="#verdict">sent-back loop</a>: a verdict reopens the work carrying the findings, the redo files a fresh review, and <code>hird record</code> keeps score. Makes its own throwaway git repository.</td>
     </tr>
     <tr>
+      <td><a href="https://github.com/aoprisan/hird/blob/main/examples/dispatch-hook.sh"><code>dispatch-hook.sh</code></a></td>
+      <td>The <a href="#dispatch-hook">dispatch hook</a> hearing about every task that becomes claimable — filed, unblocked, review filed, sent back — with a log file standing in for the multiplexer.</td>
+    </tr>
+    <tr>
       <td><a href="https://github.com/aoprisan/hird/blob/main/examples/protocol.sh"><code>protocol.sh</code></a></td>
       <td><a href="#protocol">MCP 2026-07-28</a> on the wire: <code>server/discover</code>, a task worked without ever calling <code>initialize</code>, and a harness that never set <code>HIRD_HARNESS</code> named by its own client.</td>
     </tr>
@@ -1713,6 +1777,18 @@ exhibit = true</code></pre>
   <code>task_claim</code> is a first-class tool, not a fallback. Automatic
   dispatch is something an agent opts into by calling <code>task_next</code>;
   if you never ask an agent to work the queue, it never will.
+</p>
+
+<h3>Can hird start or prompt agents itself?</h3>
+<p>
+  Not directly — hird has no daemon and does not own any terminal — but it will
+  tell something that does. Set the <a href="#dispatch-hook">dispatch hook</a>
+  and hird runs your command whenever a task becomes claimable; point that
+  command at a terminal multiplexer that can address agents, such as
+  <a href="https://herdr.dev">herdr</a> (<code>herdr agent prompt …</code>),
+  and idle agents get summoned to pull work the moment it exists. hird decides
+  <em>what</em> is workable and <em>who</em> may take it; the multiplexer owns
+  <em>where</em> agents run. Neither replaces the other.
 </p>
 
 <h3>Do I have to declare dependencies or file scopes?</h3>

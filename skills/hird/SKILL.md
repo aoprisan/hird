@@ -45,6 +45,33 @@ agents and a human may be using it at the same time.
 5. Use `mem_search` before repeating investigation. Use `mem_store` for durable,
    factual findings that will help another session; link them to `task_seq`.
 
+## Summoned by the queue
+
+- If a prompt tells you a hird task is ready or claimable (it may name
+  `HIRD_EVENT` values like `unblocked`, `review_filed` or `lease_expired`, and
+  usually comes from a configured `dispatch_hook`), treat it as "pick up that
+  task": call `task_claim` for the number it names, and fall back to
+  `task_next` if someone else got there first.
+
+## More hands, inside herdr
+
+Only when the user asks for parallel work on the queue — never on your own
+initiative — and `test "${HERDR_ENV:-}" = 1` passes, you are inside
+[herdr](https://herdr.dev) and can put more agents on the board:
+
+1. Check the queue first: `task_list`. Spawn nothing when nothing is workable.
+2. Follow the herdr skill (or `herdr --help`) to split a pane and start an
+   agent in it, preferring a harness different from your own — reviews are
+   refused to the harness that did the work, so a mixed pair keeps the review
+   loop moving.
+3. Prompt it with exactly what you were told, e.g.
+   `herdr agent prompt worker1 "work the hird queue"`.
+4. Do not wait on it. It claims its own tasks; the queue keeps you out of each
+   other's files.
+
+Without herdr (or without permission), say what is workable and let the user
+dispatch instead.
+
 ## Finish or hand work back
 
 - Call `task_complete` with a useful result summary after the requested work is

@@ -46,6 +46,15 @@ instead of forgetting it. The next agent's claim names whose uncommitted
 leavings are in its tree, and every earlier round stays diffable after the
 redo has written over it.
 
+All of that is pull: agents ask, hird answers, and a task that becomes ready
+while nobody is asking waits in silence. One config key closes that seam
+without a daemon. Set `dispatch_hook` to a command and hird runs it, detached,
+the moment a task becomes claimable — which task, and why, in its
+environment. Point it at anything that can wake an agent — under
+[herdr](https://herdr.dev), `herdr agent prompt worker "work the hird queue"`
+— and the plan's next wave, the freshly filed review, the work a verdict sent
+back, each arrives at an idle agent with nobody carrying it there.
+
 No daemon. No server. No accounts.
 
 - 📖 **Documentation: [aoprisan.github.io/hird](https://aoprisan.github.io/hird/)**
