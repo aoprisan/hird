@@ -16,6 +16,8 @@
 //! - [`footing`] — the second reader of it, on memory's behalf: what an
 //!   assertion was learned against, and whether that has moved since
 //! - [`plan`] — a dependency graph as a file, which [`repo`] turns into rows
+//! - [`herald`] — the one push in a pull design: a configured command told
+//!   when a task becomes claimable, so idle agents can be summoned
 //! - [`mcp`], [`cli`], [`tui`] — the three front ends, which call [`repo`]
 
 pub mod cli;
@@ -27,6 +29,7 @@ pub mod fmt;
 pub mod footing;
 pub mod glob;
 pub mod hash;
+pub mod herald;
 pub mod identity;
 pub mod install;
 pub mod mcp;

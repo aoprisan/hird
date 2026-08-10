@@ -26,6 +26,15 @@ const PENDING_REVIEW: &str = "(SELECT rev.seq FROM task_recusals rec
           AND rev.status IN ('open','claimed','in_progress')
         ORDER BY rev.seq LIMIT 1)";
 
+/// A task in the form the herald announces: claimable now, named well enough
+/// for a hook — or the agent it summons — to know what it is being told about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Claimable {
+    pub seq: i64,
+    pub title: String,
+    pub project: String,
+}
+
 /// Repository over `task_deps`.
 pub struct Deps<'a> {
     conn: &'a Connection,
@@ -122,6 +131,70 @@ impl<'a> Deps<'a> {
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map([&task_id], row_to_blocker)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The open dependents of `seq` that now wait for nothing — what a finish
+    /// just released, in the form the herald announces.
+    ///
+    /// Meant to be read after the finishing transaction commits, against the
+    /// board as it then stands: a dependent that another agent has claimed in
+    /// the meantime is not waiting for hands and is left out.
+    pub fn released_by(&self, seq: i64, clearance: Clearance) -> Result<Vec<Claimable>> {
+        let task_id = id_for_seq(self.conn, seq)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT t.id, t.seq, t.title, t.project FROM task_deps d
+             JOIN tasks t ON t.id = d.task_id
+             WHERE d.depends_on_id = ?1 AND t.status = 'open'
+             ORDER BY t.seq",
+        )?;
+        let rows = stmt.query_map([&task_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                Claimable {
+                    seq: row.get(1)?,
+                    title: row.get(2)?,
+                    project: row.get(3)?,
+                },
+            ))
+        })?;
+        let candidates = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut released = Vec::new();
+        for (id, claimable) in candidates {
+            if unmet_blockers(self.conn, &id, clearance)?.is_empty() {
+                released.push(claimable);
+            }
+        }
+        Ok(released)
+    }
+
+    /// Task `seq` in announceable form, if it is claimable right now: open,
+    /// with nothing unmet. `None` otherwise — including when another agent
+    /// has already taken it, which is the race this read exists to lose
+    /// gracefully.
+    pub fn claimable(&self, seq: i64, clearance: Clearance) -> Result<Option<Claimable>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, seq, title, project FROM tasks WHERE seq = ?1 AND status = 'open'",
+                [seq],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        Claimable {
+                            seq: row.get(1)?,
+                            title: row.get(2)?,
+                            project: row.get(3)?,
+                        },
+                    ))
+                },
+            )
+            .optional()?;
+        match row {
+            Some((id, claimable)) if unmet_blockers(self.conn, &id, clearance)?.is_empty() => {
+                Ok(Some(claimable))
+            }
+            _ => Ok(None),
+        }
     }
 
     /// The ground under `seq`: every finished dependency, carrying the result
@@ -900,5 +973,110 @@ mod tests {
         );
         // Task 1 is done, so 2 is workable now and 3 is one wave behind it.
         assert_eq!(waves, vec![vec![2], vec![3]]);
+    }
+
+    /// What the herald asks after a finish: which dependents now wait for
+    /// nothing — and only those.
+    #[test]
+    fn a_finish_releases_exactly_the_dependents_left_waiting_for_nothing() {
+        let db = db();
+        let gate = seed(&db, "gate");
+        let freed = seed(&db, "freed");
+        let still_waiting = seed(&db, "still waiting");
+        let other_gate = seed(&db, "other gate");
+        db.deps().add(freed, gate, "cli").unwrap();
+        db.deps().add(still_waiting, gate, "cli").unwrap();
+        db.deps().add(still_waiting, other_gate, "cli").unwrap();
+        finish(&db, gate);
+
+        let released = db.deps().released_by(gate, Clearance::Done).unwrap();
+        let seqs: Vec<i64> = released.iter().map(|c| c.seq).collect();
+        assert_eq!(seqs, vec![freed]);
+        assert_eq!(released[0].title, "freed");
+        assert_eq!(released[0].project, PROJECT);
+    }
+
+    /// The read happens after the finish commits, and loses gracefully: a
+    /// dependent somebody claimed in the gap is no longer waiting for hands.
+    #[test]
+    fn a_dependent_already_claimed_is_not_released() {
+        let db = db();
+        let gate = seed(&db, "gate");
+        let freed = seed(&db, "freed");
+        db.deps().add(freed, gate, "cli").unwrap();
+        finish(&db, gate);
+        db.tasks().claim(freed, "codex:9f2c", TTL).unwrap();
+        assert!(db
+            .deps()
+            .released_by(gate, Clearance::Done)
+            .unwrap()
+            .is_empty());
+    }
+
+    /// Under `holds`, `done` under an open review releases nothing; the
+    /// upholding verdict is the finish that does.
+    #[test]
+    fn under_holds_the_release_waits_for_the_verdict() {
+        let db = db();
+        let work = seed(&db, "port the loader");
+        let dependent = seed(&db, "use the loader");
+        db.deps().add(dependent, work, "cli").unwrap();
+        let review = reviewed_done(&db, work, "ported it");
+
+        assert!(db
+            .deps()
+            .released_by(work, Clearance::Reviewed)
+            .unwrap()
+            .is_empty());
+
+        db.tasks().claim(review, "claude-code:af31", TTL).unwrap();
+        db.tasks()
+            .complete_with(
+                review,
+                "claude-code:af31",
+                "holds",
+                Some(crate::model::Verdict::Upheld),
+            )
+            .unwrap();
+        let released = db.deps().released_by(work, Clearance::Reviewed).unwrap();
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].seq, dependent);
+    }
+
+    /// `claimable` is the announcement's gate: open with nothing unmet, or
+    /// nothing to say.
+    #[test]
+    fn claimable_answers_for_exactly_the_tasks_waiting_for_hands() {
+        let db = db();
+        let gate = seed(&db, "gate");
+        let blocked = seed(&db, "blocked");
+        let ready = seed(&db, "ready");
+        db.deps().add(blocked, gate, "cli").unwrap();
+
+        let claimable = db
+            .deps()
+            .claimable(ready, Clearance::Done)
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimable.seq, ready);
+        assert_eq!(claimable.title, "ready");
+        assert_eq!(claimable.project, PROJECT);
+
+        assert!(db
+            .deps()
+            .claimable(blocked, Clearance::Done)
+            .unwrap()
+            .is_none());
+        db.tasks().claim(ready, "codex:9f2c", TTL).unwrap();
+        assert!(db
+            .deps()
+            .claimable(ready, Clearance::Done)
+            .unwrap()
+            .is_none());
+        assert!(db
+            .deps()
+            .claimable(9_999, Clearance::Done)
+            .unwrap()
+            .is_none());
     }
 }

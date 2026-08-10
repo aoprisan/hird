@@ -101,6 +101,12 @@ pub struct Config {
     /// overlapping write discarded. Rides on `witness` and is off wherever
     /// that is.
     pub exhibit: bool,
+    /// A command to run whenever a task becomes claimable — filed unblocked,
+    /// released by a finished dependency, reopened by a verdict or a human,
+    /// or dropped by an expired lease. Runs detached through `sh -c` with
+    /// `HIRD_EVENT`, `HIRD_TASK`, `HIRD_TITLE`, `HIRD_PROJECT` and `HIRD_DB`
+    /// in its environment; empty means no hook. See [`crate::herald`].
+    pub dispatch_hook: String,
 }
 
 impl Default for Config {
@@ -115,6 +121,7 @@ impl Default for Config {
             witness: true,
             memory_footing: true,
             exhibit: true,
+            dispatch_hook: String::new(),
         }
     }
 }
@@ -183,6 +190,13 @@ impl Config {
             .map(|w| w.keeping(self.exhibit))
     }
 
+    /// The herald that announces claimable work, if a dispatch hook is
+    /// configured. `db` is the board the hook's own `hird` invocations should
+    /// read, handed over as `HIRD_DB`.
+    pub fn herald(&self, db: &Path) -> Option<crate::herald::Herald> {
+        crate::herald::Herald::new(&self.dispatch_hook, db)
+    }
+
     /// The witness memory may read the tree through, if it may.
     ///
     /// Narrower than [`Config::witness`] by one flag: a human who wants the
@@ -239,6 +253,19 @@ mod tests {
         // it was learned against can never be checked, and the whole cost is a
         // hash of files somebody already named.
         assert!(cfg.memory_footing);
+        // No hook runs unless a human wrote one down: the herald is a way to
+        // summon agents, and summoning is opt-in.
+        assert!(cfg.dispatch_hook.is_empty());
+        assert!(cfg.herald(Path::new("/tmp/x.db")).is_none());
+    }
+
+    #[test]
+    fn a_configured_dispatch_hook_builds_a_herald() {
+        let cfg = Config {
+            dispatch_hook: "true".to_string(),
+            ..Config::default()
+        };
+        assert!(cfg.herald(Path::new("/tmp/x.db")).is_some());
     }
 
     #[test]

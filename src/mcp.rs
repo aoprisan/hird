@@ -32,13 +32,15 @@ use crate::db::Db;
 use crate::error::Error;
 
 use crate::footing;
+use crate::herald::{Announcement, Cause, Herald};
 use crate::identity::{self, AgentId};
 use crate::model::{
     Assertion, Blocker, Conflict, Contention, Footprint, Ground, Observed, Recusal, Shifted,
     Standing, Status, Task, TaskEvent, TaskSummary, Verdict, VerdictRecord,
 };
 use crate::repo::{
-    Claim, Delivered, Dispatch, MemoryQuery, NewAssertion, ProjectScope, Recalled, Subtask,
+    Claim, Claimable, Delivered, Dispatch, Finished, MemoryQuery, NewAssertion, ProjectScope,
+    Recalled, Subtask,
 };
 use crate::witness::{self, Witness};
 
@@ -115,17 +117,22 @@ pub struct HirdMcp {
     /// Resolved once at startup: whether this project is somewhere the working
     /// tree can be watched. `None` is an ordinary state, not a degraded one.
     witness: Option<Witness>,
+    /// Likewise resolved once: the dispatch hook, if one is configured, ready
+    /// to announce tasks this session's calls make claimable.
+    herald: Option<Herald>,
 }
 
 impl HirdMcp {
     pub fn new(db: Db, agent: AgentId, project: String, config: Config) -> HirdMcp {
         let witness = config.witness(Path::new(&project));
+        let herald = config.herald(db.path());
         HirdMcp {
             db: Mutex::new(db),
             agent,
             project,
             config,
             witness,
+            herald,
         }
     }
 
@@ -150,6 +157,72 @@ impl HirdMcp {
 
     fn scope(&self, all_projects: Option<bool>) -> ProjectScope {
         ProjectScope::resolve(&self.project, self.config.all_projects(all_projects))
+    }
+
+    /// Run the dispatch hook for each announcement, if a hook is configured.
+    ///
+    /// Called after `with_db` returns, never inside it: the hook's own `hird`
+    /// invocations read the same database, and must find both the lock free
+    /// and the write they are being told about already committed.
+    fn announce(&self, list: &[Announcement]) {
+        crate::herald::announce(self.herald.as_ref(), list);
+    }
+
+    /// Task `seq` as an announcement with `cause`, if it is claimable now.
+    ///
+    /// Read against the committed board, so a task another agent has taken in
+    /// the meantime — or one that still waits for something — stays quiet.
+    fn dispatchable(&self, db: &Db, cause: Cause, seq: i64) -> Option<Announcement> {
+        self.herald.as_ref()?;
+        let claimable = db
+            .deps()
+            .claimable(seq, self.config.clearance())
+            .ok()
+            .flatten()?;
+        Some(announcement(cause, claimable))
+    }
+
+    /// Everything `finished` just made claimable, ready for the herald.
+    ///
+    /// Three kinds of becoming: dependents whose last unmet blocker this
+    /// finish cleared — through `done` itself, or through an `upheld` verdict
+    /// where `under_review = "holds"` had dependents waiting on it; work a
+    /// `sent_back` verdict reopened; and the review the finish filed, which
+    /// is itself an open task waiting for a harness that did not do the work.
+    fn dispatched(&self, db: &Db, finished: &Finished) -> Vec<Announcement> {
+        if self.herald.is_none() {
+            return Vec::new();
+        }
+        let clearance = self.config.clearance();
+        let mut released = db
+            .deps()
+            .released_by(finished.task.seq, clearance)
+            .unwrap_or_default();
+        for delivered in &finished.verdicts {
+            if delivered.verdict == Verdict::Upheld {
+                released.extend(
+                    db.deps()
+                        .released_by(delivered.seq, clearance)
+                        .unwrap_or_default(),
+                );
+            }
+        }
+        released.sort_by_key(|c| c.seq);
+        released.dedup_by_key(|c| c.seq);
+
+        let mut out: Vec<Announcement> = released
+            .into_iter()
+            .map(|c| announcement(Cause::Unblocked, c))
+            .collect();
+        for delivered in &finished.verdicts {
+            if delivered.reopened {
+                out.extend(self.dispatchable(db, Cause::SentBack, delivered.seq));
+            }
+        }
+        if let Some(review) = finished.review {
+            out.extend(self.dispatchable(db, Cause::ReviewFiled, review));
+        }
+        out
     }
 
     /// Look at the working tree on this task's behalf and report what it says.
@@ -1465,12 +1538,19 @@ impl HirdMcp {
         let show_project = scope.is_all();
 
         let actor = self.actor();
-        let (released, tasks, unmet, recused, standing) = self.with_db(|db| {
+        let (released, dispatched, tasks, unmet, recused, standing) = self.with_db(|db| {
             let released = db
                 .tasks()
                 .sweep_leases()
                 .map(|s| s.expired)
                 .unwrap_or_default();
+            // Expiry is enforced lazily, so this sweep is the moment the
+            // queue first knows these tasks are back in the pool — which
+            // makes it the herald's moment too.
+            let dispatched: Vec<Announcement> = released
+                .iter()
+                .filter_map(|seq| self.dispatchable(db, Cause::LeaseExpired, *seq))
+                .collect();
             let listed = db.tasks().list(&scope, status);
             // Which of these this session is barred from. Only the open ones
             // are worth asking about: a claimed or finished task's claimability
@@ -1493,6 +1573,7 @@ impl HirdMcp {
                 .unwrap_or_default();
             (
                 released,
+                dispatched,
                 listed,
                 db.deps()
                     .unmet_map(&scope, self.config.clearance())
@@ -1501,6 +1582,7 @@ impl HirdMcp {
                 db.verdicts().standing(&scope).unwrap_or_default(),
             )
         });
+        self.announce(&dispatched);
         let tasks = tasks.map_err(stringify)?;
 
         json(&TaskListResult {
@@ -1710,9 +1792,20 @@ impl HirdMcp {
             .collect();
         let sequential = args.sequential.unwrap_or(false);
 
-        let (parent, children) = self
-            .with_db(|db| db.tasks().split(args.seq, &actor, &subtasks, sequential))
+        let (parent, children, dispatched) = self
+            .with_db(|db| {
+                let (parent, children) =
+                    db.tasks().split(args.seq, &actor, &subtasks, sequential)?;
+                // The pieces are open the moment the split commits — all of
+                // them workable at once, or only the first of a sequence.
+                let dispatched: Vec<Announcement> = children
+                    .iter()
+                    .filter_map(|child| self.dispatchable(db, Cause::Filed, child.seq))
+                    .collect();
+                Ok::<_, Error>((parent, children, dispatched))
+            })
             .map_err(stringify)?;
+        self.announce(&dispatched);
 
         let mut previous: Option<i64> = None;
         let rows = children
@@ -1752,15 +1845,19 @@ impl HirdMcp {
         Parameters(args): Parameters<TaskReleaseArgs>,
     ) -> Result<String, String> {
         let actor = self.actor();
-        let (task, evidence) = self
+        let (task, evidence, dispatched) = self
             .with_db(|db| {
                 // Before the release, while this session still holds the lease
                 // and the record of what moved under it is still its own.
                 let evidence = self.witnessed(db, args.seq);
                 let task = db.tasks().release(args.seq, &actor, &args.reason)?;
-                Ok::<_, Error>((task, evidence))
+                // The task is back in the pool, waiting for hands other than
+                // the ones that just let go of it.
+                let dispatched = self.dispatchable(db, Cause::Released, task.seq);
+                Ok::<_, Error>((task, evidence, dispatched))
             })
             .map_err(stringify)?;
+        self.announce(dispatched.as_slice());
         json(&FinishResult::new(
             task.seq,
             task.status,
@@ -1850,7 +1947,7 @@ impl HirdMcp {
             None => None,
         };
         let actor = self.actor();
-        let (task, evidence) = self
+        let (task, evidence, dispatched) = self
             .with_db(|db| {
                 // Last look, taken while the task is still live so its
                 // footprint is complete and any contention is still true.
@@ -1886,9 +1983,11 @@ impl HirdMcp {
                     verdict,
                     exhibit.as_deref(),
                 )?;
-                Ok::<_, Error>((task, evidence))
+                let dispatched = self.dispatched(db, &task);
+                Ok::<_, Error>((task, evidence, dispatched))
             })
             .map_err(stringify)?;
+        self.announce(&dispatched);
         json(&FinishResult::new(
             task.task.seq,
             task.task.status,
@@ -2077,6 +2176,16 @@ impl ServerHandler for HirdMcp {
         )
         .with_ttl_ms(0)
         .with_cache_scope(CacheScope::Private))
+    }
+}
+
+/// A claimable task as the herald will tell it.
+fn announcement(cause: Cause, claimable: Claimable) -> Announcement {
+    Announcement {
+        cause,
+        seq: claimable.seq,
+        title: claimable.title,
+        project: claimable.project,
     }
 }
 
