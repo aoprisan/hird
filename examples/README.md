@@ -21,6 +21,7 @@ installed, but nothing requires it.
 | [`review.sh`](review.sh) | **No agent reviews its own work** — finishing files the review, scoped to what actually moved, and the queue refuses it to the harness that did it. |
 | [`verdict.sh`](verdict.sh) | **The review closes its own loop** — a `sent_back` verdict reopens the work carrying the findings, the redo files a fresh review, and `hird record` keeps score per harness. |
 | [`dispatch-hook.sh`](dispatch-hook.sh) | **The one push in a pull design** — a configured command hears about every task that becomes claimable: filed, unblocked, review filed, sent back. Point it at a multiplexer like [herdr](https://herdr.dev) and the lines become summonses for idle agents. |
+| [`events.sh`](events.sh) | **The board as a log** — a follower tails the trail while two harnesses work, then the same record is read after the fact, filtered by kind, and emitted as JSON: monitoring without the TUI, and the feed other tooling builds on. |
 | [`protocol.sh`](protocol.sh) | **MCP 2026-07-28 on the wire** — `server/discover`, a task worked without ever calling `initialize`, and a harness that never set `HIRD_HARNESS` named by its own client. |
 | [`task-body.md`](task-body.md) | A task body worth writing, for `--body-file`. |
 | [`config.toml`](config.toml) | Every configuration key, annotated, at its default. |
@@ -38,6 +39,7 @@ installed, but nothing requires it.
 ./examples/review.sh           # likewise
 ./examples/verdict.sh          # likewise
 ./examples/dispatch-hook.sh    # needs neither
+./examples/events.sh           # needs git; makes its own throwaway repository
 ./examples/protocol.sh         # needs neither
 ```
 

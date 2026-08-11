@@ -130,6 +130,15 @@ pub enum Command {
     /// the queue can measure — whose work survives a reading by a different
     /// model. A report, not a scheduler: nothing routes work by it.
     Record(ScopeFilterArgs),
+    /// Tail the append-only event trail across every task, oldest first:
+    /// claims, check-ins, completions, verdicts, witnessed changes, expiries.
+    ///
+    /// This is the queue's own log — what the TUI shows, without the terminal
+    /// UI, so a swarm can be watched from a second terminal, a tmux pane, or
+    /// a script. `--follow` keeps reading as events land, and `--json` makes
+    /// each line one machine-readable object for whatever wants to build on
+    /// the feed.
+    Events(EventsArgs),
     /// Show what earlier work already learned about a task, and why it is
     /// relevant. This is what an agent is handed when it claims the task.
     Recall {
@@ -150,6 +159,34 @@ pub enum Command {
     Register(RegisterArgs),
     /// Print the database path this invocation would use.
     DbPath,
+}
+
+#[derive(Debug, Args)]
+pub struct EventsArgs {
+    /// Keep watching: print each new event as it lands. On the way it sweeps
+    /// expired leases and the working tree, the same way the TUI does, so
+    /// expiries and witnessed changes appear even while no agent is calling.
+    #[arg(long, short = 'f')]
+    pub follow: bool,
+    /// One JSON object per line instead of columns, for piping into tools.
+    #[arg(long)]
+    pub json: bool,
+    /// Only these kinds, comma-separated — e.g. claimed,completed,witnessed.
+    #[arg(long = "kind", value_name = "KIND", value_delimiter = ',')]
+    pub kinds: Vec<crate::model::EventKind>,
+    /// Only events on this task.
+    #[arg(long, value_name = "SEQ")]
+    pub task: Option<i64>,
+    /// Only events recorded by this actor, exactly as the board names it —
+    /// e.g. codex:9f2c, or cli.
+    #[arg(long, value_name = "NAME")]
+    pub actor: Option<String>,
+    /// How many recent events to print — the backlog, before any following.
+    #[arg(long, value_name = "N", default_value_t = 30)]
+    pub limit: usize,
+    /// Every project in the database, not just this one.
+    #[arg(long)]
+    pub all_projects: bool,
 }
 
 #[derive(Debug, Args)]
@@ -455,6 +492,7 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
         }
         Command::Recuse(args) => recuse(&db, args, out),
         Command::Record(args) => record(&db, &scope_of(&project, &config, args.all_projects), out),
+        Command::Events(args) => events_cmd(&db, &project, &config, herald.as_ref(), args, out),
     }
 }
 
@@ -557,6 +595,120 @@ fn announce(herald: Option<&Herald>, db: &Db, config: &Config, cause: Cause, seq
         title: claimable.title,
         project: claimable.project,
     });
+}
+
+/// `hird events`: the trail across tasks, as a log — and, with `--follow`,
+/// as a live one.
+///
+/// Follow mode makes this command a monitor in the same sense the TUI is one:
+/// it polls the same SQLite file at the same cadence, sweeps expired leases so
+/// their announcements are not waiting on somebody else to glance at the
+/// board, and looks at the working tree so witnessed changes land in the feed
+/// while they are still news. There is still no daemon — stopping the tail
+/// costs nothing and forgets nothing, because the cursor is the trail itself.
+fn events_cmd(
+    db: &Db,
+    project: &str,
+    config: &Config,
+    herald: Option<&Herald>,
+    args: &EventsArgs,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
+    let scope = scope_of(project, config, args.all_projects);
+    let filter = crate::repo::FeedFilter {
+        kinds: args.kinds.clone(),
+        task_seq: args.task,
+        actor: args.actor.clone(),
+    };
+    // The trail only carries what somebody enforced; the reader is now that
+    // somebody, so the backlog it prints is current rather than as-of the
+    // last time an agent called.
+    look(db, config, project);
+    let backlog = db.events().tail(&scope, &filter, args.limit)?;
+    let mut cursor = backlog.last().map(|e| e.cursor).unwrap_or(0);
+    if backlog.is_empty() && !args.follow && !args.json {
+        writeln!(out, "nothing on the record yet")?;
+    }
+    for event in &backlog {
+        write_event(out, event, args.json, scope.is_all())?;
+    }
+    if !args.follow {
+        return Ok(());
+    }
+    out.flush()?;
+    let mut last_look = Utc::now();
+    loop {
+        std::thread::sleep(crate::tui::app::POLL_INTERVAL);
+        // Expiry is enforced lazily by whoever reads the table next, and
+        // while a tail is running that is this loop — with the herald told,
+        // exactly as if a human had glanced at the board.
+        if let Ok(outcome) = db.tasks().sweep_leases() {
+            for seq in outcome.expired {
+                announce(herald, db, config, Cause::LeaseExpired, seq);
+            }
+        }
+        let now = Utc::now();
+        if now - last_look >= crate::tui::app::WITNESS_INTERVAL {
+            last_look = now;
+            look(db, config, project);
+        }
+        for event in db.events().since(&scope, &filter, cursor)? {
+            cursor = event.cursor;
+            write_event(out, &event, args.json, scope.is_all())?;
+        }
+        out.flush()?;
+    }
+}
+
+/// One event, one line: columns for a human, an object for a pipe.
+fn write_event(
+    out: &mut impl Write,
+    event: &crate::repo::FeedEvent,
+    json: bool,
+    all_projects: bool,
+) -> anyhow::Result<()> {
+    if json {
+        writeln!(
+            out,
+            "{}",
+            serde_json::json!({
+                "cursor": event.cursor,
+                "at": event.at,
+                "project": event.project,
+                "task": event.task_seq,
+                "title": event.task_title,
+                "actor": event.actor,
+                "kind": event.kind.as_str(),
+                "detail": event.detail,
+            })
+        )?;
+        return Ok(());
+    }
+    let clock = crate::model::parse_ts(&event.at)
+        .map(|at| at.format("%H:%M:%S").to_string())
+        .unwrap_or_else(|| "??:??:??".into());
+    // The detail is the news; where a kind carries none, the title says what
+    // the event happened to.
+    let what = if event.detail.is_empty() {
+        fmt::truncate(&event.task_title, 76)
+    } else {
+        fmt::truncate(&event.detail, 76)
+    };
+    let task = format!("#{}", event.task_seq);
+    if all_projects {
+        writeln!(
+            out,
+            "{clock}  {task:>4}  {:<14} {:<18} {what}  [{}]",
+            event.kind, event.actor, event.project
+        )?;
+    } else {
+        writeln!(
+            out,
+            "{clock}  {task:>4}  {:<14} {:<18} {what}",
+            event.kind, event.actor
+        )?;
+    }
+    Ok(())
 }
 
 fn add(db: &Db, project: &str, args: &AddArgs, out: &mut impl Write) -> anyhow::Result<i64> {

@@ -4,6 +4,7 @@
 //! own — see the quality bar in DESIGN.md §11.
 
 mod deps;
+mod events;
 pub(crate) mod footing;
 mod memory;
 mod plan;
@@ -15,6 +16,7 @@ mod verdict;
 mod witness;
 
 pub use deps::{dispatch_waves, Claimable, Deps};
+pub use events::{Events, FeedEvent, FeedFilter};
 pub use footing::Footings;
 pub use memory::{Memory, MemoryQuery, NewAssertion, Recorded};
 pub use plan::{Applied, Drift, Placed, Plans};
