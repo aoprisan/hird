@@ -1404,3 +1404,95 @@ fn show_names_the_ground_a_task_builds_on() {
         "{held}"
     );
 }
+
+#[test]
+fn events_reads_the_trail_across_tasks_oldest_first() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["add", "first"]);
+    sandbox.run(&["add", "second"]);
+    sandbox.run(&["cancel", "2", "--reason", "dupe"]);
+
+    let feed = sandbox.run(&["events"]);
+    let lines: Vec<&str> = feed.lines().collect();
+    assert_eq!(lines.len(), 3, "{feed}");
+    assert!(
+        lines[0].contains("#1") && lines[0].contains("created"),
+        "{feed}"
+    );
+    assert!(
+        lines[1].contains("#2") && lines[1].contains("created"),
+        "{feed}"
+    );
+    assert!(
+        lines[2].contains("#2") && lines[2].contains("cancelled") && lines[2].contains("dupe"),
+        "{feed}"
+    );
+}
+
+#[test]
+fn events_sees_what_agents_do_and_filters_down_to_it() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["add", "port the loader"]);
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex.claim(1);
+    codex
+        .call(
+            "task_complete",
+            serde_json::json!({"seq": 1, "result": "ported"}),
+        )
+        .unwrap();
+    codex.shutdown();
+
+    // The whole trail names the harness, not just the CLI.
+    let feed = sandbox.run(&["events", "--kind", "claimed,completed"]);
+    let lines: Vec<&str> = feed.lines().collect();
+    assert_eq!(lines.len(), 2, "{feed}");
+    assert!(
+        lines[0].contains("claimed") && lines[0].contains("codex:"),
+        "{feed}"
+    );
+    assert!(lines[1].contains("completed"), "{feed}");
+
+    // And the actor filter narrows to one agent's doings.
+    let by_cli = sandbox.run(&["events", "--actor", "cli"]);
+    assert!(by_cli.contains("created"), "{by_cli}");
+    assert!(!by_cli.contains("claimed"), "{by_cli}");
+}
+
+#[test]
+fn events_json_is_one_parseable_object_per_line() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["add", "watched task"]);
+    sandbox.run(&["cancel", "1", "--reason", "never mind"]);
+
+    let feed = sandbox.run(&["events", "--json"]);
+    let events: Vec<serde_json::Value> = feed
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("each line parses alone"))
+        .collect();
+    assert_eq!(events.len(), 2, "{feed}");
+    assert_eq!(events[0]["kind"], "created");
+    assert_eq!(events[0]["task"], 1);
+    assert_eq!(events[0]["title"], "watched task");
+    assert_eq!(events[1]["kind"], "cancelled");
+    assert_eq!(events[1]["detail"], "never mind");
+    // Cursors are what --follow resumes from, so they must climb.
+    assert!(events[0]["cursor"].as_i64().unwrap() < events[1]["cursor"].as_i64().unwrap());
+}
+
+#[test]
+fn an_empty_feed_says_so_in_prose_but_never_in_json() {
+    let sandbox = Sandbox::new();
+    let feed = sandbox.run(&["events"]);
+    assert_eq!(feed.trim(), "nothing on the record yet");
+    let json = sandbox.run(&["events", "--json"]);
+    assert_eq!(json.trim(), "", "a pipe gets no prose: {json}");
+}
+
+#[test]
+fn an_unknown_event_kind_is_refused_with_the_word_it_choked_on() {
+    let sandbox = Sandbox::new();
+    let err = sandbox.run_failing(&["events", "--kind", "claimed,exploded"]);
+    assert!(err.contains("exploded"), "{err}");
+}

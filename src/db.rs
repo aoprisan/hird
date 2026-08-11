@@ -10,7 +10,7 @@ use rusqlite::Connection;
 
 use crate::error::Result;
 use crate::repo::{
-    Deps, Footings, Memory, Plans, Recall, Recusals, Scopes, Tasks, Verdicts, Witnessed,
+    Deps, Events, Footings, Memory, Plans, Recall, Recusals, Scopes, Tasks, Verdicts, Witnessed,
 };
 
 /// Numbered migrations, applied in order and recorded in `meta.schema_version`.
@@ -316,6 +316,11 @@ impl Db {
     /// Task and task-event repository.
     pub fn tasks(&self) -> Tasks<'_> {
         Tasks::new(&self.conn)
+    }
+
+    /// The event trail read across tasks, in the order things happened.
+    pub fn events(&self) -> Events<'_> {
+        Events::new(&self.conn)
     }
 
     /// Assertion repository.

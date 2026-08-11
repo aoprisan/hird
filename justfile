@@ -64,6 +64,7 @@ examples: build
     ./examples/review.sh
     ./examples/verdict.sh
     ./examples/dispatch-hook.sh
+    ./examples/events.sh
     ./examples/protocol.sh
 
 # Where this machine's database lives.

@@ -41,6 +41,7 @@
     <li class="sub"><a href="#footing">Footing: when a fact went stale</a></li>
     <li><a href="#cli">Command line</a></li>
     <li><a href="#tui">The TUI</a></li>
+    <li><a href="#events">The board as a log</a></li>
     <li><a href="#mcp">MCP tools</a></li>
     <li><a href="#config">Configuration</a></li>
     <li><a href="#examples">Examples</a></li>
@@ -1444,6 +1445,8 @@ hird scope &lt;seq&gt; [--path &lt;glob&gt;]… [--clear]
 hird agents [--all-projects]
 hird recuse &lt;seq&gt; --from &lt;seq&gt;,… [--reason &lt;text&gt;] | --clear
 hird record [--all-projects]
+hird events [--follow] [--json] [--kind &lt;kind&gt;,…] [--task &lt;seq&gt;] [--actor &lt;name&gt;]
+            [--limit N] [--all-projects]
 hird recall &lt;seq&gt; [--limit N]
 hird mem add &lt;content&gt; [--tags a,b] [--task &lt;seq&gt;] [--path &lt;file&gt;]…
 hird mem search [query] [--limit N] [--all-projects] [--include-superseded]
@@ -1468,6 +1471,7 @@ hird db-path</code></pre>
     <tr><td><code>scope</code></td><td>Show or set the files a task is expected to touch. Warns about overlaps.</td></tr>
     <tr><td><code>agents</code></td><td>Who is working what, what has moved under each of them, and a <code>!!</code> line wherever two agents are in the same files.</td></tr>
     <tr><td><code>record</code></td><td>Each harness's track record under <a href="#verdict">review</a>: work upheld, work sent back, first-pass rate, and the verdicts it has handed out.</td></tr>
+    <tr><td><code>events</code></td><td>The append-only trail read across tasks, oldest first — <a href="#events">the board as a log</a>. <code>--follow</code> keeps reading; <code>--json</code> makes each line one object.</td></tr>
     <tr><td><code>recall</code></td><td>What earlier work already learned about a task, and why it is relevant — the same thing an agent is handed when it claims it.</td></tr>
     <tr><td><code>mem</code></td><td>Record and search assertions.</td></tr>
     <tr><td><code>tui</code></td><td>The live board.</td></tr>
@@ -1480,10 +1484,10 @@ hird db-path</code></pre>
 <p>
   <code>--body-file -</code> reads the task body from stdin, and
   <code>hird plan apply -</code> reads a whole plan from it, so either can be
-  piped straight into the queue. <code>ls</code>, <code>show</code> and
-  <code>agents</code> sweep the working tree as they render, so all three report
-  what has actually moved alongside what was declared — and say plainly when the
-  answer is <em>nothing</em>. Every CLI action is recorded with
+  piped straight into the queue. <code>ls</code>, <code>show</code>,
+  <code>agents</code> and <code>events</code> sweep the working tree as they
+  render, so all four report what has actually moved alongside what was
+  declared — and say plainly when the answer is <em>nothing</em>. Every CLI action is recorded with
   <code>actor = "cli"</code>, so the history pane shows who did what.
 </p>
 </section>
@@ -1559,6 +1563,56 @@ hird db-path</code></pre>
   cards they judged: a green <code>upheld</code> on done work a review signed
   off, a yellow <code>sent back</code> on work that is open again because one
   did not.
+</p>
+</section>
+
+<section id="events">
+<h2>The board as a log</h2>
+
+<p>
+  The TUI is a screen you sit at. <code>hird events</code> is the same view for
+  everything that cannot sit at one — a second terminal, a tmux pane, a CI job,
+  a script, or another agent:
+</p>
+
+<pre><code>$ <span class="k">hird</span> events --follow
+14:31:52    #1  claimed        codex:9f2c        Port the config loader
+14:32:07    #1  witnessed      codex:9f2c        saw src/config.rs change
+14:33:41    #2  claimed        claude-code:af31  Audit the config loader
+14:36:09    #1  completed      codex:9f2c        ported; env still wins over the file</code></pre>
+
+<p>
+  Nothing new is recorded to serve it. Every mutation in hird already lands one
+  row in an append-only trail — <code>hird show</code> replays one task's slice
+  of it as history — and this is the same trail read sideways: across tasks, in
+  the order things happened. One shot prints the last 30 and stops.
+  <code>--follow</code> keeps reading at the TUI's cadence, and sweeps expired
+  leases and the working tree on the way, so an expiry or a
+  <a href="#witness">witnessed</a> change lands in the feed even while no agent
+  is calling and nobody has the board open. Stopping the tail costs nothing and
+  forgets nothing, because the cursor is the trail itself.
+</p>
+
+<p>
+  <code>--kind claimed,completed</code> narrows to the events you are waiting
+  on, <code>--task 7</code> to one piece of work,
+  <code>--actor codex:9f2c</code> to one agent's doings, and
+  <code>--all-projects</code> widens to everything in the database. And because
+  a feed for machines should not make them parse columns, <code>--json</code>
+  makes each line one object:
+</p>
+
+<pre><code>$ <span class="k">hird</span> events --json --kind ground_shifted,contended --follow
+{"cursor":41,"at":"2026-08-11T14:36:09.120Z","project":"/home/you/app","task":2,
+ "title":"Port the repository layer","actor":"codex:9f2c","kind":"ground_shifted",
+ "detail":"task 1 (Design the storage schema) sent back by review 5"}</code></pre>
+
+<p>
+  That line is hird's whole integration surface as an emitter: pipe it into
+  <code>jq</code>, a log file, a dashboard, or the thing that pages you. The
+  <a href="#dispatch-hook">dispatch hook</a> answers <em>wake somebody when
+  work appears</em>; the feed answers everything after that — what the swarm
+  did, as it does it, in a form both halves of your tooling can read.
 </p>
 </section>
 
@@ -1747,6 +1801,10 @@ dispatch_hook = <span class="s">""</span></code></pre>
     <tr>
       <td><a href="https://github.com/aoprisan/hird/blob/main/examples/dispatch-hook.sh"><code>dispatch-hook.sh</code></a></td>
       <td>The <a href="#dispatch-hook">dispatch hook</a> hearing about every task that becomes claimable — filed, unblocked, review filed, sent back — with a log file standing in for the multiplexer.</td>
+    </tr>
+    <tr>
+      <td><a href="https://github.com/aoprisan/hird/blob/main/examples/events.sh"><code>events.sh</code></a></td>
+      <td><a href="#events">The board as a log</a>: a follower tails the trail while two harnesses work, then the same record is read after the fact, filtered by kind, and emitted as JSON. Makes its own throwaway git repository.</td>
     </tr>
     <tr>
       <td><a href="https://github.com/aoprisan/hird/blob/main/examples/protocol.sh"><code>protocol.sh</code></a></td>

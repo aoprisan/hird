@@ -1121,6 +1121,8 @@ hird scope <seq> [--path <glob>]… [--clear]
 hird agents [--all-projects]
 hird recuse <seq> --from <seq>,… [--reason <text>] | --clear
 hird record [--all-projects]
+hird events [--follow] [--json] [--kind <kind>,…] [--task <seq>] [--actor <name>]
+            [--limit N] [--all-projects]
 hird recall <seq> [--limit N]
 hird mem add <content> [--tags a,b] [--task <seq>] [--path <file>]…
 hird mem search [query] [--limit N] [--all-projects] [--include-superseded]
@@ -1134,9 +1136,9 @@ hird db-path
 `--body-file -` reads the task body from stdin, and `hird plan apply -` reads a
 whole plan from it, so either can be piped straight into the queue.
 
-`hird ls`, `hird show` and `hird agents` sweep the working tree as they render,
-so all three report what has actually moved alongside what was declared — and
-say plainly when the answer is "nothing".
+`hird ls`, `hird show`, `hird agents` and `hird events` sweep the working tree
+as they render, so all four report what has actually moved alongside what was
+declared — and say plainly when the answer is "nothing".
 
 ## The TUI
 
@@ -1191,6 +1193,48 @@ a task is somebody's review — which decides who can take it, and is exactly th
 thing you cannot tell from the title. Verdicts mark the cards they judged: a
 green `upheld` on done work that a review signed off, a yellow `sent back` on
 work that is open again because one did not.
+
+## The board as a log
+
+The TUI is a screen you sit at. `hird events` is the same view for everything
+that cannot sit at one — a second terminal, a tmux pane, a CI job, a script,
+or another agent:
+
+```
+$ hird events --follow
+14:31:52    #1  claimed        codex:9f2c        Port the config loader
+14:32:07    #1  witnessed      codex:9f2c        src/config.rs (modified)
+14:33:41    #2  claimed        claude-code:af31  Audit the config loader
+14:36:09    #1  completed      codex:9f2c        ported; env still wins over the file
+```
+
+Nothing new is recorded to serve it. Every mutation in hird already lands one
+row in an append-only trail — `hird show` replays one task's slice of it as
+history — and this is the same trail read sideways: across tasks, in the order
+things happened. One shot prints the last 30 and stops. `--follow` keeps
+reading at the TUI's cadence, and sweeps expired leases and the working tree
+on the way, so an expiry or a witnessed change lands in the feed even while no
+agent is calling and nobody has the board open. Stopping the tail costs
+nothing and forgets nothing, because the cursor is the trail itself.
+
+`--kind claimed,completed` narrows to the events you are waiting on,
+`--task 7` to one piece of work, `--actor codex:9f2c` to one agent's doings,
+and `--all-projects` widens to everything in the database. And because a feed
+for machines should not make them parse columns, `--json` makes each line one
+object:
+
+```
+$ hird events --json --kind ground_shifted,contended --follow
+{"cursor":41,"at":"2026-08-11T14:36:09.120Z","project":"/home/you/app","task":2,
+ "title":"Port the repository layer","actor":"codex:9f2c","kind":"ground_shifted",
+ "detail":"task 1 (Design the storage schema) sent back by review 5"}
+```
+
+That line is hird's whole integration surface as an emitter: pipe it into
+`jq`, a log file, a dashboard, or the thing that pages you. The `dispatch_hook`
+answers *wake somebody when work appears*; the feed answers everything after
+that — what the swarm did, as it does it, in a form both halves of your
+tooling can read.
 
 ## Projects
 
@@ -1309,6 +1353,8 @@ points `HIRD_DB` at a throwaway file, so running one cannot disturb your board.
 ./examples/footing.sh           # a fact, the file it came from, and that file rewritten
 ./examples/review.sh            # work that files its own review, barred to whoever did it
 ./examples/verdict.sh           # the sent-back loop, and the per-harness record it leaves
+./examples/events.sh            # the board as a log: a follower tails the trail
+                                #   while two harnesses work, then reads it as JSON
 ./examples/protocol.sh          # MCP 2026-07-28 on the wire: no handshake, and who the client says it is
 ```
 

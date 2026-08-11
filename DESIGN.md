@@ -1500,3 +1500,57 @@ work the queue) without the binary knowing herdr exists.
 No new MCP tool, no daemon, no schema change. The herald is a field on the
 config, two reads on the repo, and a `Command::spawn` at call sites that were
 already committing the event being announced.
+
+## 22. (v2.3) The feed — the board as a log
+
+Every mutation in hird has landed one row in `task_events` since v1.0, and
+until now that trail had exactly two readers, both narrow: `hird show`
+replays one task's slice of it as history, and the TUI polls the tables the
+trail is derived from. A human watching a swarm without a TUI — from a
+second terminal, a CI job, a log shipper, a script that pages someone — had
+nothing, and neither did any tool that wanted to build on hird rather than
+inside it. The record existed; the design gave nothing a way to read it in
+the order it was written.
+
+### One command, no new writes
+
+`hird events` is the trail read sideways: across tasks, joined to the task
+each row happened on, oldest first. Nothing is stored to serve it and no
+schema changes — the feed is a projection of what every mutation was
+already writing, which is what makes it free to stop, restart, filter, or
+never run at all.
+
+The cursor is the `task_events` rowid, not the ULID id and not the
+timestamp: two events written in one transaction share a millisecond (and
+ULIDs then sort by their random tail), while the rowid never ties and never
+runs backwards. `--follow` is a 500 ms poll — the TUI's cadence, against
+the same WAL file, for the same reason the TUI gets away with it — that
+asks for everything after the last rowid it printed. There is no
+subscription state anywhere: the cursor is the trail itself, so a follower
+that dies and returns has missed nothing.
+
+### The reader enforces what it reports
+
+A trail only carries what somebody enforced. Expiry is lazy (§4) and
+witnessing happens on sweeps (§12), so a feed that only read would go quiet
+exactly when the swarm does — an agent dies, nothing calls, the lease that
+should lapse is enforced by nobody, and the monitor watching for that shows
+nothing. So `--follow` does what any reader of the board does: it sweeps
+expired leases (keeping the outcome, so the herald hears, §21) and looks at
+the working tree at the TUI's witness interval. The one process guaranteed
+to be running while someone is monitoring is the monitor, which makes it
+the right process to enforce with.
+
+### A verb, not a tool
+
+The feed is deliberately not the thirteenth MCP tool. Agents already get
+the trail's contents pushed at them where it matters — `contended`,
+`ground_shifted`, `undeclared` ride along on calls they were making anyway
+(§12, §18) — and an agent polling a feed would be an agent burning context
+on events mostly about itself. The audiences that lacked a reader were
+humans without a TTY worth drawing in and machines that are not MCP
+clients, and both speak exit codes and lines: columns for one, `--json`
+NDJSON for the other. With the herald (§21) this closes the loop hird can
+honestly close without a daemon: the hook says *work is waiting*, the feed
+says *here is what happened*, and both are one config key or one command
+away from any tool the user already runs.
