@@ -33,6 +33,10 @@ pub struct Claimable {
     pub seq: i64,
     pub title: String,
     pub project: String,
+    /// Harnesses the queue will refuse this task to (§15), so a hook that can
+    /// address more than one agent knows whom not to wake. Empty for most
+    /// tasks; a filed review names whoever did the work under review.
+    pub recused: Vec<String>,
 }
 
 /// Repository over `task_deps`.
@@ -154,13 +158,15 @@ impl<'a> Deps<'a> {
                     seq: row.get(1)?,
                     title: row.get(2)?,
                     project: row.get(3)?,
+                    recused: Vec::new(),
                 },
             ))
         })?;
         let candidates = rows.collect::<rusqlite::Result<Vec<_>>>()?;
         let mut released = Vec::new();
-        for (id, claimable) in candidates {
+        for (id, mut claimable) in candidates {
             if unmet_blockers(self.conn, &id, clearance)?.is_empty() {
+                claimable.recused = super::recusal::barred_harnesses(self.conn, &id)?;
                 released.push(claimable);
             }
         }
@@ -184,13 +190,15 @@ impl<'a> Deps<'a> {
                             seq: row.get(1)?,
                             title: row.get(2)?,
                             project: row.get(3)?,
+                            recused: Vec::new(),
                         },
                     ))
                 },
             )
             .optional()?;
         match row {
-            Some((id, claimable)) if unmet_blockers(self.conn, &id, clearance)?.is_empty() => {
+            Some((id, mut claimable)) if unmet_blockers(self.conn, &id, clearance)?.is_empty() => {
+                claimable.recused = super::recusal::barred_harnesses(self.conn, &id)?;
                 Ok(Some(claimable))
             }
             _ => Ok(None),
@@ -994,6 +1002,29 @@ mod tests {
         assert_eq!(seqs, vec![freed]);
         assert_eq!(released[0].title, "freed");
         assert_eq!(released[0].project, PROJECT);
+        assert_eq!(released[0].recused, Vec::<String>::new());
+    }
+
+    /// A release read carries who the queue would refuse each task to, so a
+    /// hook that can pick between agents is told whom not to wake — a review
+    /// waiting behind a gate being the case where it matters.
+    #[test]
+    fn a_released_task_is_announced_with_whoever_it_is_recused_from() {
+        let db = db();
+        let gate = seed(&db, "gate");
+        let work = seed(&db, "port the loader");
+        finish(&db, work); // worked by a:1
+        let check = seed(&db, "check the port");
+        db.deps().add(check, gate, "cli").unwrap();
+        db.recusals()
+            .add(check, work, "no agent reviews its own work", "cli")
+            .unwrap();
+        finish(&db, gate);
+
+        let released = db.deps().released_by(gate, Clearance::Done).unwrap();
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].seq, check);
+        assert_eq!(released[0].recused, vec!["a"]);
     }
 
     /// The read happens after the finish commits, and loses gracefully: a

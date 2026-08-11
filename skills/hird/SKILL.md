@@ -52,6 +52,10 @@ agents and a human may be using it at the same time.
   usually comes from a configured `dispatch_hook`), treat it as "pick up that
   task": call `task_claim` for the number it names, and fall back to
   `task_next` if someone else got there first.
+- A claim refused for recusal ("a different harness") is not an error to
+  retry: the task is a review of your own harness's work. Call `task_next`
+  for something else, and mention the review needs other hands if no other
+  agent is around to take it.
 
 ## More hands, inside herdr
 

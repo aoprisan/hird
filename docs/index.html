@@ -340,6 +340,7 @@ dispatch_hook = <span class="s">'herdr agent prompt worker "hird task $HIRD_TASK
     <tr><td><code>HIRD_TASK</code></td><td>The task number.</td></tr>
     <tr><td><code>HIRD_TITLE</code></td><td>Its title.</td></tr>
     <tr><td><code>HIRD_PROJECT</code></td><td>Its project root.</td></tr>
+    <tr><td><code>HIRD_RECUSED</code></td><td>Harnesses the queue will refuse this task to, comma-separated; empty for tasks anybody may take. A filed review names whoever did the work under review.</td></tr>
     <tr><td><code>HIRD_DB</code></td><td>The database, so the hook's own <code>hird</code> calls read the same board.</td></tr>
   </tbody>
 </table>
@@ -360,6 +361,22 @@ dispatch_hook = <span class="s">'herdr agent prompt worker "hird task $HIRD_TASK
   for the redo — with you watching the TUI instead of carrying prompts between
   terminals.
 </p>
+
+<p>
+  One announcement in that loop is not for just anybody, and the hook is told
+  so. A hook that always prompts the same agent will, sooner or later, summon
+  it to a <a href="#review">review</a> of its own work — which the queue then
+  refuses, and the review sits silent again: the very seam the hook exists to
+  close, reopened for exactly the tasks where the second pair of eyes matters.
+  <code>HIRD_RECUSED</code> carries the fact only hird knows — which harness
+  the claim would turn away — so one line of shell routes the summons. Commas
+  cannot appear in a harness name, making the membership test safe:
+</p>
+
+<pre><code>dispatch_hook = <span class="s">'''
+worker=claude; case ",$HIRD_RECUSED," in *,claude-code,*) worker=codex;; esac
+herdr agent prompt "$worker" "hird task $HIRD_TASK is ready; work the hird queue."
+'''</span></code></pre>
 
 <p>
   Because hird only runs when somebody calls it, an announcement happens when
@@ -1846,8 +1863,10 @@ dispatch_hook = <span class="s">""</span></code></pre>
   command at a terminal multiplexer that can address agents, such as
   <a href="https://herdr.dev">herdr</a> (<code>herdr agent prompt …</code>),
   and idle agents get summoned to pull work the moment it exists. hird decides
-  <em>what</em> is workable and <em>who</em> may take it; the multiplexer owns
-  <em>where</em> agents run. Neither replaces the other.
+  <em>what</em> is workable and <em>who</em> may take it — and hands the hook
+  that second fact too, as <code>HIRD_RECUSED</code>, so a summons for a
+  review can be routed away from the harness that wrote the work; the
+  multiplexer owns <em>where</em> agents run. Neither replaces the other.
 </p>
 
 <h3>Do I have to declare dependencies or file scopes?</h3>

@@ -147,6 +147,23 @@ pub(super) fn recusals_in(conn: &Connection, task_id: &str) -> Result<Vec<Recusa
     Ok(out)
 }
 
+/// The harnesses currently barred from `task_id`, one name each.
+///
+/// This is the recusal read from the herald's side of the fence: not "may
+/// this actor claim?" but "who must the summons avoid?". Recusals whose work
+/// nobody has done yet bar nobody, exactly as [`bars_in`] would answer, so
+/// the two reads can never disagree about who is welcome.
+pub(super) fn barred_harnesses(conn: &Connection, task_id: &str) -> Result<Vec<String>> {
+    let mut out: Vec<String> = recusals_in(conn, task_id)?
+        .into_iter()
+        .filter_map(|recusal| recusal.worker)
+        .map(|worker| actor_harness(&worker).to_string())
+        .collect();
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
 /// The first recusal that bars `actor` from `task_id`, if any.
 pub(super) fn bars_in(conn: &Connection, task_id: &str, actor: &str) -> Result<Option<Recusal>> {
     let mine = actor_harness(actor);
@@ -642,6 +659,42 @@ mod tests {
             .get(finished.review.expect("a review was filed"))
             .unwrap();
         assert!(!filed.body.contains("```diff"), "{}", filed.body);
+    }
+
+    /// The herald's read of a filed review names the harness the queue will
+    /// refuse it to, so a hook that can pick between agents never summons
+    /// the author of the work under review.
+    #[test]
+    fn a_filed_review_is_announced_with_its_author_barred() {
+        let db = db();
+        let seq = task(&db, "Port the loader");
+        db.tasks().set_review(seq, true, "cli").unwrap();
+        db.scopes()
+            .declare(
+                seq,
+                &["src/loader.rs".to_string()],
+                "cli",
+                super::super::OnConflict::Report,
+            )
+            .unwrap();
+        db.tasks().claim(seq, "codex:9f2c", TTL).unwrap();
+        let finished = db.tasks().complete(seq, "codex:9f2c", "ported").unwrap();
+        let review = finished.review.expect("a review was filed");
+
+        let claimable = db
+            .deps()
+            .claimable(review, crate::model::Clearance::Done)
+            .unwrap()
+            .expect("the review is claimable");
+        assert_eq!(claimable.recused, vec!["codex"]);
+
+        // The work itself bars nobody: a sent-back redo may land on anyone,
+        // the author included.
+        let work = db
+            .deps()
+            .claimable(seq, crate::model::Clearance::Done)
+            .unwrap();
+        assert!(work.is_none(), "finished work is not claimable");
     }
 
     /// A review with nothing to read is busywork on somebody's board.

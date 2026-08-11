@@ -594,6 +594,7 @@ fn announce(herald: Option<&Herald>, db: &Db, config: &Config, cause: Cause, seq
         seq: claimable.seq,
         title: claimable.title,
         project: claimable.project,
+        recused: claimable.recused,
     });
 }
 

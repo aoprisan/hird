@@ -129,6 +129,9 @@ exhibit = true
 #   HIRD_TASK     the task number
 #   HIRD_TITLE    its title
 #   HIRD_PROJECT  its project root
+#   HIRD_RECUSED  harnesses the queue will refuse this task to, comma-
+#                 separated; empty for tasks anybody may take. A filed
+#                 review names whoever did the work under review.
 #   HIRD_DB       the database, so the hook's own `hird` calls read the same
 #                 board
 #
@@ -139,6 +142,16 @@ exhibit = true
 # (https://herdr.dev):
 #
 #   dispatch_hook = 'herdr agent prompt worker "hird task $HIRD_TASK (\"$HIRD_TITLE\") is ready; work the hird queue."'
+#
+# A hook that always prompts the same agent will, sooner or later, summon it
+# to a review of its own work — which the queue then refuses. `HIRD_RECUSED`
+# is what lets one line of shell route around that; commas cannot appear in a
+# harness name, so the membership test is safe:
+#
+#   dispatch_hook = '''
+#   worker=claude; case ",$HIRD_RECUSED," in *,claude-code,*) worker=codex;; esac
+#   herdr agent prompt "$worker" "hird task $HIRD_TASK (\"$HIRD_TITLE\") is ready; work the hird queue."
+#   '''
 #
 # examples/dispatch-hook.sh shows the announcements land; the FAQ covers the
 # herdr pairing.
