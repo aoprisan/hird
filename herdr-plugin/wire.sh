@@ -37,8 +37,13 @@ toml_escape() {
     printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
+# The trailing comment is how a later wiring recognises its own work: the
+# hook command itself is not evidence, since somebody else's hook may run a
+# script of their own called dispatch.sh.
+marker="# wired by the hird herdr plugin"
+
 hook="HERDR_BIN=$(shq "$herdr_bin") HIRD_HERDR_ROSTER=$(shq "$roster") exec sh $(shq "$root/dispatch.sh")"
-line="dispatch_hook = \"$(toml_escape "$hook")\" # wired by the hird herdr plugin"
+line="dispatch_hook = \"$(toml_escape "$hook")\" $marker"
 
 finish() {
     echo
@@ -55,7 +60,8 @@ echo
 if [ -f "$roster" ]; then
     echo "Roster already in place: $roster"
 else
-    cat >"$roster" <<'EOF'
+    mkdir -p "$conf_dir" 2>/dev/null
+    if cat >"$roster" <<'EOF'
 # Whom the hird summons may knock on, in preference order.
 #
 # One line per worker:
@@ -75,9 +81,19 @@ else
 worker claude claude-code
 worker codex codex,codex-cli
 EOF
-    echo "Seeded the worker roster: $roster"
+    then
+        echo "Seeded the worker roster: $roster"
+    else
+        # Not fatal: the relay falls back to the same two workers this file
+        # would have named. But the hook below will point at a roster that
+        # is not there, so say so rather than claim a seeding that failed.
+        rm -f "$roster"
+        echo "Could not write the roster: $roster"
+        echo "The relay will use its built-in claude/codex fallback until"
+        echo "that file exists."
+    fi
 fi
-sed -n 's/^worker /  worker /p' "$roster"
+[ -f "$roster" ] && sed -n 's/^worker /  worker /p' "$roster"
 echo
 
 # ---------------------------------------------------------------- the hook
@@ -87,17 +103,25 @@ if [ -f "$hird_conf" ]; then
     current=$(sed -n 's/^[[:space:]]*dispatch_hook[[:space:]]*=[[:space:]]*//p' "$hird_conf" | head -n 1)
 fi
 
+# The value with any trailing comment and trailing space trimmed off. A `#`
+# inside a quoted hook defeats it, which only ever turns an empty default
+# into something refused — the safe direction.
+bare=$(printf '%s' "${current%%#*}" | sed 's/[[:space:]]*$//')
+
 case $current in
     '')
-        mode=write ;;                       # no key yet
-    *dispatch.sh*)
-        mode=write ;;                       # ours, from an earlier wiring
+        mode="write" ;;                     # no key yet
+    *"$marker"*)
+        mode="write" ;;                     # ours, from an earlier wiring
     '"""'* | "'''"*)
-        mode=refuse ;;                      # multi-line: not ours, not touched
-    '""' | "''" | '"" #'* | "'' #"* | '""#'* | "''#"*)
-        mode=write ;;                       # the shipped empty default
+        mode="refuse" ;;                    # multi-line: not ours, not touched
     *)
-        mode=refuse ;;                      # a hook of your own
+        case $bare in
+            '""' | "''")
+                mode="write" ;;             # the shipped empty default
+            *)
+                mode="refuse" ;;            # a hook of your own
+        esac ;;
 esac
 
 if [ "$mode" = refuse ]; then
