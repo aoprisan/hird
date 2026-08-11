@@ -11,23 +11,31 @@ command and not an integration"). The question is what, if anything, comes
 next: where the current pairing is thin, which of herdr's surfaces are worth
 building against, and which are traps.
 
+One ground rule of the original design is treated as negotiable here: the
+no-daemon rule. hird's owner has said the project can be flexible on that, so
+this assessment evaluates resident options on their merits instead of ruling
+them out at the door. The line that is *not* treated as negotiable is
+coupling: whatever runs, hird's binary should still not know herdr's name.
+
 **Summary of the recommendation:** keep the binary ignorant of herdr, exactly
 as §21 decided — but the pairing as shipped leans on a one-line hook that
-targets a fixed agent name and treats every event the same, and that leaves
-real value on the table. Close the gap with four small things, none of which
-puts herdr in hird's dependency graph: (1) a reference dispatch script in
-`examples/` that picks an idle agent instead of naming one, routes reviews away
-from the recused harness, and falls back to a herdr notification when nobody is
-idle; (2) one new environment variable in the announcement, `HIRD_RECUSED`, so
-any hook can do that routing without guessing; (3) a paragraph of skill
-guidance teaching agents inside herdr to report the task they hold as pane
-metadata, so the herdr sidebar shows the board's state per agent; (4) later,
-and in its own repository, a herdr *plugin* that bundles the TUI as a pane, an
-events-feed bridge, and the dispatch wiring — herdr's plugin system is the
-right home for every piece of hird/herdr glue that wants to be long-lived,
-because herdr is already the daemon that hird refuses to be. Worktree-per-task
-orchestration is the one tempting integration to explicitly defer: it
-quietly breaks both the witness and project scoping.
+targets a fixed agent name, treats every event the same, and fires exactly
+once, and that leaves real value on the table. Close the gap in five moves,
+none of which puts herdr in hird's dependency graph: (1) a reference dispatch
+script in `examples/` that picks an idle agent instead of naming one, routes
+reviews away from the recused harness, and falls back to a herdr notification
+when nobody is idle; (2) one new environment variable in the announcement,
+`HIRD_RECUSED`, so any hook can do that routing without guessing; (3) a
+paragraph of skill guidance teaching agents inside herdr to report the task
+they hold as pane metadata, so the herdr sidebar shows the board's state per
+agent; (4) with the daemon rule bent, an *optional resident herald* — `hird
+herald`, a foreground command that tails the board's own feed and re-announces
+work that stays unclaimed, which is the piece a fire-and-forget hook can never
+be: dispatch that survives the moment everyone was busy; (5) later, and in its
+own repository, a herdr *plugin* that bundles the TUI as a pane, an
+events-feed bridge, and the herdr-native half of matchmaking (summon-on-idle).
+Worktree-per-task orchestration is the one tempting integration to explicitly
+defer: it quietly breaks both the witness and project scoping.
 
 ---
 
@@ -153,8 +161,22 @@ human running three agents under herdr sees `working / working / idle` and has
 to open the TUI to learn *which task* each agent holds. The data is all in the
 claim results already; only the last foot of plumbing is missing.
 
-None of these are defects in the herald. They are the cost of the example hook
-being one line, and they are all addressable without touching §21's rule.
+**Gap 6 — dispatch is edge-triggered on one side only.** This is the
+structural one, and the only one a better hook cannot fix. hird announces at
+the moment *work becomes ready*; nothing anywhere announces the symmetric
+moment *hands become free*. An announcement that fires while every agent is
+busy or absent is spent — queued into a busy agent's input at best, a
+one-time toast at worst — and when an agent goes idle ten minutes later with
+that task still open on the board, silence. The skill papers over it ("call
+`task_next` until nothing is workable"), but that discipline ends when the
+agent's turn ends. Fire-and-forget can summon hands to work; it cannot bring
+work to hands. Closing this requires something resident on one side of the
+seam or the other — which is exactly the flexibility now on the table, and
+§5 below takes it up.
+
+Gaps 1–5 are not defects in the herald; they are the cost of the example hook
+being one line, and all are addressable without touching §21's rule. Gap 6 is
+a limit of fire-and-forget itself.
 
 ## 4. Options
 
@@ -228,9 +250,10 @@ cooperation.
 
 ### O4 — a herdr plugin, in its own repository — recommended later
 
-Everything above is fire-and-forget because hird refuses to be resident. herdr
-does not refuse; it is a server with a plugin system whose manifest was built
-for exactly this shape of guest. A `hird-herdr` plugin (separate repo,
+Everything above is fire-and-forget. herdr, by contrast, is a server with a
+plugin system whose manifest was built for exactly this shape of guest — so
+whatever the daemon rule does or doesn't allow hird itself (§5), the
+herdr-native resident pieces belong here. A `hird-herdr` plugin (separate repo,
 installable from the herdr marketplace, so neither project carries the other)
 could bundle:
 
@@ -243,7 +266,8 @@ could bundle:
   `--follow` sweeps, so the bridge also keeps lease expiry enforced while it
   watches) and turns selected events into `notification.show` toasts, pane
   tokens (the reliable O3), and optionally an `agent.view.set` projection
-  ("agents holding hird tasks first").
+  ("agents holding hird tasks first"). With the daemon rule bent, the bridge
+  is also where herdr-native *matchmaking* lives — see §5.
 - **The dispatch wiring**: ship O1's script inside the plugin and let its
   install step be the thing that tells the user what `dispatch_hook` line to
   set (hird's config stays the user's to edit; the plugin should not write it).
@@ -287,11 +311,75 @@ faster and more reliable than shelling out — and is exactly the integration
 §21 already declined, for reasons that still hold: hird would inherit herdr's
 protocol evolution, every non-herdr user would carry the coupling, and the
 command-line seam already reaches the same socket. Nothing observed in herdr
-0.8.0 changes that calculus. The plugin (O4) gets residency without coupling;
-the hook gets events out without a daemon. There is no remaining job for a
+0.8.0 changes that calculus, and neither does flexibility on the daemon rule —
+residency and coupling are separate questions, and a resident hird process can
+shell out to `herdr` exactly as cheaply as a hook can. The plugin (O4) gets
+herdr-native residency without coupling. There is no remaining job for a
 native client.
 
-## 5. Cross-cutting cautions
+## 5. The daemon rule, bent
+
+Everything in §4 was written inside the no-daemon rule. Relaxing it does not
+reopen O6 — coupling stays out — but it does reopen gap 6, the one problem
+fire-and-forget structurally cannot solve. The question becomes: *where should
+the resident thing live?* There are two honest answers, and they are not
+rivals.
+
+### O7 — a resident herald: `hird herald` ★ recommended once the rule bends
+
+A new foreground command — run it in a pane, under tmux, under systemd,
+nowhere — that makes the herald persistent instead of momentary. Sketch:
+
+- Tail the board the way the TUI and `hird events --follow` already do: the
+  v2.3 feed's rowid cursor is crash-safe, and `--follow` already sweeps
+  expired leases and runs the witness, so a resident herald also makes expiry
+  and witnessing *timely* instead of traffic-driven — a quiet second benefit
+  the lazy design has always traded away.
+- Keep a small in-memory picture of which announced tasks are still claimable
+  (re-read from the committed board, same rule as today), and **re-announce
+  what stays unclaimed** through the same `dispatch_hook`, with backoff
+  (say 1m, 2m, 4m, capped) and the attempt count in the environment
+  (`HIRD_EVENT=unclaimed`, `HIRD_WAITING_SECS`, `HIRD_ATTEMPT`), so a hook
+  can escalate — prompt on the first pass, notify a human on the third.
+- Stop re-announcing the moment the task is claimed, done, or cancelled; the
+  feed says so within its 500 ms poll.
+
+What this buys, herdr or no herdr: the everyone-was-busy case heals itself
+(an agent that goes idle is re-summoned within one backoff step), prompt
+storms can be paced at one summoning point instead of N hook processes, and
+the notification fallback becomes an *escalation* rather than a coin-flip.
+What it deliberately does not do: decide anything. It still only says "this
+task is claimable, still" — scheduling stays in the graph, the hook stays the
+user's, and the binary stays ignorant of what is listening.
+
+The design cost is real but bounded. It is hird's first long-running process,
+so it needs the multi-instance question answered (two heralds re-announcing
+doubles every summons — simplest is an advisory single-instance lock next to
+the database), and the no-daemon principle has to be restated rather than
+deleted: the queue must stay *correct and complete* with no herald running —
+same board, same claims, same lazy expiry — the herald only makes it
+prompter. That restated rule ("no *required* daemon") preserves everything §2
+was actually protecting: nothing to install, nothing to configure, nothing
+whose absence breaks a claim.
+
+### The herdr-side daemon: what the plugin (O4) still owns
+
+`hird herald` is deliberately blind to the other edge: it retries on a clock
+because, being herdr-agnostic, it cannot *see* an agent go idle. herdr can —
+`events.subscribe` pushes `pane.agent_status_changed` the moment it happens —
+so true edge-triggered matchmaking ("agent turned idle → is anything
+claimable? → summon *this* agent, kind-aware, recusal-aware via
+`HIRD_RECUSED`") belongs in the plugin's bridge process, alongside the feed →
+tokens/notification plumbing it already carries in §4. The two compose
+cleanly with one ownership rule: **whoever prompts, owns prompting.** When
+the plugin's matchmaker is running, the user's `dispatch_hook` should point
+at it (or at nothing), and `hird herald` becomes the generic fallback for
+every non-herdr setup — retry cadence for the many, idle-edge precision for
+herdr users. What must not happen is both summoning independently; the
+assessment's concrete guardrail is that the plugin's install instructions
+configure the whole chain, not one link of it.
+
+## 6. Cross-cutting cautions
 
 - **Silent failure is the deal.** The herald swallows hook errors so a broken
   hook can never fail a completion (src/herald.rs). That makes the *hook's*
@@ -318,21 +406,25 @@ native client.
   named pipes and PowerShell hooks. The pairing is effectively Unix-only
   today — a known limitation to document, not to engineer around yet.
 
-## 6. Recommendation, in order
+## 7. Recommendation, in order
 
 | # | What | Where | Size | Closes |
 | --- | --- | --- | --- | --- |
 | 1 | `HIRD_RECUSED` in `review_filed` announcements (O2) | hird, `src/herald.rs` + call site | ~a dozen lines | gap 2 |
 | 2 | `examples/herdr-dispatch.sh` reference hook (O1) | hird, `examples/` + docs | one script | gaps 1, 3, 4 |
 | 3 | Skill paragraph: pane-metadata tokens on claim/finish (O3) | hird, `skills/hird/SKILL.md` | one paragraph | gap 5 |
-| 4 | `hird-herdr` plugin: TUI pane, feed bridge, dispatch wiring (O4) | new repo, herdr marketplace | small project | gap 5 reliably, discovery |
-| 5 | FAQ line on worktrees (O5's honest answer) | hird, docs | one paragraph | expectation-setting |
+| 4 | `hird herald`: resident re-announcement with backoff (O7) | hird, new subcommand on the feed | one design section + modest code | gap 6, everywhere |
+| 5 | `hird-herdr` plugin: TUI pane, feed bridge, idle-edge matchmaking (O4 + §5) | new repo, herdr marketplace | small project | gap 5 reliably, gap 6 precisely, discovery |
+| 6 | FAQ line on worktrees (O5's honest answer) | hird, docs | one paragraph | expectation-setting |
 
 Items 1–3 are a single small PR's worth of work and finish what §21 started:
 the queue can already speak; after them, it also says the one fact only it
 knows (who is recused), the recommended listener actually listens (idle
 selection, notification fallback), and the human can see the board from the
-sidebar. Item 4 is where any future appetite for deeper integration should be
-spent — on herdr's side of the line, where the daemon already lives. The
-binary itself needs nothing: hird's half of this pairing was, it turns out,
-already built.
+sidebar. Item 4 is the one the relaxed daemon rule unlocks, and it is worth a
+short design pass of its own before code — the multi-instance lock and the
+restated principle ("no *required* daemon: the board is correct with no
+herald running, only slower to be heard") are the load-bearing parts. Item 5
+is where herdr-specific ambition should be spent — on herdr's side of the
+line, where the idle edge is visible — with one ownership rule holding the
+whole chain together: whoever prompts, owns prompting.
