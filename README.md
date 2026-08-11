@@ -57,7 +57,10 @@ work a verdict sent back, each arrives at an idle agent with nobody carrying
 it there. And because a filed review is announced with its author's harness
 in `HIRD_RECUSED`, one `case` in the hook routes the summons to a different
 agent than the one the claim would turn away — the review loop runs on a
-swarm of two without ever knocking on the wrong door.
+swarm of two without ever knocking on the wrong door. That pairing also
+ships packaged, as a herdr plugin — `herdr plugin install
+aoprisan/hird/herdr-plugin` wires the hook, keeps a worker roster, and puts
+the board a keypress away; see [herdr-plugin/](herdr-plugin/).
 
 No daemon. No server. No accounts.
 

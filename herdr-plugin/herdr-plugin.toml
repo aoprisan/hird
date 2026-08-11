@@ -1,0 +1,51 @@
+# The hird plugin for herdr (https://herdr.dev).
+#
+# hird is pull: agents ask for work, and a task that becomes ready while
+# every agent is idle waits in silence. herdr can address an idle agent.
+# This plugin is the pairing, packaged: a board pane, a summons action,
+# and a popup that wires hird's dispatch_hook to a relay that routes
+# around recusal.
+#
+#   herdr plugin install aoprisan/hird/herdr-plugin
+#   herdr plugin pane open --plugin hird --entrypoint wire
+
+id = "hird"
+name = "hird"
+version = "0.1.0"
+min_herdr_version = "0.7.4"
+description = "The hird queue under herdr: watch the board, wire the dispatch hook, summon idle agents to claimable work."
+platforms = ["linux", "macos"]
+
+# One look at the pairing's posture, on the record, every time a server
+# starts: is hird installed, is the hook wired, does the roster exist.
+# It changes nothing; `herdr plugin log list --plugin hird` reads it.
+[[startup]]
+command = ["sh", "doctor.sh"]
+
+# Wake a worker by hand: walk the roster, prompt the first agent that
+# answers to work the hird queue. For the queue that filled while the
+# hook was not yet wired, or the summons nobody heard.
+[[actions]]
+id = "summon"
+title = "Summon a worker to the hird queue"
+contexts = ["global", "workspace"]
+command = ["sh", "summon.sh"]
+
+# The board, over whatever you were looking at. Opens `hird tui` in the
+# focused project and puts the layout back when it closes.
+[[panes]]
+id = "board"
+title = "hird board"
+placement = "overlay"
+command = ["sh", "board.sh"]
+
+# Setup, watched: seed the worker roster, point hird's dispatch_hook at
+# the relay, and say exactly what was written where. Refuses to clobber
+# a hook it did not write.
+[[panes]]
+id = "wire"
+title = "Wire the hird dispatch hook"
+placement = "popup"
+width = "80%"
+height = "80%"
+command = ["sh", "wire.sh"]

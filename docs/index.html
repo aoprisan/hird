@@ -389,6 +389,15 @@ herdr agent prompt "$worker" "hird task $HIRD_TASK is ready; work the hird queue
   <a href="https://github.com/aoprisan/hird/blob/main/examples/dispatch-hook.sh">examples/dispatch-hook.sh</a>
   shows every announcement landing, no multiplexer required.
 </p>
+
+<p>
+  Under herdr, the whole pairing also ships packaged as a
+  <a href="https://github.com/aoprisan/hird/tree/main/herdr-plugin">herdr plugin</a>:
+  <code>herdr plugin install aoprisan/hird/herdr-plugin</code> wires the hook
+  for you, keeps the worker roster in a config file instead of a shell
+  one-liner, falls through to the next worker when an agent is gone, and puts
+  the <a href="#tui">board</a> in an overlay pane.
+</p>
 </section>
 
 <section id="harnesses">
@@ -1867,6 +1876,9 @@ dispatch_hook = <span class="s">""</span></code></pre>
   that second fact too, as <code>HIRD_RECUSED</code>, so a summons for a
   review can be routed away from the harness that wrote the work; the
   multiplexer owns <em>where</em> agents run. Neither replaces the other.
+  Under herdr the pairing is one install:
+  <code>herdr plugin install aoprisan/hird/herdr-plugin</code> — see
+  <a href="https://github.com/aoprisan/hird/tree/main/herdr-plugin">herdr-plugin/</a>.
 </p>
 
 <h3>Do I have to declare dependencies or file scopes?</h3>
