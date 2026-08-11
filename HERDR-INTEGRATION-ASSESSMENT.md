@@ -209,7 +209,7 @@ CLI JSON (`herdr agent list`, `agent prompt`, `notification show`), and herdr
 documents protocol-stability checking (`herdr status`) if the script ever
 needs to be defensive. Closes gaps 1, 3, 4, and (with O2) 2.
 
-### O2 — announce the recusal: `HIRD_RECUSED` ★ recommended, the one binary change
+### O2 — announce the recusal: `HIRD_RECUSED` ★ recommended, the smallest binary change
 
 Add one variable to the `review_filed` announcement's environment: the harness
 name barred from the review (empty otherwise). The completing transaction that
