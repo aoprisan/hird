@@ -20,7 +20,7 @@ fn hooked_sandbox() -> (Sandbox, PathBuf) {
     let sandbox = Sandbox::new();
     let log = sandbox.dir.path().join("herald.log");
     sandbox.write_config(&format!(
-        "dispatch_hook = \"echo \\\"$HIRD_EVENT $HIRD_TASK $HIRD_TITLE\\\" >> {}\"\n",
+        "dispatch_hook = \"echo \\\"$HIRD_EVENT $HIRD_TASK $HIRD_TITLE [$HIRD_RECUSED]\\\" >> {}\"\n",
         log.display()
     ));
     (sandbox, log)
@@ -138,11 +138,15 @@ fn a_finish_announces_the_dependents_it_released_and_the_review_it_filed() {
         .unwrap();
     let review = done["review_filed"].as_i64().expect("a review was filed");
 
-    // One finish, two announcements: the dependent it unblocked, and the
-    // review it filed — itself an open task, waiting for a harness that did
-    // not do the work.
-    wait_for(&log, &format!("unblocked {dependent} use the loader"));
-    wait_for(&log, &format!("review_filed {review}"));
+    // One finish, two announcements: the dependent it unblocked — for anyone,
+    // so `HIRD_RECUSED` is empty — and the review it filed, announced with
+    // the author's harness barred so a routing hook never summons the one
+    // agent the queue is about to turn away.
+    wait_for(&log, &format!("unblocked {dependent} use the loader []"));
+    wait_for(
+        &log,
+        &format!("review_filed {review} Review: port the loader [claude-code]"),
+    );
 
     // A sent-back verdict announces the reopened work.
     let mut codex = McpSession::start(&sandbox, "codex");
@@ -157,7 +161,9 @@ fn a_finish_announces_the_dependents_it_released_and_the_review_it_filed() {
             }),
         )
         .unwrap();
-    wait_for(&log, &format!("sent_back {gate} port the loader"));
+    // The reopened work bars nobody — a redo may land on anyone, its author
+    // included.
+    wait_for(&log, &format!("sent_back {gate} port the loader []"));
 
     claude.shutdown();
     codex.shutdown();

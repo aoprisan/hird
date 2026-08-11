@@ -1554,3 +1554,57 @@ NDJSON for the other. With the herald (§21) this closes the loop hird can
 honestly close without a daemon: the hook says *work is waiting*, the feed
 says *here is what happened*, and both are one config key or one command
 away from any tool the user already runs.
+
+## 23. (v2.4) The routed summons — the herald says whom a task is not for
+
+The herald (§21) closed the noticing seam: work that becomes claimable is
+announced, and under a multiplexer like herdr the announcement is a summons.
+But the flagship pairing — one config line, one worker —
+
+    dispatch_hook = 'herdr agent prompt worker "hird task $HIRD_TASK is ready; work the hird queue."'
+
+reopens that seam for exactly the tasks where a second pair of eyes matters.
+A `review_filed` announcement is, by construction, a task the queue will
+refuse to the harness that did the work (§15). A hook that always prompts the
+same agent will sooner or later summon the author to its own review; the
+claim is refused, the agent shrugs and takes something else (or nothing), and
+the review sits on the board, correct and silent — waiting for the human the
+herald existed to relieve. The hook could not route around this because it
+was missing one fact, and it is the fact hird is uniquely positioned to know:
+a harness cannot see another harness's sessions, but hird recorded who held
+the lease.
+
+### One more variable, not a router
+
+`HIRD_RECUSED` joins the announcement's environment: the harnesses the queue
+would refuse the task to, comma-separated, empty for the tasks anybody may
+take. It is read off the same recusal edges the claim will consult
+(`worker_of` resolution included, so a recusal on unworked tasks bars nobody
+here exactly as it bars nobody there — the announcement and the refusal can
+never disagree). A filed review therefore arrives naming its author's
+harness, and one `case` in the hook picks different hands:
+
+    worker=claude; case ",$HIRD_RECUSED," in *,claude-code,*) worker=codex;; esac
+    herdr agent prompt "$worker" "hird task $HIRD_TASK is ready; work the hird queue."
+
+The comma is safe as a separator because identity sanitization now strips it
+from harness names, alongside the colon it already stripped: a name that
+could carry a comma could forge an entry in the list.
+
+The alternative was a roster: hird's config names the agents on duty and
+their wake commands, and hird picks. Rejected for the same reason §21
+rejected "hird talks to herdr" — the moment hird chooses whom to wake, it
+owns liveness, addressing, and a mapping from harness names to panes,
+which is to say it has become the scheduler-daemon the design forbids,
+with a config schema standing in for the protocol. The decision stays
+where §21 put every decision: in the user's command line. hird contributes
+the one input the command line could not compute — who is barred — and
+remains ignorant of what, if anything, the hook does with it.
+
+### Still nothing new to operate
+
+No new tool, no daemon, no schema change. `Claimable` — the form the herald
+already announced in — carries the barred harnesses, filled by the same two
+repo reads that screen every announcement, and the skill now tells a
+summoned agent what a recusal refusal means: not an error to retry, but a
+task that was never for it.

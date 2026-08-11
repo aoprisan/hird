@@ -38,7 +38,7 @@ mkdir -p "$XDG_CONFIG_HOME/hird"
 
 log="$(mktemp -d)/herald.log"
 cat >"$XDG_CONFIG_HOME/hird/config.toml" <<EOF
-dispatch_hook = "echo \"\$HIRD_EVENT #\$HIRD_TASK \$HIRD_TITLE\" >> $log"
+dispatch_hook = "echo \"\$HIRD_EVENT #\$HIRD_TASK \$HIRD_TITLE [\$HIRD_RECUSED]\" >> $log"
 EOF
 cat "$XDG_CONFIG_HOME/hird/config.toml"
 
@@ -80,7 +80,10 @@ $(call 2 task_complete "{\"seq\": $gate, \"result\": \"Ported. Precedence unchan
 JSON
 
 herald_said "unblocked #$blocked"
-herald_said "review_filed"
+# The review's announcement carries the one fact only hird knows: whose work
+# it is, and so whom the queue will refuse it to. A hook that can address
+# more than one agent routes on HIRD_RECUSED instead of waking the author.
+herald_said "review_filed.*\[claude-code\]"
 review=$(sed -n 's/^review_filed #\([0-9]*\).*/\1/p' "$log")
 
 # ------------------------------------------------------------- the loop closes
@@ -107,14 +110,27 @@ say "next"
 
 cat <<EOF
 Each line above was one detached run of the configured command, told about one
-claimable task through HIRD_EVENT, HIRD_TASK, HIRD_TITLE, HIRD_PROJECT and
-HIRD_DB. Two events did not appear because nothing here caused them: released
-(a holder handing work back) and lease_expired (a holder going quiet — expiry
-is enforced lazily, and announced by the next queue call that notices it).
+claimable task through HIRD_EVENT, HIRD_TASK, HIRD_TITLE, HIRD_PROJECT,
+HIRD_RECUSED and HIRD_DB. Two events did not appear because nothing here
+caused them: released (a holder handing work back) and lease_expired (a
+holder going quiet — expiry is enforced lazily, and announced by the next
+queue call that notices it).
+
+Note the bracket on the review_filed line: the review arrived announced with
+[claude-code], the harness that did the work and the one the queue will
+refuse it to. Everything else said [] — anybody's to take.
 
 Point the same key at your multiplexer and the log lines become summonses:
 
   dispatch_hook = 'herdr agent prompt worker "hird task \$HIRD_TASK is ready; work the hird queue."'
+
+And with two agents on the multiplexer, HIRD_RECUSED is what keeps a summons
+from knocking on the wrong door — route the review to hands that may take it:
+
+  dispatch_hook = '''
+  worker=claude; case ",\$HIRD_RECUSED," in *,claude-code,*) worker=codex;; esac
+  herdr agent prompt "\$worker" "hird task \$HIRD_TASK is ready; work the hird queue."
+  '''
 
 Watch the same database live:  HIRD_DB=$HIRD_DB $HIRD_BIN tui
 Let agents pull work instead:  ./examples/swarm-plan.sh

@@ -119,11 +119,13 @@ fn short_session_id() -> String {
     ulid[ulid.len() - 4..].to_string()
 }
 
-/// Strip the colon (our separator) and whitespace from identity components.
+/// Strip our separators and whitespace from identity components: the colon
+/// splits `harness:session`, and the comma joins harness names in the
+/// herald's `HIRD_RECUSED` list.
 fn sanitize(raw: &str) -> String {
     raw.trim()
         .chars()
-        .filter(|c| !c.is_whitespace() && *c != ':')
+        .filter(|c| !c.is_whitespace() && *c != ':' && *c != ',')
         .collect()
 }
 
@@ -273,6 +275,14 @@ mod tests {
     fn colons_and_whitespace_cannot_forge_a_second_field() {
         let id = AgentId::new("cla ude:code", "af:31");
         assert_eq!(id.as_actor(), "claudecode:af31");
+    }
+
+    /// The comma joins harness names in `HIRD_RECUSED`, so a name carrying
+    /// one could smuggle a second entry into the herald's list.
+    #[test]
+    fn commas_cannot_forge_an_entry_in_the_recused_list() {
+        let id = AgentId::new("codex,claude-code", "af31");
+        assert_eq!(id.harness(), "codexclaude-code");
     }
 
     #[test]

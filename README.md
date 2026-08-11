@@ -49,11 +49,15 @@ redo has written over it.
 All of that is pull: agents ask, hird answers, and a task that becomes ready
 while nobody is asking waits in silence. One config key closes that seam
 without a daemon. Set `dispatch_hook` to a command and hird runs it, detached,
-the moment a task becomes claimable — which task, and why, in its
-environment. Point it at anything that can wake an agent — under
-[herdr](https://herdr.dev), `herdr agent prompt worker "work the hird queue"`
-— and the plan's next wave, the freshly filed review, the work a verdict sent
-back, each arrives at an idle agent with nobody carrying it there.
+the moment a task becomes claimable — which task, why, and whom the queue
+would refuse it to, in its environment. Point it at anything that can wake an
+agent — under [herdr](https://herdr.dev), `herdr agent prompt worker "work
+the hird queue"` — and the plan's next wave, the freshly filed review, the
+work a verdict sent back, each arrives at an idle agent with nobody carrying
+it there. And because a filed review is announced with its author's harness
+in `HIRD_RECUSED`, one `case` in the hook routes the summons to a different
+agent than the one the claim would turn away — the review loop runs on a
+swarm of two without ever knocking on the wrong door.
 
 No daemon. No server. No accounts.
 

@@ -10,7 +10,9 @@
 //! The herald closes that seam without opening the one the design forbids.
 //! It is not a scheduler and not a daemon: it is one configured command
 //! (`dispatch_hook` in `config.toml`), run at the moment a task becomes
-//! claimable, told which task and why, and then left entirely alone. What the
+//! claimable, told which task, why, and whom the queue would refuse it to
+//! (`HIRD_RECUSED` — so a summons never wakes the one agent a filed review
+//! is barred from), and then left entirely alone. What the
 //! command does — prompt an idle agent through a terminal multiplexer such as
 //! herdr, post a notification, append to a log, nothing — is the human's
 //! business. hird neither waits for it nor reads its answer, so the queue's
@@ -66,13 +68,19 @@ impl Cause {
     }
 }
 
-/// One announcement: task `seq` is claimable, and why.
+/// One announcement: task `seq` is claimable, why — and whom it is not for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Announcement {
     pub cause: Cause,
     pub seq: i64,
     pub title: String,
     pub project: String,
+    /// Harnesses the queue will refuse this task to. The claim would tell
+    /// them so anyway; telling the hook first means a summons that can pick
+    /// between agents never wakes one the queue is about to turn away —
+    /// which is every `review_filed` announcement under a hook that always
+    /// prompts the same worker.
+    pub recused: Vec<String>,
 }
 
 /// The configured messenger, or nothing.
@@ -104,9 +112,12 @@ impl Herald {
     /// environment and walk away.
     ///
     /// The command runs through `sh -c` with `HIRD_EVENT`, `HIRD_TASK`,
-    /// `HIRD_TITLE`, `HIRD_PROJECT` and `HIRD_DB` set. All three stdio
-    /// streams are closed: an MCP server's stdout is a JSON-RPC wire, and a
-    /// hook that inherited it could corrupt the session that fired it.
+    /// `HIRD_TITLE`, `HIRD_PROJECT`, `HIRD_RECUSED` and `HIRD_DB` set.
+    /// `HIRD_RECUSED` is comma-separated harness names — commas cannot appear
+    /// in a harness name, so `case ",$HIRD_RECUSED," in *,codex,*)` is a safe
+    /// membership test — and empty for the tasks anybody may take. All three
+    /// stdio streams are closed: an MCP server's stdout is a JSON-RPC wire,
+    /// and a hook that inherited it could corrupt the session that fired it.
     /// Failure to spawn is swallowed — the queue's work is already committed,
     /// and a broken hook must not turn a finished task into an error.
     pub fn announce(&self, a: &Announcement) {
@@ -117,6 +128,7 @@ impl Herald {
             .env("HIRD_TASK", a.seq.to_string())
             .env("HIRD_TITLE", &a.title)
             .env("HIRD_PROJECT", &a.project)
+            .env("HIRD_RECUSED", a.recused.join(","))
             .env(identity::DB_ENV, &self.db)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -196,11 +208,33 @@ mod tests {
             seq: 7,
             title: "port the loader".to_string(),
             project: "/repo".to_string(),
+            recused: Vec::new(),
         });
         assert_eq!(
             wait_for(&log),
             "unblocked 7 port the loader /repo /tmp/board.db"
         );
+    }
+
+    /// A hook that can address more than one agent routes on `HIRD_RECUSED`:
+    /// the names arrive comma-joined, and empty when anybody may claim.
+    #[test]
+    fn the_hook_is_told_whom_the_task_is_not_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("log");
+        let herald = Herald::new(
+            &format!("printf '[%s]' \"$HIRD_RECUSED\" > {}", log.display()),
+            Path::new("/tmp/board.db"),
+        )
+        .unwrap();
+        herald.announce(&Announcement {
+            cause: Cause::ReviewFiled,
+            seq: 8,
+            title: "Review: port the loader".to_string(),
+            project: "/repo".to_string(),
+            recused: vec!["claude-code".to_string(), "codex".to_string()],
+        });
+        assert_eq!(wait_for(&log), "[claude-code,codex]");
     }
 
     /// The hook is fire-and-forget: a command that cannot run does not turn
@@ -213,6 +247,7 @@ mod tests {
             seq: 1,
             title: "t".to_string(),
             project: "p".to_string(),
+            recused: Vec::new(),
         });
     }
 }

@@ -2229,6 +2229,7 @@ fn announcement(cause: Cause, claimable: Claimable) -> Announcement {
         seq: claimable.seq,
         title: claimable.title,
         project: claimable.project,
+        recused: claimable.recused,
     }
 }
 
