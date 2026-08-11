@@ -46,3 +46,11 @@ jobs:
           ./examples/swarm-plan.sh
           ./examples/dispatch-hook.sh
           ./examples/events.sh
+
+      # The herdr plugin has no build step, so nothing else would catch a
+      # syntax error in it before somebody's pane opens on one. Checked as
+      # POSIX sh, which is what the manifest asks herdr to run them with.
+      - name: herdr plugin scripts
+        run: |
+          sh -n herdr-plugin/*.sh
+          shellcheck --shell=sh herdr-plugin/*.sh
