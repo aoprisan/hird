@@ -24,7 +24,12 @@ use crate::identity;
 pub fn run(db: Db, config: Config) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let project = identity::resolve_project(&cwd);
-    let mut app = App::new(db.path().to_path_buf(), project, config);
+    // The board polls twice a second, which makes it the fastest sweeper in
+    // any running swarm and so usually the one that collects a dead agent's
+    // lease. Without a herald of its own it would collect that expiry and
+    // swallow the summons that should replace the agent.
+    let herald = config.herald(db.path());
+    let mut app = App::new(db.path().to_path_buf(), project, config).with_herald(herald);
     app.refresh(&db)?;
 
     let mut terminal = ratatui::init();

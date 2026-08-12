@@ -60,7 +60,8 @@ agent than the one the claim would turn away — the review loop runs on a
 swarm of two without ever knocking on the wrong door. That pairing also
 ships packaged, as a herdr plugin — `herdr plugin install
 aoprisan/hird/herdr-plugin` wires the hook, keeps a worker roster, and puts
-the board a keypress away; see [herdr-plugin/](herdr-plugin/).
+the board and the live feed a keypress away; see
+[herdr-plugin/](herdr-plugin/).
 
 No daemon. No server. No accounts.
 

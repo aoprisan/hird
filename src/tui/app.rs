@@ -263,6 +263,9 @@ pub struct App {
     pub task_seqs: BTreeMap<String, i64>,
 
     pub last_poll: DateTime<Utc>,
+    /// Set when a dispatch hook is configured, so the expiries this board's
+    /// own sweeps collect are announced rather than swallowed.
+    herald: Option<crate::herald::Herald>,
     /// Set when this project is somewhere the working tree can be watched.
     witness: Option<crate::witness::Witness>,
     last_look: DateTime<Utc>,
@@ -308,11 +311,22 @@ impl App {
             memory_selected: 0,
             task_seqs: BTreeMap::new(),
             last_poll: DateTime::from_timestamp(0, 0).unwrap_or_default(),
+            herald: None,
             witness: config_witness,
             last_look: DateTime::from_timestamp(0, 0).unwrap_or_default(),
             footed_ids: Vec::new(),
             last_footing: DateTime::from_timestamp(0, 0).unwrap_or_default(),
         }
+    }
+
+    /// Give the board the configured herald, if there is one.
+    ///
+    /// Separate from [`App::new`] because a test board announces to nothing
+    /// and the real one is the only caller that has a database path worth
+    /// handing a hook.
+    pub fn with_herald(mut self, herald: Option<crate::herald::Herald>) -> App {
+        self.herald = herald;
+        self
     }
 
     /// Look at the working tree, at most every [`WITNESS_INTERVAL`].
@@ -382,6 +396,12 @@ impl App {
     /// Cheap enough to run twice a second: four indexed queries against a WAL
     /// database that is usually idle.
     pub fn refresh(&mut self, db: &Db) -> anyhow::Result<()> {
+        // Before the reads, and keeping the outcome: every query below sweeps
+        // expired leases anyway, but a sweep reports each lapsed lease to
+        // exactly one sweeper, so sweeping inside `list` would collect the
+        // expiry and leave nobody to announce it. A board left open would
+        // then be the reason a dead agent's task is never handed on.
+        crate::herald::sweep_announcing(db, &self.config, self.herald.as_ref());
         let scope = self.scope();
         self.tasks = db.tasks().list(&scope, None)?;
         self.counts = db.tasks().counts(&scope)?;
@@ -1457,5 +1477,98 @@ mod tests {
             focus: 0
         }
         .is_text_entry());
+    }
+
+    /// Wait for the detached hook to write, or fail loudly.
+    fn wait_for(path: &std::path::Path) -> String {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Ok(contents) = std::fs::read_to_string(path) {
+                if !contents.is_empty() {
+                    return contents;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the board never announced {}",
+                path.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// The board polls twice a second, so in a swarm where the agents have
+    /// stopped calling it is the process that collects a dead holder's lease
+    /// — and a sweep reports each lapsed lease to exactly one sweeper. A board
+    /// that only swept would therefore be the reason nobody is ever summoned
+    /// to pick the work back up.
+    #[test]
+    fn the_board_announces_the_expiries_its_own_poll_collects() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("summons");
+        let config = Config {
+            dispatch_hook: format!(
+                "printf '%s %s' \"$HIRD_EVENT\" \"$HIRD_TASK\" > {}",
+                log.display()
+            ),
+            ..Config::default()
+        };
+
+        let db = Db::open_in_memory().unwrap();
+        let seq = seed(&db, "held by an agent that stopped answering");
+        db.tasks()
+            .claim(seq, "codex:9f2c", config.lease_ttl())
+            .unwrap();
+        // Back-dated rather than claimed with a zero TTL, which would land in
+        // the same millisecond as the sweep's own `now`.
+        db.conn()
+            .execute(
+                "UPDATE tasks SET lease_expires_at = ?1 WHERE seq = ?2",
+                rusqlite::params![
+                    crate::model::fmt_ts(Utc::now() - chrono::Duration::hours(1)),
+                    seq
+                ],
+            )
+            .unwrap();
+
+        let herald = config.herald(std::path::Path::new("/tmp/hird.db"));
+        assert!(herald.is_some(), "the test config configures a hook");
+        let mut app = App::new(PathBuf::from("/tmp/hird.db"), PROJECT.to_string(), config)
+            .with_herald(herald);
+        app.refresh(&db).unwrap();
+
+        assert_eq!(wait_for(&log), format!("lease_expired {seq}"));
+        assert_eq!(
+            app.tasks.iter().find(|t| t.seq == seq).map(|t| t.status),
+            Some(Status::Open),
+            "the expiry itself still happens"
+        );
+    }
+
+    /// A board with no hook configured must not pay for one, and must not
+    /// change what it shows: the expiry happens either way.
+    #[test]
+    fn a_board_without_a_hook_still_expires_the_lease() {
+        let (mut app, db) = fixture();
+        let seq = seed(&db, "held by an agent that stopped answering");
+        db.tasks()
+            .claim(seq, "codex:9f2c", Config::default().lease_ttl())
+            .unwrap();
+        db.conn()
+            .execute(
+                "UPDATE tasks SET lease_expires_at = ?1 WHERE seq = ?2",
+                rusqlite::params![
+                    crate::model::fmt_ts(Utc::now() - chrono::Duration::hours(1)),
+                    seq
+                ],
+            )
+            .unwrap();
+
+        app.refresh(&db).unwrap();
+
+        assert_eq!(
+            app.tasks.iter().find(|t| t.seq == seq).map(|t| t.status),
+            Some(Status::Open)
+        );
     }
 }

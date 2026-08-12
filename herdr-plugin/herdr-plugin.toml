@@ -2,9 +2,10 @@
 #
 # hird is pull: agents ask for work, and a task that becomes ready while
 # every agent is idle waits in silence. herdr can address an idle agent.
-# This plugin is the pairing, packaged: a board pane, a summons action,
-# and a popup that wires hird's dispatch_hook to a relay that routes
-# around recusal.
+# This plugin is the pairing, packaged: a board pane, a feed pane that
+# keeps announcing while the agents are quiet, a summons action, and a
+# popup that wires hird's dispatch_hook to a relay that routes around
+# recusal.
 #
 #   herdr plugin install aoprisan/hird/herdr-plugin
 #   herdr plugin pane open --plugin hird --entrypoint wire
@@ -13,7 +14,7 @@ id = "hird"
 name = "hird"
 version = "0.1.0"
 min_herdr_version = "0.7.4"
-description = "The hird queue under herdr: watch the board, wire the dispatch hook, summon idle agents to claimable work."
+description = "The hird queue under herdr: watch the board, follow the feed, wire the dispatch hook, summon idle agents to claimable work."
 platforms = ["linux", "macos"]
 
 # One look at the pairing's posture, on the record, every time a server
@@ -38,6 +39,16 @@ id = "board"
 title = "hird board"
 placement = "overlay"
 command = ["sh", "board.sh"]
+
+# The trail, live. Also the pairing's heartbeat: hird enforces an
+# expired lease from whichever process reads next, and announces it from
+# that same one, so a feed left open is what summons a replacement for an
+# agent that died with nobody else calling.
+[[panes]]
+id = "feed"
+title = "hird feed"
+placement = "overlay"
+command = ["sh", "feed.sh"]
 
 # Setup, watched: seed the worker roster, point hird's dispatch_hook at
 # the relay, and say exactly what was written where. Refuses to clobber

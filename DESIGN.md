@@ -202,7 +202,7 @@ Zero rows updated ⇒ claim failed; return the task's current status and holder 
   UPDATE tasks SET status='open', claimed_by=NULL, lease_expires_at=NULL, updated_at=?
   WHERE status IN ('claimed','in_progress') AND lease_expires_at < ?now;
   ```
-  and writes a `lease_expired` event per affected row. No background thread needed; the TUI's 500 ms poll makes expiry visible promptly.
+  and writes a `lease_expired` event per affected row. No background thread needed; the TUI's 500 ms poll makes expiry visible promptly — and, since v2.2 (§21), announces what that poll collected.
 - A claim by a dead agent therefore self-heals back to `open` within TTL.
 
 ### (v1.1) Readiness
@@ -1475,8 +1475,11 @@ released and the review it filed, a verdict announces the work it sent back
 `task_release`/`reopen`/`dep rm` announce what they put back in reach. Expiry
 has no write of its own — it is enforced lazily by sweeps (§4) — so it is
 announced by whichever sweep first notices. Since every queue-touching repo
-method already sweeps, every MCP tool and every CLI invocation performs that
-sweep *keeping the outcome* before its real work: in a working swarm the very
+method already sweeps, every MCP tool, every CLI invocation and every TUI
+refresh performs that sweep *keeping the outcome* before its real work — the
+board included precisely because it is the fastest sweeper in the room, and a
+sweep that discards its outcome does not leave the announcement for somebody
+else, it consumes it: in a working swarm the very
 next call any agent makes — a `task_update` heartbeat included — is the one
 that announces a dead colleague's task, whether or not that call then
 succeeds. The one cost is a small race on the claim path: a task whose own

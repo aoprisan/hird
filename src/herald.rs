@@ -31,6 +31,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use crate::config::Config;
+use crate::db::Db;
 use crate::identity;
 
 /// Why a task is being announced. Every cause means the same thing at the
@@ -158,6 +160,55 @@ impl Herald {
 pub fn announce(herald: Option<&Herald>, list: &[Announcement]) {
     if let Some(herald) = herald {
         herald.announce_all(list);
+    }
+}
+
+/// Tell the herald task `seq` is claimable, if it is and there is one.
+///
+/// Read back from the database rather than trusted from the caller: by the
+/// time this runs, an agent may already have taken the task, and announcing
+/// work that is no longer waiting would send a summoned agent to an empty
+/// queue.
+pub fn announce_claimable(
+    herald: Option<&Herald>,
+    db: &Db,
+    config: &Config,
+    cause: Cause,
+    seq: i64,
+) {
+    let Some(herald) = herald else {
+        return;
+    };
+    let Ok(Some(claimable)) = db.deps().claimable(seq, config.clearance()) else {
+        return;
+    };
+    herald.announce(&Announcement {
+        cause,
+        seq: claimable.seq,
+        title: claimable.title,
+        project: claimable.project,
+        recused: claimable.recused,
+    });
+}
+
+/// Heal expired leases and tell the herald what came back to the pool.
+///
+/// Expiry is the one cause with no write behind it, so it belongs to whoever
+/// reads next — and a sweep reports each lapsed lease to exactly one sweeper.
+/// Any process that polls the board therefore has to do both halves: sweeping
+/// without announcing does not leave the announcement for somebody else, it
+/// consumes it. Every reader that runs on a timer calls this — the CLI before
+/// its verb, `hird events --follow` on each poll, the TUI on each refresh — so
+/// whichever of them collects an expiry is the one that summons a replacement.
+pub fn sweep_announcing(db: &Db, config: &Config, herald: Option<&Herald>) {
+    if herald.is_none() {
+        return;
+    }
+    let Ok(outcome) = db.tasks().sweep_leases() else {
+        return;
+    };
+    for seq in outcome.expired {
+        announce_claimable(herald, db, config, Cause::LeaseExpired, seq);
     }
 }
 

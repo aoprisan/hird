@@ -1,8 +1,8 @@
 # The hird plugin for herdr
 
 **The [hird](https://github.com/aoprisan/hird) queue under
-[herdr](https://herdr.dev): watch the board, wire the dispatch hook, summon
-idle agents to claimable work.**
+[herdr](https://herdr.dev): watch the board, follow the feed, wire the
+dispatch hook, summon idle agents to claimable work.**
 
 hird is pull: agents ask for work, and a task that becomes ready while every
 agent is idle waits on the board in silence. hird's one push is the
@@ -33,6 +33,7 @@ and works on Linux and macOS.
 | Entrypoint | Kind | What it does |
 |---|---|---|
 | `board` | pane (overlay) | `hird tui` in the focused project, over whatever you were looking at. `herdr plugin pane open --plugin hird --entrypoint board` |
+| `feed` | pane (overlay) | `hird events --follow` in the focused project: the trail as it lands — and the process that keeps announcing while the agents are quiet. `herdr plugin pane open --plugin hird --entrypoint feed` |
 | `wire` | pane (popup) | The setup, narrated: seed the roster, write the hook, say what landed where. |
 | `summon` | action | Wake the first reachable roster worker to work the queue — for work that became ready while the hook was unwired. `herdr plugin action invoke hird.summon` |
 | startup | hook | One posture report per server start — hird present? hook wired? roster there? — in `herdr plugin log list --plugin hird`. |
@@ -47,6 +48,23 @@ type = "shell"
 command = "\"$HERDR_BIN_PATH\" plugin pane open --plugin hird --entrypoint board"
 description = "hird board"
 ```
+
+## The feed, and why one should be open
+
+hird has no daemon, which means a lease that runs out is not enforced by a
+timer — it is enforced by whichever process reads the queue next, and
+announced by that same process. Every announcement but this one rides on a
+write some agent was making anyway. This one has no write behind it: when a
+worker dies, the fact that its task is claimable again is only ever noticed
+by somebody reading.
+
+In a swarm that is working, somebody always is. In a swarm that has gone
+quiet — the last agent died holding the last task — nobody is, and the relay
+stays silent about exactly the case it exists for. `feed` is a reader that
+does not stop: `hird events --follow` sweeps every poll, announces what it
+collects through the hook, and prints the trail while it goes. Leave one open
+and a dead worker is replaced without you; close it and the queue is correct,
+current, and quiet again until something calls.
 
 ## The relay, and why it routes
 
@@ -107,5 +125,5 @@ default.
 
 The usual [herdr plugin guidance](https://herdr.dev/docs/plugins/#trust-and-security)
 applies: this is ordinary code running as your user. It is small on
-purpose — four short POSIX `sh` scripts, no build step, no dependencies —
+purpose — five short POSIX `sh` scripts, no build step, no dependencies —
 so the read before the install is a short one.
