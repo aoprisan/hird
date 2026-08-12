@@ -53,4 +53,5 @@ jobs:
       - name: herdr plugin scripts
         run: |
           sh -n herdr-plugin/*.sh
-          shellcheck --shell=sh herdr-plugin/*.sh
+          shellcheck --shell=sh herdr-plugin/*.sh .github/scripts/check-herdr-plugin.sh
+          .github/scripts/check-herdr-plugin.sh

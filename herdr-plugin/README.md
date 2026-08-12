@@ -25,8 +25,8 @@ plugin's relay. It replaces a hook it wrote before, treats hird's shipped
 `dispatch_hook = ""` as unset, and refuses to clobber a hook of your own —
 showing it next to the line you would add by hand instead.
 
-Needs `hird` on `PATH` ([install](https://github.com/aoprisan/hird#install))
-and works on Linux and macOS.
+Needs `hird` on `PATH` ([install](https://github.com/aoprisan/hird#install)),
+Herdr 0.7.5 or newer, and works on Linux and macOS.
 
 ## What you get
 
@@ -72,16 +72,19 @@ Once wired, every announcement hird makes — a task filed with nothing
 blocking it, unblocked by a finished dependency, reopened by a `sent_back`
 verdict, handed back, filed as a review, dropped by an expired lease —
 runs `dispatch.sh` with the announcement in its environment. The relay walks
-the roster in order and prompts, via `herdr agent prompt`, the first worker
+the roster in order and prompts, via `herdr agent prompt`, the first idle worker
 that clears two bars:
 
 - **Not recused.** `HIRD_RECUSED` names the harnesses the queue will refuse
   this task to — a filed review names whoever did the work under judgement.
   The relay skips those workers, so the review loop runs on a swarm of two
   without ever summoning the author to judge their own work.
-- **Actually there.** A prompt that fails — no such agent, agent gone —
-  falls through to the next worker instead of dying with the summons
-  undelivered.
+- **Idle and actually there.** A worker that is already working or blocked is
+  skipped, and a prompt that fails — no such agent, agent gone — falls through
+  to the next worker instead of dying with the summons undelivered. Relays are
+  serialized just through the prompt's transition to `working`, so a burst of
+  announcements spreads across idle workers instead of all observing the same
+  preferred worker before its state changes.
 
 If every worker is barred or unreachable the relay exits quietly: the task
 is still on the board, and the `summon` action or the next announcement
@@ -124,6 +127,7 @@ default.
 ## Trust
 
 The usual [herdr plugin guidance](https://herdr.dev/docs/plugins/#trust-and-security)
-applies: this is ordinary code running as your user. It is small on
-purpose — five short POSIX `sh` scripts, no build step, no dependencies —
-so the read before the install is a short one.
+applies: this is ordinary code running as your user. It is small on purpose —
+six short POSIX `sh` runtime scripts, no build step, no dependencies — so the
+read before the install is a short one. Its CI-only behavioral check lives in
+`.github/scripts/`.

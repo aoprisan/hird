@@ -20,11 +20,19 @@ roster=${HERDR_PLUGIN_CONFIG_DIR:-}/dispatch.conf
 
 summons="the hird queue has claimable work; work the hird queue."
 
+is_idle() {
+    state=$("$herdr" agent get "$1" 2>/dev/null) || return 1
+    printf '%s\n' "$state" |
+        grep -Eq '"agent_status"[[:space:]]*:[[:space:]]*"(idle|done)"'
+}
+
 try_roster() {
     while read -r kind agent _; do
         [ "$kind" = "worker" ] || continue
         [ -n "$agent" ] || continue
-        if "$herdr" agent prompt "$agent" "$summons" 2>/dev/null; then
+        is_idle "$agent" || continue
+        if "$herdr" agent prompt "$agent" "$summons" \
+            --wait --until working --timeout 5000 2>/dev/null; then
             echo "summoned $agent to the hird queue"
             exit 0
         fi

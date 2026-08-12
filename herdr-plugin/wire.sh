@@ -26,6 +26,7 @@ herdr_bin=${HERDR_BIN_PATH:-herdr}
 
 hird_conf="${XDG_CONFIG_HOME:-$HOME/.config}/hird/config.toml"
 roster="$conf_dir/dispatch.conf"
+lock="$conf_dir/dispatch.lock"
 
 # Quote for the shell that will run the hook line (`sh -c`, from hird).
 shq() {
@@ -42,7 +43,7 @@ toml_escape() {
 # script of their own called dispatch.sh.
 marker="# wired by the hird herdr plugin"
 
-hook="HERDR_BIN=$(shq "$herdr_bin") HIRD_HERDR_ROSTER=$(shq "$roster") exec sh $(shq "$root/dispatch.sh")"
+hook="HERDR_BIN=$(shq "$herdr_bin") HIRD_HERDR_ROSTER=$(shq "$roster") HIRD_HERDR_LOCK=$(shq "$lock") exec sh $(shq "$root/dispatch.sh")"
 line="dispatch_hook = \"$(toml_escape "$hook")\" $marker"
 
 finish() {
@@ -75,8 +76,8 @@ else
 # review of that agent's work is never routed back to its own door.
 # List every name the harness may report, comma-separated, no spaces.
 #
-# The relay prompts the first worker that is not recused and answers;
-# reorder the lines to change whom it tries first.
+# The relay prompts the first idle worker that is not recused and answers;
+# reorder the lines to change whom it tries first when several are idle.
 
 worker claude claude-code
 worker codex codex,codex-cli

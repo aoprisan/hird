@@ -17,8 +17,37 @@ else
 fi
 
 hird_conf="${XDG_CONFIG_HOME:-$HOME/.config}/hird/config.toml"
-if [ -f "$hird_conf" ] && grep -q '^[[:space:]]*dispatch_hook.*dispatch\.sh' "$hird_conf"; then
-    echo "dispatch_hook: wired to this plugin's relay"
+root=${HERDR_PLUGIN_ROOT:-}
+relay="$root/dispatch.sh"
+marker="# wired by the hird herdr plugin"
+
+# Reproduce wire.sh's two quoting layers so the health check identifies this
+# installed relay, not merely any user hook whose filename contains
+# `dispatch.sh`. It also catches a hook left pointing at an earlier managed
+# checkout after a reinstall moved the plugin root.
+shq() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+toml_escape() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+managed=
+if [ -f "$hird_conf" ]; then
+    managed=$(grep -F "$marker" "$hird_conf" | head -n 1)
+fi
+expected=$(toml_escape "$(shq "$relay")")
+
+if [ -n "$managed" ] && [ -f "$relay" ]; then
+    case $managed in
+        *"$expected"*)
+            echo "dispatch_hook: wired to this plugin's relay" ;;
+        *)
+            echo "dispatch_hook: stale plugin wiring — reopen the wire pane" ;;
+    esac
+elif [ -n "$managed" ]; then
+    echo "dispatch_hook: stale plugin wiring — reopen the wire pane"
 else
     echo "dispatch_hook: not wired — open the wire pane: herdr plugin pane open --plugin hird --entrypoint wire"
 fi

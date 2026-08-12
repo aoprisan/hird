@@ -794,6 +794,13 @@ impl App {
                 self.mode = Mode::Normal;
                 match created {
                     Ok(task) => {
+                        crate::herald::announce_claimable(
+                            self.herald.as_ref(),
+                            db,
+                            &self.config,
+                            crate::herald::Cause::Filed,
+                            task.seq,
+                        );
                         self.refresh(db)?;
                         self.column = Column::Open;
                         self.note(format!("added task {}", task.seq));
@@ -933,6 +940,15 @@ impl App {
         };
         match outcome {
             Ok(task) => {
+                if action == "reopen" {
+                    crate::herald::announce_claimable(
+                        self.herald.as_ref(),
+                        db,
+                        &self.config,
+                        crate::herald::Cause::Reopened,
+                        task.seq,
+                    );
+                }
                 self.refresh(db)?;
                 self.note(format!("task {} is now {}", task.seq, task.status));
             }
@@ -1480,21 +1496,55 @@ mod tests {
     }
 
     /// Wait for the detached hook to write, or fail loudly.
-    fn wait_for(path: &std::path::Path) -> String {
+    fn wait_for(path: &std::path::Path, needle: &str) -> String {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             if let Ok(contents) = std::fs::read_to_string(path) {
-                if !contents.is_empty() {
+                if contents.contains(needle) {
                     return contents;
                 }
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "the board never announced {}",
-                path.display()
+                "the board never announced {needle:?} to {}",
+                path.display(),
             );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+    }
+
+    /// The board is a writer as well as a reader: tasks filed or reopened
+    /// through it must wake the same workers as their CLI equivalents.
+    #[test]
+    fn the_board_announces_tasks_it_files_and_reopens() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("summons");
+        let config = Config {
+            dispatch_hook: format!(
+                "printf '%s %s\\n' \"$HIRD_EVENT\" \"$HIRD_TASK\" >> {}",
+                log.display()
+            ),
+            ..Config::default()
+        };
+        let db = Db::open_in_memory().unwrap();
+        let herald = config.herald(std::path::Path::new("/tmp/hird.db"));
+        let mut app = App::new(PathBuf::from("/tmp/hird.db"), PROJECT.to_string(), config)
+            .with_herald(herald);
+        app.refresh(&db).unwrap();
+
+        app.on_key(ch('a'), &db).unwrap();
+        type_text(&mut app, &db, "new work");
+        app.on_key(key(KeyCode::Enter), &db).unwrap();
+        wait_for(&log, "filed 1");
+
+        app.on_key(ch('c'), &db).unwrap();
+        app.column = Column::Stopped;
+        app.on_key(ch('r'), &db).unwrap();
+        let contents = wait_for(&log, "reopened 1");
+        assert_eq!(
+            contents.lines().collect::<Vec<_>>(),
+            ["filed 1", "reopened 1"]
+        );
     }
 
     /// The board polls twice a second, so in a swarm where the agents have
@@ -1537,7 +1587,10 @@ mod tests {
             .with_herald(herald);
         app.refresh(&db).unwrap();
 
-        assert_eq!(wait_for(&log), format!("lease_expired {seq}"));
+        assert_eq!(
+            wait_for(&log, &format!("lease_expired {seq}")),
+            format!("lease_expired {seq}")
+        );
         assert_eq!(
             app.tasks.iter().find(|t| t.seq == seq).map(|t| t.status),
             Some(Status::Open),
