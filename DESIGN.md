@@ -1682,6 +1682,26 @@ the task becomes claimable, so it announces `HIRD_EVENT=answered` after the
 transaction commits and after the ordinary claimability read-back. A concurrent
 claim wins quietly, as it does for every other cause.
 
+### Who notices
+
+The silence toward the hook has a cost worth stating plainly: every cause the
+herald announces means *this task is claimable now*, and a question is the one
+stall that is deliberately outside that promise. Nothing wakes anybody. A swarm
+can therefore go entirely idle behind unanswered questions, and only a human
+looking will know.
+
+So the human-facing surfaces carry it instead of the hook. `hird ls` and
+`hird graph` mark the row `awaits answer`; `hird show` prints the question and
+the exact command that resolves it; the board badges the card and, because a
+card can be off-screen in a column the eye is not on, counts them in the status
+bar — `· 2 awaiting you`, in the colour it uses for work that cannot move.
+`task_next` names them in `awaiting_answer` for the agent that asks, which is
+what makes an agent report the stall rather than conclude the queue is empty.
+
+A task can be waiting for an answer *and* for a dependency. It is reported in
+both places rather than only the first one checked: a human told only about the
+question would answer it and watch nothing move.
+
 ### Still twelve tools, and still six statuses
 
 `question` is an optional field on `task_release`; answered history rides on

@@ -17,7 +17,7 @@
 //! queue's version, and [`Applied::drifted`] says so rather than letting the
 //! difference pass unmentioned.
 
-use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use super::deps::{dependency_path, id_for_seq};
 use super::scope::{declare_in_tx, normalize_all, patterns_for_id, OnConflict};
@@ -93,7 +93,7 @@ impl<'a> Plans<'a> {
     /// only refusals left are ones the database knows about: a dependency that
     /// would close a cycle through an edge somebody added by hand.
     pub fn apply(&self, project: &str, plan: &Plan, actor: &str) -> Result<Applied> {
-        let tx = Transaction::new_unchecked(self.conn, TransactionBehavior::Immediate)?;
+        let tx = super::immediate_tx(self.conn)?;
         let now = now_ts();
         let mut applied = Applied::default();
         // Name → (task id, seq), for the dependency pass below. Built as tasks

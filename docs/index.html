@@ -679,6 +679,15 @@ open ──cancel (human)──► cancelled</code></pre>
   <code>HIRD_EVENT=answered</code>, and rides in the next claim beside the
   question. Releasing without a question remains an immediate handoff.
 </p>
+
+<p>
+  Nothing summons you to it: a question is the one stall no agent can clear,
+  so the dispatch hook stays silent rather than waking somebody who would
+  only hand it around again. It waits on you noticing instead, which is why
+  <code>hird ls</code> marks the row, <code>hird show</code> prints the
+  command that answers it, and the board counts them in its status bar
+  (<code>· 2 awaiting you</code>).
+</p>
 </section>
 
 <section id="dependencies">

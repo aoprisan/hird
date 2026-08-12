@@ -34,7 +34,7 @@
 //! a review nobody can do is a fact about your setup and not a bug to paper
 //! over.
 
-use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use super::deps::id_for_seq;
 use crate::error::{Error, Result};
@@ -58,7 +58,7 @@ impl<'a> Recusals<'a> {
                 "task {seq} cannot be recused from itself"
             )));
         }
-        let tx = Transaction::new_unchecked(self.conn, TransactionBehavior::Immediate)?;
+        let tx = super::immediate_tx(self.conn)?;
         add_in_tx(&tx, seq, from_seq, reason, actor)?;
         tx.commit()?;
         Ok(())
@@ -66,7 +66,7 @@ impl<'a> Recusals<'a> {
 
     /// Lift every recusal on `seq`. Returns how many were removed.
     pub fn clear(&self, seq: i64, actor: &str) -> Result<usize> {
-        let tx = Transaction::new_unchecked(self.conn, TransactionBehavior::Immediate)?;
+        let tx = super::immediate_tx(self.conn)?;
         let task_id = id_for_seq(&tx, seq)?;
         let removed = tx.execute("DELETE FROM task_recusals WHERE task_id = ?1", [&task_id])?;
         if removed > 0 {

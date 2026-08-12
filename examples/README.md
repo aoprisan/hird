@@ -36,7 +36,7 @@ installed, but nothing requires it.
 ./examples/witness.sh          # needs git; makes its own throwaway repository
 ./examples/exhibit.sh          # likewise
 ./examples/tenure.sh           # likewise
-./examples/question.sh         # needs neither
+./examples/question.sh         # needs nothing but hird
 ./examples/footing.sh          # likewise
 ./examples/review.sh           # likewise
 ./examples/verdict.sh          # likewise

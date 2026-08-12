@@ -35,7 +35,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use super::deps::id_for_seq;
 use super::memory::{row_to_assertion, ASSERTION_COLUMNS};
@@ -70,10 +70,7 @@ impl<'a> Footings<'a> {
     }
 
     fn immediate_tx(&self) -> Result<Transaction<'_>> {
-        Ok(Transaction::new_unchecked(
-            self.conn,
-            TransactionBehavior::Immediate,
-        )?)
+        super::immediate_tx(self.conn)
     }
 
     /// Record what `assertion_id` was read off, replacing any earlier footing.

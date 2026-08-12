@@ -16,23 +16,29 @@
 set -u
 
 herdr=${HERDR_BIN_PATH:-herdr}
-roster=${HERDR_PLUGIN_CONFIG_DIR:-}/dispatch.conf
+conf_dir=${HERDR_PLUGIN_CONFIG_DIR:-}
+roster="$conf_dir/dispatch.conf"
+# The same lock wire.sh hands the relay: pressing the button while a wave of
+# announcements is routing should take its turn among them, not race them
+# onto the worker one of them has already chosen.
+lock="$conf_dir/dispatch.lock"
+
+# shellcheck source=lib.sh
+. "$(dirname "$0")/lib.sh"
 
 summons="the hird queue has claimable work; work the hird queue."
 
-is_idle() {
-    state=$("$herdr" agent get "$1" 2>/dev/null) || return 1
-    printf '%s\n' "$state" |
-        grep -Eq '"agent_status"[[:space:]]*:[[:space:]]*"(idle|done)"'
-}
+trap lock_release 0
+trap 'exit 1' HUP INT TERM
+
+lock_acquire || :
 
 try_roster() {
     while read -r kind agent _; do
         [ "$kind" = "worker" ] || continue
         [ -n "$agent" ] || continue
-        is_idle "$agent" || continue
-        if "$herdr" agent prompt "$agent" "$summons" \
-            --wait --until working --timeout 5000 2>/dev/null; then
+        worker_busy "$agent" && continue
+        if worker_prompt "$agent" "$summons"; then
             echo "summoned $agent to the hird queue"
             exit 0
         fi

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use chrono::Utc;
-use rusqlite::{params, Connection, OptionalExtension, Row, Transaction, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 
 use super::scope::OnConflict;
 use super::{deps, new_id, questions, recusal, scope, ProjectScope};
@@ -74,8 +74,12 @@ pub struct Dispatch {
     /// review has not read it yet" points a human at a completely different
     /// fix than "the work has not happened".
     pub held: Vec<(i64, i64)>,
-    /// Open tasks whose holder released them with a question. These are not
-    /// blocked on more agent work; they need a human answer.
+    /// Open tasks whose holder released them with a question: work that needs
+    /// a human answer before any agent can continue it.
+    ///
+    /// Not exclusive with the buckets above. A task can be waiting for both an
+    /// answer and a dependency, and a human told only about the question would
+    /// answer it and watch nothing move.
     pub awaiting_answer: Vec<(i64, Question)>,
 }
 
@@ -101,13 +105,7 @@ impl<'a> Tasks<'a> {
     }
 
     fn immediate_tx(&self) -> Result<Transaction<'_>> {
-        // IMMEDIATE takes the write lock up front, so two concurrent writers
-        // queue on `busy_timeout` instead of deadlocking on a deferred
-        // read-to-write upgrade (which SQLite fails without retrying).
-        Ok(Transaction::new_unchecked(
-            self.conn,
-            TransactionBehavior::Immediate,
-        )?)
+        super::immediate_tx(self.conn)
     }
 
     // ---------------------------------------------------------------- create
@@ -554,9 +552,15 @@ impl<'a> Tasks<'a> {
 
         let mut dispatch = Dispatch::default();
         for (seq, id) in candidates {
-            if let Some(question) = questions::unanswered_in(&tx, &id)? {
+            // Recorded, but not instead of the rest of why this task is not
+            // workable. A task that is both blocked and awaiting an answer
+            // would otherwise reach the human as "answer this and it moves",
+            // which is only half true — answering it releases nothing until
+            // the work it waits on is done.
+            let question = questions::unanswered_in(&tx, &id)?;
+            let awaiting = question.is_some();
+            if let Some(question) = question {
                 dispatch.awaiting_answer.push((seq, question));
-                continue;
             }
             let unmet = deps::unmet_blockers(&tx, &id, clearance)?;
             if !unmet.is_empty() {
@@ -572,6 +576,9 @@ impl<'a> Tasks<'a> {
                     Some(review) => dispatch.held.push((seq, review)),
                     None => dispatch.blocked.push(seq),
                 }
+                continue;
+            }
+            if awaiting {
                 continue;
             }
             // Routed around rather than handed out and then refused: an agent

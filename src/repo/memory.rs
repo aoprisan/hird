@@ -1,6 +1,6 @@
 //! Assertion memory repository: provenance-carrying facts with FTS5 search.
 
-use rusqlite::{params, Connection, OptionalExtension, Row, Transaction, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 
 use super::{new_id, ProjectScope};
 use crate::error::{Error, Result};
@@ -93,10 +93,7 @@ impl<'a> Memory<'a> {
     }
 
     fn immediate_tx(&self) -> Result<Transaction<'_>> {
-        Ok(Transaction::new_unchecked(
-            self.conn,
-            TransactionBehavior::Immediate,
-        )?)
+        super::immediate_tx(self.conn)
     }
 
     /// Record one factual assertion.

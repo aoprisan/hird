@@ -41,6 +41,21 @@ pub(crate) fn new_id() -> String {
     Ulid::generate().to_string()
 }
 
+/// The transaction every writer in this layer uses.
+///
+/// IMMEDIATE takes the write lock up front, so two concurrent writers queue on
+/// `busy_timeout` instead of deadlocking on a deferred read-to-write upgrade
+/// (which SQLite fails without retrying). One function so that posture is
+/// stated once and no repository can quietly open a weaker one.
+pub(crate) fn immediate_tx(
+    conn: &rusqlite::Connection,
+) -> crate::error::Result<rusqlite::Transaction<'_>> {
+    Ok(rusqlite::Transaction::new_unchecked(
+        conn,
+        rusqlite::TransactionBehavior::Immediate,
+    )?)
+}
+
 /// How list queries scope to a project.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectScope {

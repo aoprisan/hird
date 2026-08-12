@@ -7,9 +7,9 @@
 
 use std::collections::BTreeMap;
 
-use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
-use super::{new_id, tasks::insert_event, ProjectScope};
+use super::{immediate_tx, new_id, tasks::insert_event, ProjectScope};
 use crate::error::{Error, Result};
 use crate::model::{now_ts, EventKind, Question, Status};
 
@@ -67,7 +67,7 @@ impl<'a> Questions<'a> {
             ));
         }
         let now = now_ts();
-        let tx = Transaction::new_unchecked(self.conn, TransactionBehavior::Immediate)?;
+        let tx = immediate_tx(self.conn)?;
         let (task_id, status): (String, String) = tx
             .query_row(
                 "SELECT id, status FROM tasks WHERE seq = ?1",

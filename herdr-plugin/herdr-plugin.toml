@@ -12,7 +12,7 @@
 
 id = "hird"
 name = "hird"
-version = "0.1.1"
+version = "0.1.2"
 min_herdr_version = "0.7.5"
 description = "The hird queue under herdr: watch the board, follow the feed, wire the dispatch hook, summon idle agents to claimable work."
 platforms = ["linux", "macos"]
