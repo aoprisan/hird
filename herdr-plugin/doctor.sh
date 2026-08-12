@@ -39,7 +39,12 @@ if [ -f "$hird_conf" ]; then
 fi
 expected=$(toml_escape "$(shq "$relay")")
 
-if [ -n "$managed" ] && [ -f "$relay" ]; then
+if [ -n "$managed" ] && [ -z "$root" ]; then
+    # Run outside herdr, so there is no plugin root to compare the recorded
+    # relay against. Saying "stale" here would be a false alarm about a
+    # perfectly good install; say what is actually known instead.
+    echo "dispatch_hook: wired to this plugin, but HERDR_PLUGIN_ROOT is unset — cannot check which checkout"
+elif [ -n "$managed" ] && [ -f "$relay" ]; then
     case $managed in
         *"$expected"*)
             echo "dispatch_hook: wired to this plugin's relay" ;;

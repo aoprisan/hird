@@ -72,19 +72,29 @@ Once wired, every announcement hird makes — a task filed with nothing
 blocking it, unblocked by a finished dependency, reopened by a `sent_back`
 verdict, handed back, filed as a review, dropped by an expired lease —
 runs `dispatch.sh` with the announcement in its environment. The relay walks
-the roster in order and prompts, via `herdr agent prompt`, the first idle worker
-that clears two bars:
+the roster in order and prompts, via `herdr agent prompt`, the first free
+worker that clears two bars:
 
 - **Not recused.** `HIRD_RECUSED` names the harnesses the queue will refuse
   this task to — a filed review names whoever did the work under judgement.
   The relay skips those workers, so the review loop runs on a swarm of two
   without ever summoning the author to judge their own work.
-- **Idle and actually there.** A worker that is already working or blocked is
-  skipped, and a prompt that fails — no such agent, agent gone — falls through
-  to the next worker instead of dying with the summons undelivered. Relays are
-  serialized just through the prompt's transition to `working`, so a burst of
-  announcements spreads across idle workers instead of all observing the same
-  preferred worker before its state changes.
+- **Free and actually there.** A worker `herdr agent get` reports working or
+  blocked is skipped, and a prompt that fails — no such agent, agent gone —
+  falls through to the next worker instead of dying with the summons
+  undelivered. Relays are serialized just through the prompt's transition to
+  `working`, so a burst of announcements spreads across free workers instead
+  of all observing the same preferred worker before its state changes.
+
+The status check is an optimization, and it is written to fail in the cheap
+direction. Only the states herdr names as occupied count as busy: if
+`agent get` cannot be run or its answer cannot be read, the relay prompts
+anyway and lets the prompt be the judge, exactly as it did before it learned
+to read status. A wrong guess about herdr's output then costs one redundant
+prompt rather than every summons the plugin would ever send. For the same
+reason a prompt that times out waiting for `working` is not treated as a
+refusal without checking: the summons may well have landed on an agent that
+was slow to start, and walking on would put two agents on one task.
 
 If every worker is barred or unreachable the relay exits quietly: the task
 is still on the board, and the `summon` action or the next announcement
@@ -128,6 +138,9 @@ default.
 
 The usual [herdr plugin guidance](https://herdr.dev/docs/plugins/#trust-and-security)
 applies: this is ordinary code running as your user. It is small on purpose —
-six short POSIX `sh` runtime scripts, no build step, no dependencies — so the
-read before the install is a short one. Its CI-only behavioral check lives in
-`.github/scripts/`.
+six short POSIX `sh` entry points over one shared `lib.sh`, no build step, no
+dependencies — so the read before the install is a short one. Everything the
+plugin assumes about herdr itself (what a busy worker looks like, what a
+prompt's exit status is worth, how simultaneous relays take turns) is in
+`lib.sh`, which is the file to read first. Its CI-only behavioral check lives
+in `.github/scripts/`.

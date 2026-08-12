@@ -49,9 +49,11 @@ jobs:
 
       # The herdr plugin has no build step, so nothing else would catch a
       # syntax error in it before somebody's pane opens on one. Checked as
-      # POSIX sh, which is what the manifest asks herdr to run them with.
+      # POSIX sh, which is what the manifest asks herdr to run them with;
+      # --source-path lets it follow the `. lib.sh` both entry points do.
       - name: herdr plugin scripts
         run: |
           sh -n herdr-plugin/*.sh
-          shellcheck --shell=sh herdr-plugin/*.sh .github/scripts/check-herdr-plugin.sh
+          shellcheck --shell=sh --source-path=SCRIPTDIR \
+            herdr-plugin/*.sh .github/scripts/check-herdr-plugin.sh
           .github/scripts/check-herdr-plugin.sh
