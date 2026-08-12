@@ -188,6 +188,39 @@ fn a_release_announces_the_task_it_hands_back() {
 }
 
 #[test]
+fn a_question_stays_quiet_until_the_answer_makes_it_claimable() {
+    let (sandbox, log) = hooked_sandbox();
+    let seq: i64 = sandbox
+        .run(&["add", "choose compatibility"])
+        .trim()
+        .parse()
+        .unwrap();
+    wait_for(&log, &format!("filed {seq} choose compatibility"));
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex.call("task_claim", json!({"seq": seq})).unwrap();
+    codex
+        .call(
+            "task_release",
+            json!({
+                "seq": seq,
+                "reason": "implementation point isolated",
+                "question": "Preserve the legacy format?"
+            }),
+        )
+        .unwrap();
+    let before = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        !before.contains(&format!("released {seq}")),
+        "a task awaiting a human must not summon another agent:\n{before}"
+    );
+
+    sandbox.run(&["answer", &seq.to_string(), "No; migrate it."]);
+    wait_for(&log, &format!("answered {seq} choose compatibility"));
+    codex.shutdown();
+}
+
+#[test]
 fn without_a_hook_nothing_runs_and_nothing_breaks() {
     let sandbox = Sandbox::new();
     let seq: i64 = sandbox.run(&["add", "quiet"]).trim().parse().unwrap();

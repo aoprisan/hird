@@ -125,7 +125,7 @@ exhibit = true
 # The command runs through `sh -c` with the announcement in its environment:
 #
 #   HIRD_EVENT    filed | unblocked | review_filed | sent_back | reopened |
-#                 released | lease_expired
+#                 released | answered | lease_expired
 #   HIRD_TASK     the task number
 #   HIRD_TITLE    its title
 #   HIRD_PROJECT  its project root

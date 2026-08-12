@@ -17,6 +17,7 @@ installed, but nothing requires it.
 | [`witness.sh`](witness.sh) | **What actually happened** — two agents, one checkout, one file, and the warning that arrives while there is still time to act on it. |
 | [`exhibit.sh`](exhibit.sh) | **The witness keeps what it saw** — a finished task's uncommitted diff shown after the tree has moved on, and a written-over version brought back with one command. |
 | [`tenure.sh`](tenure.sh) | **A task remembers every hand that held it** — an agent leaves uncommitted edits and vanishes, and the successor's own claim says whose leavings it is standing in, with round one still diffable after round two writes over it. |
+| [`question.sh`](question.sh) | **Work that knows why it is waiting** — an agent reaches a decision it must not guess, the task stays out of dispatch until the human answers, and the answer rides in the next claim. |
 | [`footing.sh`](footing.sh) | **Memory that knows when it went stale** — a fact recorded against a file, that file rewritten, and every later reader told so without anybody curating anything. |
 | [`review.sh`](review.sh) | **No agent reviews its own work** — finishing files the review, scoped to what actually moved, and the queue refuses it to the harness that did it. |
 | [`verdict.sh`](verdict.sh) | **The review closes its own loop** — a `sent_back` verdict reopens the work carrying the findings, the redo files a fresh review, and `hird record` keeps score per harness. |
@@ -35,6 +36,7 @@ installed, but nothing requires it.
 ./examples/witness.sh          # needs git; makes its own throwaway repository
 ./examples/exhibit.sh          # likewise
 ./examples/tenure.sh           # likewise
+./examples/question.sh         # needs neither
 ./examples/footing.sh          # likewise
 ./examples/review.sh           # likewise
 ./examples/verdict.sh          # likewise

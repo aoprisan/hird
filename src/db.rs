@@ -10,7 +10,8 @@ use rusqlite::Connection;
 
 use crate::error::Result;
 use crate::repo::{
-    Deps, Events, Footings, Memory, Plans, Recall, Recusals, Scopes, Tasks, Verdicts, Witnessed,
+    Deps, Events, Footings, Memory, Plans, Questions, Recall, Recusals, Scopes, Tasks, Verdicts,
+    Witnessed,
 };
 
 /// Numbered migrations, applied in order and recorded in `meta.schema_version`.
@@ -254,6 +255,26 @@ CREATE TABLE tenure_changes (
 
 CREATE INDEX idx_tenure_changes_hash ON tenure_changes(hash);
 "#,
+    // 10 — the question: work that waits for an answer rather than churning
+    //      through agents that cannot supply it
+    r#"
+CREATE TABLE task_questions (
+  id          TEXT PRIMARY KEY,
+  task_id     TEXT NOT NULL REFERENCES tasks(id),
+  n           INTEGER NOT NULL,
+  asked_by    TEXT NOT NULL,
+  question    TEXT NOT NULL,
+  asked_at    TEXT NOT NULL,
+  answer      TEXT,
+  answered_by TEXT,
+  answered_at TEXT,
+  UNIQUE (task_id, n)
+);
+
+CREATE INDEX idx_task_questions_task ON task_questions(task_id, n);
+CREATE UNIQUE INDEX idx_task_questions_one_open
+  ON task_questions(task_id) WHERE answer IS NULL;
+"#,
 ];
 
 /// An open connection to the hird database.
@@ -316,6 +337,11 @@ impl Db {
     /// Task and task-event repository.
     pub fn tasks(&self) -> Tasks<'_> {
         Tasks::new(&self.conn)
+    }
+
+    /// Questions that keep otherwise-open tasks waiting for human input.
+    pub fn questions(&self) -> Questions<'_> {
+        Questions::new(&self.conn)
     }
 
     /// The event trail read across tasks, in the order things happened.

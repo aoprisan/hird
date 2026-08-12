@@ -345,6 +345,24 @@ to `open` immediately, which is not the same as `failed` — a failure is a
 verdict on the task and waits for you to reopen it, a release just says this
 agent stopped.
 
+**An agent that needs your answer stops the churn.** The same call may carry a
+`question`. The task returns to `open`, but it is not claimable and
+`task_next` routes around it instead of handing an unanswerable task from
+agent to agent:
+
+```json
+task_release { "seq": 42,
+  "reason": "the compatibility branch is isolated",
+  "question": "Must the old config format remain readable?" }
+```
+
+The board marks it `awaits answer`. Answer from the CLI (`hird answer 42
+"Yes; keep it for one release"`) or press `A` on its TUI card. The answer makes
+the task claimable, wakes the dispatch hook with `HIRD_EVENT=answered`, and
+rides in the next claim beside the question, so the next agent cannot miss the
+decision that resumed its work. An ordinary release without `question` remains
+immediately claimable.
+
 ## Working the queue without assigning anything
 
 Naming a task number works, but it does not scale past one agent. Give the
@@ -1121,6 +1139,7 @@ hird diff <seq> [--path <file>]
 hird salvage <seq> <path> [--baseline] [--out <file> [--force]]
 hird cancel <seq> [--reason <text>]
 hird reopen <seq> [--reason <text>]
+hird answer <seq> <answer>
 hird dep add <seq> --needs <seq>,…
 hird dep rm  <seq> --needs <seq>,…
 hird plan apply <file> [--dry-run] [--project <path>]
@@ -1180,6 +1199,7 @@ moving under them.
 | `g` `G` | first / last card |
 | `Enter` | open the task, its history and what was learned |
 | `a` | add a task (`Tab` for the body, `Enter` to save) |
+| `A` | answer the selected task's question |
 | `c` `r` | cancel / reopen the selected task |
 
 | Key | Memory browser |
@@ -1196,11 +1216,12 @@ moving under them.
 | `Enter` | open the task that agent is holding |
 
 Cards on the queue board carry a yellow `waits #1 #3` badge when a task looks
-open but nobody can actually claim it yet, and a magenta `reviews #4` badge when
-a task is somebody's review — which decides who can take it, and is exactly the
-thing you cannot tell from the title. Verdicts mark the cards they judged: a
-green `upheld` on done work that a review signed off, a yellow `sent back` on
-work that is open again because one did not.
+open but nobody can actually claim it yet, `awaits answer` when its last holder
+needs a human decision, and a magenta `reviews #4` badge when a task is
+somebody's review — which decides who can take it, and is exactly the thing you
+cannot tell from the title. Verdicts mark the cards they judged: a green
+`upheld` on done work that a review signed off, a yellow `sent back` on work
+that is open again because one did not.
 
 ## The board as a log
 
@@ -1330,7 +1351,7 @@ Twelve, and no more.
 | `task_split` | Break a task into pieces the other agents can work. Holder only. |
 | `task_complete` | Finish, with a summary. Holder only. |
 | `task_fail` | Give up, with a reason. Holder only. |
-| `task_release` | Hand the task back unfinished, still claimable. Holder only. |
+| `task_release` | Hand the task back unfinished; with `question`, park it until `hird answer`. Holder only. |
 | `mem_store` | Record one durable fact — or, said again word for word, confirm one. |
 | `mem_search` | Find facts recorded earlier, by anyone, each marked with whether its code has moved since. |
 
@@ -1339,7 +1360,7 @@ protocol errors, so a model can relay them to you as-is instead of reporting
 that a tool broke.
 
 None of the things an agent is told without asking needed a thirteenth tool.
-Recall and `built_on` ride along with the claim; `footprint`, `changed`,
+Recall, `built_on`, and answered `questions` ride along with the claim; `footprint`, `changed`,
 `contended` and `undeclared` ride along with every check-in and every
 finishing call; `ground_shifted` rides along with the heartbeat; `standing`
 rides along with every fact hird serves. Something an agent has to know to
@@ -1358,6 +1379,7 @@ points `HIRD_DB` at a throwaway file, so running one cannot disturb your board.
                                 #   and a third task that finishes read-only
 ./examples/exhibit.sh           # a finished task's uncommitted diff, and a
                                 #   written-over version brought back
+./examples/question.sh          # wait for a human answer, then hand it to the next claim
 ./examples/footing.sh           # a fact, the file it came from, and that file rewritten
 ./examples/review.sh            # work that files its own review, barred to whoever did it
 ./examples/verdict.sh           # the sent-back loop, and the per-harness record it leaves

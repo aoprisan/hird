@@ -3,7 +3,7 @@
 //! Every variant's `Display` is written to be relayed verbatim to a human or a
 //! model — see the "errors are descriptive strings" rule in DESIGN.md §6.
 
-use crate::model::{Blocker, Conflict, Recusal, Status};
+use crate::model::{Blocker, Conflict, Question, Recusal, Status};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -44,6 +44,11 @@ pub enum Error {
     /// The task's dependencies have not all finished.
     #[error("{}", blocked_message(*.seq, .blockers))]
     Blocked { seq: i64, blockers: Vec<Blocker> },
+
+    /// The task is open, but its last holder asked for input no agent should
+    /// guess at. The human path must answer before claims resume.
+    #[error("{}", awaiting_answer_message(*.seq, .question))]
+    AwaitingAnswer { seq: i64, question: Box<Question> },
 
     /// Adding this dependency would close a cycle in the graph.
     #[error("{}", cycle_message(*.seq, *.on, .path))]
@@ -126,6 +131,13 @@ fn blocked_message(seq: i64, blockers: &[Blocker]) -> String {
              dependency is done"
         )
     }
+}
+
+fn awaiting_answer_message(seq: i64, question: &Question) -> String {
+    format!(
+        "task {seq} is awaiting an answer: {}; use `hird answer {seq} <ANSWER>` before an agent claims it",
+        crate::fmt::truncate(&question.question, 120)
+    )
 }
 
 fn cycle_message(seq: i64, on: i64, path: &[i64]) -> String {

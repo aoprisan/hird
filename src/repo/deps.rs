@@ -165,7 +165,9 @@ impl<'a> Deps<'a> {
         let candidates = rows.collect::<rusqlite::Result<Vec<_>>>()?;
         let mut released = Vec::new();
         for (id, mut claimable) in candidates {
-            if unmet_blockers(self.conn, &id, clearance)?.is_empty() {
+            if unmet_blockers(self.conn, &id, clearance)?.is_empty()
+                && super::questions::unanswered_in(self.conn, &id)?.is_none()
+            {
                 claimable.recused = super::recusal::barred_harnesses(self.conn, &id)?;
                 released.push(claimable);
             }
@@ -197,7 +199,10 @@ impl<'a> Deps<'a> {
             )
             .optional()?;
         match row {
-            Some((id, mut claimable)) if unmet_blockers(self.conn, &id, clearance)?.is_empty() => {
+            Some((id, mut claimable))
+                if unmet_blockers(self.conn, &id, clearance)?.is_empty()
+                    && super::questions::unanswered_in(self.conn, &id)?.is_none() =>
+            {
                 claimable.recused = super::recusal::barred_harnesses(self.conn, &id)?;
                 Ok(Some(claimable))
             }

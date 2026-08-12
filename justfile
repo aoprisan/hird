@@ -60,6 +60,7 @@ examples: build
     ./examples/witness.sh
     ./examples/exhibit.sh
     ./examples/tenure.sh
+    ./examples/question.sh
     ./examples/footing.sh
     ./examples/review.sh
     ./examples/verdict.sh

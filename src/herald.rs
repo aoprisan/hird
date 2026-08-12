@@ -51,6 +51,8 @@ pub enum Cause {
     Reopened,
     /// Its holder handed it back unfinished.
     Released,
+    /// A human answered the question that had kept it out of dispatch.
+    Answered,
     /// Its holder went quiet and the lease ran out.
     LeaseExpired,
 }
@@ -65,6 +67,7 @@ impl Cause {
             Cause::SentBack => "sent_back",
             Cause::Reopened => "reopened",
             Cause::Released => "released",
+            Cause::Answered => "answered",
             Cause::LeaseExpired => "lease_expired",
         }
     }

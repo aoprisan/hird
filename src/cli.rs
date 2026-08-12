@@ -108,6 +108,12 @@ pub enum Command {
         #[arg(long, default_value = "")]
         reason: String,
     },
+    /// Answer the question keeping an open task out of dispatch.
+    Answer {
+        seq: i64,
+        /// The decision or information the next agent should proceed with.
+        answer: String,
+    },
     /// Add or remove dependencies between tasks.
     #[command(subcommand)]
     Dep(DepCommand),
@@ -482,6 +488,18 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
             let task = db.tasks().reopen(*seq, ACTOR_CLI, reason)?;
             writeln!(out, "task {} reopened", task.seq)?;
             announce_claimable(herald.as_ref(), &db, &config, Cause::Reopened, task.seq);
+            Ok(())
+        }
+        Command::Answer { seq, answer } => {
+            let answered = db.questions().answer(*seq, ACTOR_CLI, answer)?;
+            writeln!(out, "task {} answered", seq)?;
+            writeln!(out, "  question  {}", answered.question)?;
+            writeln!(
+                out,
+                "  answer    {}",
+                answered.answer.as_deref().unwrap_or("")
+            )?;
+            announce_claimable(herald.as_ref(), &db, &config, Cause::Answered, *seq);
             Ok(())
         }
         Command::Mem(cmd) => mem(&db, &project, &config, cmd, out),
@@ -1029,6 +1047,7 @@ fn graph(db: &Db, scope: &ProjectScope, out: &mut impl Write) -> anyhow::Result<
     let tasks = db.tasks().list(scope, None)?;
     let edges = db.deps().edges(scope)?;
     let waves = dispatch_waves(&tasks, &edges);
+    let questions = db.questions().unanswered_map(scope)?;
     if waves.is_empty() {
         writeln!(out, "no unfinished tasks")?;
         return Ok(());
@@ -1063,6 +1082,9 @@ fn graph(db: &Db, scope: &ProjectScope, out: &mut impl Write) -> anyhow::Result<
                     .collect::<Vec<_>>()
                     .join(", ");
                 line.push_str(&format!("   waits for {listed}"));
+            }
+            if questions.contains_key(seq) {
+                line.push_str("   awaits answer");
             }
             writeln!(out, "{line}")?;
         }
@@ -1190,6 +1212,7 @@ fn ls(
         return Ok(());
     }
     let unmet = db.deps().unmet_map(&scope, config.clearance())?;
+    let questions = db.questions().unanswered_map(&scope)?;
     // What each task did to the tree, which the row prints as one word. A
     // failure here costs the listing a column, not the listing.
     let footprints = db.witnessed().footprints(&scope).unwrap_or_default();
@@ -1201,11 +1224,20 @@ fn ls(
         .unwrap_or(1);
     for task in &tasks {
         let blocked = unmet.get(&task.seq).map(Vec::as_slice).unwrap_or(&[]);
+        let question = questions.get(&task.seq).map(|q| q.question.as_str());
         let footprint = footprints.get(&task.seq).copied().unwrap_or_default();
         writeln!(
             out,
             "{}",
-            ls_line(task, width, scope.is_all(), now, blocked, footprint)
+            ls_line(
+                task,
+                width,
+                scope.is_all(),
+                now,
+                blocked,
+                question,
+                footprint,
+            )
         )?;
     }
     Ok(())
@@ -1218,6 +1250,7 @@ fn ls_line(
     show_project: bool,
     now: chrono::DateTime<Utc>,
     blocked_by: &[i64],
+    awaiting_answer: Option<&str>,
     footprint: Footprint,
 ) -> String {
     let mut line = format!(
@@ -1240,6 +1273,9 @@ fn ls_line(
             .collect::<Vec<_>>()
             .join(",");
         line.push_str(&format!("  waits {listed}"));
+    }
+    if awaiting_answer.is_some() {
+        line.push_str("  awaits answer");
     }
     if task.priority != 0 {
         line.push_str(&format!("  p{}", task.priority));
@@ -1450,6 +1486,13 @@ fn show(db: &Db, seq: i64, config: &Config, out: &mut impl Write) -> anyhow::Res
             .collect::<Vec<_>>()
             .join(", ");
         writeln!(out, "waits for {listed}")?;
+    }
+    for question in db.questions().for_task(seq)? {
+        writeln!(out, "question  {}", question.question)?;
+        match question.answer {
+            Some(answer) => writeln!(out, "answer    {answer}")?,
+            None => writeln!(out, "awaits    hird answer {seq} <ANSWER>")?,
+        }
     }
     // The ground under the task: what the work it builds on says for itself.
     // One line per finished dependency — standing first, then as much of its
@@ -1830,6 +1873,7 @@ mod tests {
             false,
             now(),
             &[],
+            None,
             Footprint::Unwatched,
         );
         assert_eq!(line, "#7   open         write the parser");
@@ -1841,7 +1885,7 @@ mod tests {
         task.claimed_by = Some("codex:9f2c".into());
         task.lease_expires_at = Some(crate::model::fmt_ts(now() + chrono::Duration::minutes(12)));
 
-        let line = ls_line(&task, 1, false, now(), &[], Footprint::Unwatched);
+        let line = ls_line(&task, 1, false, now(), &[], None, Footprint::Unwatched);
         assert!(line.contains("[codex:9f2c] 12m left"), "{line}");
     }
 
@@ -1849,9 +1893,11 @@ mod tests {
     fn ls_rows_show_priority_and_project_only_when_relevant() {
         let mut task = summary(7, Status::Open);
         task.priority = 5;
-        assert!(ls_line(&task, 1, false, now(), &[], Footprint::Unwatched).ends_with("  p5"));
-        assert!(ls_line(&task, 1, true, now(), &[], Footprint::Unwatched)
-            .ends_with(&format!("({PROJECT})")));
+        assert!(ls_line(&task, 1, false, now(), &[], None, Footprint::Unwatched).ends_with("  p5"));
+        assert!(
+            ls_line(&task, 1, true, now(), &[], None, Footprint::Unwatched)
+                .ends_with(&format!("({PROJECT})"))
+        );
     }
 
     #[test]
@@ -1945,6 +1991,7 @@ mod tests {
             false,
             now(),
             &[3, 4],
+            None,
             Footprint::Unwatched,
         );
         assert!(line.contains("waits #3,#4"), "{line}");

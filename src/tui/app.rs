@@ -12,8 +12,8 @@ use crate::db::Db;
 use crate::glob;
 use crate::identity::ACTOR_TUI;
 use crate::model::{
-    Assertion, Blocker, Conflict, Footprint, Standing, Status, Task, TaskEvent, TaskSummary,
-    Verdict,
+    Assertion, Blocker, Conflict, Footprint, Question, Standing, Status, Task, TaskEvent,
+    TaskSummary, Verdict,
 };
 use crate::repo::{dispatch_waves, MemoryQuery, ProjectScope, Recalled};
 
@@ -113,6 +113,9 @@ pub struct Readiness {
     /// What the working tree says the task did to it: read-only, or so many
     /// files moved. The other half of `paths`, which is only what was said.
     pub footprint: Footprint,
+    /// Questions and answers carried by this task, including its current
+    /// unresolved question when it is awaiting input.
+    pub questions: Vec<Question>,
 }
 
 /// A column of the kanban board.
@@ -171,6 +174,12 @@ pub enum Mode {
     },
     /// The `d` prompt on the memory screen.
     Supersede { id: String, replacement: String },
+    /// The `A` prompt on a task awaiting input.
+    Answer {
+        seq: i64,
+        question: String,
+        answer: String,
+    },
     /// A task's full body, history and recorded assertions.
     TaskDetail {
         task: Box<Task>,
@@ -189,7 +198,11 @@ impl Mode {
     pub fn is_text_entry(&self) -> bool {
         matches!(
             self,
-            Mode::Filter | Mode::Search | Mode::AddTask { .. } | Mode::Supersede { .. }
+            Mode::Filter
+                | Mode::Search
+                | Mode::AddTask { .. }
+                | Mode::Supersede { .. }
+                | Mode::Answer { .. }
         )
     }
 }
@@ -222,6 +235,8 @@ pub struct App {
 
     /// Task number to the unfinished tasks it waits for.
     pub unmet: BTreeMap<i64, Vec<i64>>,
+    /// Open task number to the question holding it out of dispatch.
+    pub questions: BTreeMap<i64, Question>,
     /// Task numbers that are somebody's review, so the board can say so
     /// without opening each card.
     pub reviews: BTreeMap<i64, i64>,
@@ -294,6 +309,7 @@ impl App {
             column: Column::Open,
             selected: [0; 4],
             unmet: BTreeMap::new(),
+            questions: BTreeMap::new(),
             reviews: BTreeMap::new(),
             under_review: BTreeMap::new(),
             verdicts: BTreeMap::new(),
@@ -406,6 +422,7 @@ impl App {
         self.tasks = db.tasks().list(&scope, None)?;
         self.counts = db.tasks().counts(&scope)?;
         self.unmet = db.deps().unmet_map(&scope, self.config.clearance())?;
+        self.questions = db.questions().unanswered_map(&scope)?;
         self.reviews = db.recusals().reviews(&scope)?;
         // Inverted from `reviews` and filtered to reviews still in flight:
         // the judged card's `done` is provisional exactly while one is.
@@ -518,7 +535,11 @@ impl App {
     pub fn workable(&self) -> Vec<&TaskSummary> {
         self.tasks
             .iter()
-            .filter(|t| t.status == Status::Open && self.blocked_by(t.seq).is_empty())
+            .filter(|t| {
+                t.status == Status::Open
+                    && self.blocked_by(t.seq).is_empty()
+                    && !self.questions.contains_key(&t.seq)
+            })
             .collect()
     }
 
@@ -570,6 +591,11 @@ impl App {
                 self.edit_add_task(key, title, body, focus, db)?
             }
             Mode::Supersede { id, replacement } => self.edit_supersede(key, id, replacement, db)?,
+            Mode::Answer {
+                seq,
+                question,
+                answer,
+            } => self.edit_answer(key, seq, question, answer, db)?,
             Mode::Normal => self.normal_key(key, db)?,
         }
         Ok(())
@@ -624,6 +650,22 @@ impl App {
             KeyCode::Enter => self.open_task_detail(db)?,
             KeyCode::Char('c') => self.act_on_selection(db, "cancel")?,
             KeyCode::Char('r') => self.act_on_selection(db, "reopen")?,
+            KeyCode::Char('A') => {
+                let Some(seq) = self.selected_task().map(|t| t.seq) else {
+                    self.warn("nothing selected".to_string());
+                    return Ok(());
+                };
+                match self.questions.get(&seq) {
+                    Some(question) => {
+                        self.mode = Mode::Answer {
+                            seq,
+                            question: question.question.clone(),
+                            answer: String::new(),
+                        };
+                    }
+                    None => self.warn(format!("task {seq} is not awaiting an answer")),
+                }
+            }
             KeyCode::Esc if !self.filter.is_empty() => {
                 self.filter.clear();
                 self.clamp_selection();
@@ -863,6 +905,64 @@ impl App {
         Ok(())
     }
 
+    fn edit_answer(
+        &mut self,
+        key: KeyEvent,
+        seq: i64,
+        question: String,
+        mut answer: String,
+        db: &Db,
+    ) -> anyhow::Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = Mode::Normal;
+                return Ok(());
+            }
+            KeyCode::Enter => {
+                if answer.trim().is_empty() {
+                    self.warn(
+                        "answer must not be empty; say what the next agent should proceed with"
+                            .to_string(),
+                    );
+                    self.mode = Mode::Answer {
+                        seq,
+                        question,
+                        answer,
+                    };
+                    return Ok(());
+                }
+                let outcome = db.questions().answer(seq, ACTOR_TUI, &answer);
+                self.mode = Mode::Normal;
+                match outcome {
+                    Ok(_) => {
+                        crate::herald::announce_claimable(
+                            self.herald.as_ref(),
+                            db,
+                            &self.config,
+                            crate::herald::Cause::Answered,
+                            seq,
+                        );
+                        self.refresh(db)?;
+                        self.note(format!("answered task {seq}"));
+                    }
+                    Err(e) => self.warn(e.to_string()),
+                }
+                return Ok(());
+            }
+            KeyCode::Backspace => {
+                answer.pop();
+            }
+            KeyCode::Char(c) => answer.push(c),
+            _ => {}
+        }
+        self.mode = Mode::Answer {
+            seq,
+            question,
+            answer,
+        };
+        Ok(())
+    }
+
     // -------------------------------------------------------------- actions
 
     fn move_cursor(&mut self, delta: isize) {
@@ -909,6 +1009,7 @@ impl App {
             verdicts: db.verdicts().for_task(seq)?,
             delivered: db.verdicts().of_review(seq)?,
             footprint: db.witnessed().footprint(seq).unwrap_or_default(),
+            questions: db.questions().for_task(seq)?,
         };
         // Only what came from elsewhere: `learned` already holds this task's
         // own assertions, listed under their own heading.
@@ -1254,6 +1355,39 @@ mod tests {
     }
 
     #[test]
+    fn answering_from_the_board_makes_the_task_workable_again() {
+        let (mut app, db) = fixture();
+        let seq = seed(&db, "choose compatibility");
+        db.tasks()
+            .claim(seq, "codex:1", Config::default().lease_ttl())
+            .unwrap();
+        db.tasks()
+            .release_asking(
+                seq,
+                "codex:1",
+                "implementation point isolated",
+                "Preserve the legacy format?",
+            )
+            .unwrap();
+        app.refresh(&db).unwrap();
+        assert!(app.workable().is_empty());
+
+        app.on_key(ch('A'), &db).unwrap();
+        assert!(matches!(app.mode, Mode::Answer { .. }));
+        type_text(&mut app, &db, "No; migrate it.");
+        app.on_key(key(KeyCode::Enter), &db).unwrap();
+
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(
+            app.workable().iter().map(|t| t.seq).collect::<Vec<_>>(),
+            vec![seq]
+        );
+        let history = db.questions().for_task(seq).unwrap();
+        assert_eq!(history[0].answer.as_deref(), Some("No; migrate it."));
+        assert_eq!(history[0].answered_by.as_deref(), Some("tui"));
+    }
+
+    #[test]
     fn cancel_and_reopen_act_on_the_selected_card() {
         let (mut app, db) = fixture();
         seed(&db, "doomed");
@@ -1491,6 +1625,12 @@ mod tests {
             title: String::new(),
             body: String::new(),
             focus: 0
+        }
+        .is_text_entry());
+        assert!(Mode::Answer {
+            seq: 1,
+            question: String::new(),
+            answer: String::new(),
         }
         .is_text_entry());
     }

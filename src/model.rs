@@ -206,6 +206,11 @@ pub enum EventKind {
     LeaseExpired,
     /// The holder handed the task back unfinished.
     Released,
+    /// The holder released the task because it needs an answer from outside
+    /// the agent queue before any agent can continue it.
+    Asked,
+    /// A human supplied the answer that makes an asking task claimable again.
+    Answered,
     Completed,
     Failed,
     Cancelled,
@@ -236,6 +241,8 @@ impl EventKind {
             EventKind::LeaseRenewed => "lease_renewed",
             EventKind::LeaseExpired => "lease_expired",
             EventKind::Released => "released",
+            EventKind::Asked => "asked",
+            EventKind::Answered => "answered",
             EventKind::Completed => "completed",
             EventKind::Failed => "failed",
             EventKind::Cancelled => "cancelled",
@@ -269,6 +276,8 @@ impl FromStr for EventKind {
             "lease_renewed" => Ok(EventKind::LeaseRenewed),
             "lease_expired" => Ok(EventKind::LeaseExpired),
             "released" => Ok(EventKind::Released),
+            "asked" => Ok(EventKind::Asked),
+            "answered" => Ok(EventKind::Answered),
             "completed" => Ok(EventKind::Completed),
             "failed" => Ok(EventKind::Failed),
             "cancelled" => Ok(EventKind::Cancelled),
@@ -337,6 +346,31 @@ pub struct TaskEvent {
     pub actor: String,
     pub kind: EventKind,
     pub detail: String,
+}
+
+/// One question a holder asked before releasing a task.
+///
+/// An unanswered row is a derived readiness gate: the task remains `open`,
+/// preserving the status machine, but no agent can claim it until the human
+/// path fills the answer in. Earlier answered rows remain as handoff context
+/// for every later claim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Question {
+    pub id: String,
+    pub task_id: String,
+    pub n: i64,
+    pub asked_by: String,
+    pub question: String,
+    pub asked_at: String,
+    pub answer: Option<String>,
+    pub answered_by: Option<String>,
+    pub answered_at: Option<String>,
+}
+
+impl Question {
+    pub fn is_answered(&self) -> bool {
+        self.answer.is_some()
+    }
 }
 
 /// What it takes for a dependency to clear its dependents.

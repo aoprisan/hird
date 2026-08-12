@@ -35,6 +35,11 @@ pub fn render(frame: &mut Frame, app: &App, now: DateTime<Utc>) {
         Mode::Help => render_help(frame, app),
         Mode::AddTask { title, body, focus } => render_add_task(frame, title, body, *focus),
         Mode::Supersede { replacement, .. } => render_supersede(frame, app, replacement),
+        Mode::Answer {
+            seq,
+            question,
+            answer,
+        } => render_answer(frame, *seq, question, answer),
         Mode::TaskDetail {
             task,
             events,
@@ -127,6 +132,7 @@ fn render_column(frame: &mut Frame, area: Rect, app: &App, column: Column, now: 
                 width,
                 now,
                 app.blocked_by(task.seq),
+                app.questions.get(&task.seq).map(|q| q.question.as_str()),
                 app.reviews.get(&task.seq).copied(),
                 app.under_review.get(&task.seq).copied(),
                 app.verdicts.get(&task.seq).copied(),
@@ -155,6 +161,7 @@ fn task_card(
     width: usize,
     now: DateTime<Utc>,
     blocked_by: &[i64],
+    awaiting_answer: Option<&str>,
     reviews: Option<i64>,
     under_review: Option<i64>,
     verdict: Option<Verdict>,
@@ -215,6 +222,12 @@ fn task_card(
             ),
             theme::blocked_style(),
         ));
+    }
+    if awaiting_answer.is_some() {
+        if !badges.is_empty() {
+            badges.push(Span::raw("  "));
+        }
+        badges.push(Span::styled("awaits answer", theme::blocked_style()));
     }
     // A review looks like any other open task until you know what it is, and
     // what it is decides who can take it — which is exactly the thing a human
@@ -695,6 +708,7 @@ fn render_help(frame: &mut Frame, app: &App) {
         ("g / G", "first / last card"),
         ("Enter", "open the task, its history and what was learned"),
         ("a", "add a task (Tab for the body, Enter to save)"),
+        ("A", "answer the selected task's question"),
         ("c", "cancel the selected task"),
         ("r", "reopen the selected task"),
     ];
@@ -722,7 +736,6 @@ fn render_help(frame: &mut Frame, app: &App) {
                 Span::raw(description.to_string()),
             ]));
         }
-        lines.push(Line::from(""));
     };
     section("Anywhere", common, &mut lines);
     section("Queue board", queue, &mut lines);
@@ -796,6 +809,25 @@ fn render_supersede(frame: &mut Frame, app: &App, replacement: &str) {
     overlay(frame, " Supersede assertion ", text, 76, 10);
 }
 
+fn render_answer(frame: &mut Frame, seq: i64, question: &str, answer: &str) {
+    let text = Text::from(vec![
+        Line::from(Span::styled("question", theme::dim_style())),
+        Line::from(question.to_string()),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("answer  ", theme::focus_style()),
+            Span::raw(answer.to_string()),
+            Span::styled("▌", theme::focus_style()),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Enter answers and makes the task claimable · Esc cancels",
+            theme::dim_style(),
+        )),
+    ]);
+    overlay(frame, &format!(" Answer task #{seq} "), text, 78, 10);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_task_detail(
     frame: &mut Frame,
@@ -849,6 +881,30 @@ fn render_task_detail(
                 theme::blocked_style(),
             ),
         ]));
+    }
+    for question in &readiness.questions {
+        lines.push(Line::from(vec![
+            Span::styled("question   ", theme::focus_style()),
+            Span::styled(
+                question.question.clone(),
+                if question.is_answered() {
+                    theme::dim_style()
+                } else {
+                    theme::blocked_style()
+                },
+            ),
+        ]));
+        if let Some(answer) = &question.answer {
+            lines.push(Line::from(vec![
+                Span::styled("answer     ", theme::focus_style()),
+                Span::raw(answer.clone()),
+            ]));
+        } else {
+            lines.push(Line::from(Span::styled(
+                "           press A on the card to answer",
+                theme::blocked_style(),
+            )));
+        }
     }
     // The ground under the task: each finished dependency, standing first,
     // then as much of its own result as the line can hold.
@@ -1681,6 +1737,31 @@ mod tests {
         assert!(out.contains("waits #1"), "{out}");
         // And the status bar counts only the task that could actually go out.
         assert!(out.contains("1 ready"), "{out}");
+    }
+
+    #[test]
+    fn a_question_card_says_it_awaits_an_answer_and_is_not_ready() {
+        let db = Db::open_in_memory().unwrap();
+        let seq = db
+            .tasks()
+            .create(PROJECT, "choose compatibility", "", 0, "cli")
+            .unwrap()
+            .seq;
+        db.tasks()
+            .claim(seq, "codex:1", Config::default().lease_ttl())
+            .unwrap();
+        db.tasks()
+            .release_asking(
+                seq,
+                "codex:1",
+                "implementation point isolated",
+                "Preserve the legacy format?",
+            )
+            .unwrap();
+
+        let out = screen(&app_with(&db));
+        assert!(out.contains("awaits answer"), "{out}");
+        assert!(out.contains("0 ready"), "{out}");
     }
 
     /// A done card whose review has not concluded is provisionally done, and

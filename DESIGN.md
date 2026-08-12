@@ -267,7 +267,7 @@ stdio transport. Instructions string (returned from `server/discover`, and from 
 | `task_split` | `seq`, `subtasks`, `sequential?` | **(v1.1)** Holder-only. File the pieces, make this task wait for them, release it. |
 | `task_complete` | `seq`, `result`, `verdict?` **(v1.7)** | Holder-only. → `done`, clears lease, stores result. On a review, `verdict` is required and acted on (§16). |
 | `task_fail` | `seq`, `reason` | Holder-only. → `failed`, clears lease, stores reason. |
-| `task_release` | `seq`, `reason` | **(v1.1)** Holder-only. → `open`, clears lease, keeps the task claimable. |
+| `task_release` | `seq`, `reason`, `question?` **(v2.5)** | **(v1.1)** Holder-only. → `open`, clears lease; with `question`, waits for `hird answer` before becoming claimable. |
 | `mem_store` | `content`, `tags?`, `task_seq?` | Insert assertion with actor + project provenance. |
 | `mem_search` | `query`, `limit? (20)`, `all_projects?`, `include_superseded? (false)` | FTS5 `MATCH`; fall back to `LIKE` if the query fails FTS syntax. Results include id, content, tags, actor, created_at. |
 
@@ -326,6 +326,7 @@ hird add <title> [--body <md>|--body-file <path>] [--priority N] [--project <pat
 hird ls [--status s] [--all-projects]
 hird show <seq>
 hird cancel <seq> / hird reopen <seq>
+hird answer <seq> <answer>              # (v2.5) resolve the task's open question
 hird dep add|rm <seq> --needs <seq>,…    # (v1.1) edit the graph
 hird plan apply <file> [--dry-run] [--project <path>]  # (v1.3) file a whole graph
 hird graph [--all-projects]              # (v1.1) the queue as dispatch waves
@@ -1449,7 +1450,7 @@ moment it happened; the design gave it no way to say so.
 becomes claimable, hird runs it — detached, through `sh -c`, all three stdio
 streams closed — with the announcement in its environment: `HIRD_EVENT` (the
 cause: `filed`, `unblocked`, `review_filed`, `sent_back`, `reopened`,
-`released`, `lease_expired`), `HIRD_TASK`, `HIRD_TITLE`, `HIRD_PROJECT`, and
+`released`, `answered`, `lease_expired`), `HIRD_TASK`, `HIRD_TITLE`, `HIRD_PROJECT`, and
 `HIRD_DB` so the hook's own `hird` invocations read the same board.
 
 Three rules keep this from becoming the daemon the design forbids:
@@ -1611,3 +1612,80 @@ already announced in — carries the barred harnesses, filled by the same two
 repo reads that screen every announcement, and the skill now tells a
 summoned agent what a recusal refusal means: not an error to retry, but a
 task that was never for it.
+
+## 24. (v2.5) The question — work that knows why it is waiting
+
+There was still one kind of blocker the dependency graph could not express.
+An agent reaches a real choice in the work — whether compatibility matters,
+which behavior the user intends, whether a credential or external approval is
+available — and no task in the queue can answer it. The holder had two moves,
+both wrong in a different direction. `task_release` put the work straight back
+in dispatch, where another agent claimed it, discovered the same missing
+answer, and handed it around again. `task_fail` stopped the churn, but called a
+valid task failed and made the human reopen it after supplying the answer in a
+channel the next claimant might never see.
+
+So a release may now carry a **question**. The task still follows the status
+machine back to `open`, but an unanswered question is a derived readiness gate:
+`task_claim` refuses it by name, `task_next` routes around it into an
+`awaiting_answer` bucket, and every board marks it `awaits answer`. The work is
+not failed and it is not available. It is waiting on a fact only the human path
+may provide.
+
+### Migration 10
+
+```sql
+CREATE TABLE task_questions (
+  id          TEXT PRIMARY KEY,
+  task_id     TEXT NOT NULL REFERENCES tasks(id),
+  n           INTEGER NOT NULL,
+  asked_by    TEXT NOT NULL,
+  question    TEXT NOT NULL,
+  asked_at    TEXT NOT NULL,
+  answer      TEXT,
+  answered_by TEXT,
+  answered_at TEXT,
+  UNIQUE (task_id, n)
+);
+
+CREATE UNIQUE INDEX idx_task_questions_one_open
+  ON task_questions(task_id) WHERE answer IS NULL;
+```
+
+One task may ask more than once across its life, but only one question may be
+open at a time. Earlier rounds remain: a decision that changed the direction of
+the implementation is task provenance, not a transient notification. Asking,
+releasing the lease, and the `asked`/`released` trail entries share one
+`IMMEDIATE` transaction. Answering, updating the task's recency, and the
+`answered` event share another. Two humans racing to answer therefore leave one
+decision, never a last-write-wins rewrite of the first.
+
+### The human edge
+
+`hird answer <seq> <answer>` and the TUI's `A` action are deliberately the only
+answering paths. If another agent can resolve the blocker, it is work: release
+normally, or split it into a task the queue can schedule and review. A question
+means the queue has reached its authority boundary and needs a human or an
+external automation acting through the human CLI.
+
+The answer does not edit the task body. `task_get` shows the structured history,
+and the first later `task_claim` or `task_next` carries the same `questions`
+rows automatically. The claim is again the handover point: an answer important
+enough to stop the work must not depend on the successor knowing to search the
+event log. The tenure mechanism remains responsible for what the previous
+holder left in the working tree; the question is the missing reason and
+decision alongside those edits.
+
+An unanswered release is not announced to the dispatch hook — waking another
+agent would recreate the churn this feature removes. The answer is the moment
+the task becomes claimable, so it announces `HIRD_EVENT=answered` after the
+transaction commits and after the ordinary claimability read-back. A concurrent
+claim wins quietly, as it does for every other cause.
+
+### Still twelve tools, and still six statuses
+
+`question` is an optional field on `task_release`; answered history rides on
+the claim; the human answers through the CLI or board. `open` remains the task's
+stored status and readiness gains one derived predicate. No `blocked` or
+`waiting_for_human` status is added, no lease is held while nobody can work,
+and no thirteenth MCP tool gives agents the authority to answer themselves.

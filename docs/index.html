@@ -336,7 +336,7 @@ dispatch_hook = <span class="s">'herdr agent prompt worker "hird task $HIRD_TASK
 <table>
   <thead><tr><th>Variable</th><th>Meaning</th></tr></thead>
   <tbody>
-    <tr><td><code>HIRD_EVENT</code></td><td>Why the task is claimable: <code>filed</code>, <code>unblocked</code>, <code>review_filed</code>, <code>sent_back</code>, <code>reopened</code>, <code>released</code> or <code>lease_expired</code>.</td></tr>
+    <tr><td><code>HIRD_EVENT</code></td><td>Why the task is claimable: <code>filed</code>, <code>unblocked</code>, <code>review_filed</code>, <code>sent_back</code>, <code>reopened</code>, <code>released</code>, <code>answered</code> or <code>lease_expired</code>.</td></tr>
     <tr><td><code>HIRD_TASK</code></td><td>The task number.</td></tr>
     <tr><td><code>HIRD_TITLE</code></td><td>Its title.</td></tr>
     <tr><td><code>HIRD_PROJECT</code></td><td>Its project root.</td></tr>
@@ -668,6 +668,16 @@ open ──cancel (human)──► cancelled</code></pre>
   <code>task_release</code> returns it to <code>open</code> immediately, which is
   not the same as <code>failed</code> — a failure is a verdict on the task and
   waits for you to reopen it, a release just says this agent stopped.
+</p>
+
+<p>
+  <strong>An agent that needs your answer stops the churn.</strong> A
+  <code>task_release</code> carrying <code>question</code> returns the task to
+  <code>open</code> but keeps it out of claims and <code>task_next</code> until
+  you run <code>hird answer &lt;seq&gt; &lt;answer&gt;</code> or press
+  <kbd>A</kbd> on its card. The answer makes it claimable, announces
+  <code>HIRD_EVENT=answered</code>, and rides in the next claim beside the
+  question. Releasing without a question remains an immediate handoff.
 </p>
 </section>
 
@@ -1463,6 +1473,7 @@ hird diff &lt;seq&gt; [--path &lt;file&gt;] [--tenure N]
 hird salvage &lt;seq&gt; &lt;path&gt; [--baseline] [--tenure N] [--out &lt;file&gt; [--force]]
 hird cancel &lt;seq&gt; [--reason &lt;text&gt;]
 hird reopen &lt;seq&gt; [--reason &lt;text&gt;]
+hird answer &lt;seq&gt; &lt;answer&gt;
 hird dep add &lt;seq&gt; --needs &lt;seq&gt;,…
 hird dep rm  &lt;seq&gt; --needs &lt;seq&gt;,…
 hird plan apply &lt;file&gt; [--dry-run] [--project &lt;path&gt;]
@@ -1491,6 +1502,7 @@ hird db-path</code></pre>
     <tr><td><code>diff</code></td><td>The uncommitted diff of what moved under a task, from the versions the <a href="#exhibit">witness kept</a> — even after the task is done and the tree has moved on. <code>--tenure N</code> reads an archived round instead, after the task has changed hands.</td></tr>
     <tr><td><code>salvage</code></td><td>Recover a version of a file as it stood under a task: the last one the witness saw, or with <code>--baseline</code> the one the task started from. <code>--tenure N</code> reaches an earlier holding's record.</td></tr>
     <tr><td><code>cancel</code> / <code>reopen</code></td><td>Human overrides. They work regardless of who holds the task.</td></tr>
+    <tr><td><code>answer</code></td><td>Resolve the question holding an open task out of dispatch; the answer is handed to its next claimant.</td></tr>
     <tr><td><code>dep</code></td><td>Add or remove "must wait for" edges after the fact.</td></tr>
     <tr><td><code>plan</code></td><td>File a whole graph from a <a href="#plan-files">plan file</a>, in one transaction. <code>--dry-run</code> reads it out — waves, overlaps and all — and writes nothing.</td></tr>
     <tr><td><code>graph</code></td><td>The plan as dispatch waves: workable now, and what each later wave waits for.</td></tr>
@@ -1556,6 +1568,7 @@ hird db-path</code></pre>
 <tr><td><kbd>g</kbd> <kbd>G</kbd></td><td>first / last card</td></tr>
 <tr><td><kbd>Enter</kbd></td><td>open the task and its history</td></tr>
 <tr><td><kbd>a</kbd></td><td>add a task (<kbd>Tab</kbd> for the body, <kbd>Enter</kbd> to save)</td></tr>
+<tr><td><kbd>A</kbd></td><td>answer the selected task's question</td></tr>
 <tr><td><kbd>c</kbd> <kbd>r</kbd></td><td>cancel / reopen the selected task</td></tr>
 </tbody></table></div>
 </div>
@@ -1582,7 +1595,8 @@ hird db-path</code></pre>
 
 <p>
   Cards on the queue board carry a yellow <code>waits #1 #3</code> badge when a
-  task looks open but nobody can actually claim it yet, and a magenta
+  task looks open but nobody can actually claim it yet, an
+  <code>awaits answer</code> badge when its holder needs a human decision, and a magenta
   <code>reviews #4</code> badge when a task is somebody's
   <a href="#review">review</a> — which decides who can take it, and is exactly
   the thing the title cannot tell you. <a href="#verdict">Verdicts</a> mark the
@@ -1660,7 +1674,7 @@ hird db-path</code></pre>
     <tr><td><code>task_split</code></td><td>Break a task into pieces the other agents can work. Holder only.</td></tr>
     <tr><td><code>task_complete</code></td><td>Finish, with a summary — and on a review, a <a href="#verdict">verdict</a>. Holder only.</td></tr>
     <tr><td><code>task_fail</code></td><td>Give up, with a reason. Holder only.</td></tr>
-    <tr><td><code>task_release</code></td><td>Hand the task back unfinished, still claimable. Holder only.</td></tr>
+    <tr><td><code>task_release</code></td><td>Hand the task back unfinished; with <code>question</code>, park it until <code>hird answer</code>. Holder only.</td></tr>
     <tr><td><code>mem_store</code></td><td>Record one durable fact — or, said again word for word, confirm one.</td></tr>
     <tr><td><code>mem_search</code></td><td>Find facts recorded earlier, by anyone, each marked with whether its code has moved since.</td></tr>
   </tbody>
@@ -1811,6 +1825,10 @@ dispatch_hook = <span class="s">""</span></code></pre>
     <tr>
       <td><a href="https://github.com/aoprisan/hird/blob/main/examples/exhibit.sh"><code>exhibit.sh</code></a></td>
       <td>A finished task's uncommitted diff shown after the tree has moved on, and a written-over version brought back — the <a href="#exhibit">exhibit</a>, end to end. Makes its own throwaway git repository.</td>
+    </tr>
+    <tr>
+      <td><a href="https://github.com/aoprisan/hird/blob/main/examples/question.sh"><code>question.sh</code></a></td>
+      <td>An agent reaches a decision it must not guess, the task stays out of dispatch until the human answers, and the answer rides in the next claim.</td>
     </tr>
     <tr>
       <td><a href="https://github.com/aoprisan/hird/blob/main/examples/footing.sh"><code>footing.sh</code></a></td>

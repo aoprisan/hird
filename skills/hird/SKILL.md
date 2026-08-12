@@ -26,6 +26,9 @@ agents and a human may be using it at the same time.
   code that was always there. Re-read the files it names before building on
   or over them; `hird diff <seq> --tenure <n>` (named in the sentence) shows
   exactly what that round changed.
+- If the claim carries `questions`, read every answer before continuing. An
+  earlier holder stopped specifically because guessing would have been wrong;
+  the recorded answer is part of the task brief.
 
 ## Work safely
 
@@ -87,7 +90,11 @@ dispatch instead.
   redoes the work — they will not see your session. Do not fix reviewed work
   inside the review.
 - Call `task_fail` only when the task itself failed.
-- Call `task_release` when you cannot continue but the task remains valid.
+- Call `task_release` when you cannot continue but the task remains valid. If
+  no agent can continue until the human decides or supplies something, include
+  one precise `question`; hird will keep the task out of dispatch until the
+  human answers it. Do not use a question for work another agent could do —
+  release normally or split that work instead.
 - If one task is really several independently workable jobs, call `task_split`
   with self-contained bodies and accurate file scopes.
 

@@ -134,6 +134,46 @@ fn illegal_transitions_are_refused_with_the_current_status() {
 }
 
 #[test]
+fn answer_resumes_a_parked_task_and_keeps_the_decision_in_its_brief() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["add", "choose compatibility"]);
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex.claim(1);
+    codex
+        .call(
+            "task_release",
+            serde_json::json!({
+                "seq": 1,
+                "reason": "the implementation point is isolated",
+                "question": "Preserve the legacy config format?"
+            }),
+        )
+        .unwrap();
+
+    let listed = sandbox.run(&["ls"]);
+    assert!(listed.contains("awaits answer"), "{listed}");
+    let shown = sandbox.run(&["show", "1"]);
+    assert!(
+        shown.contains("question  Preserve the legacy config format?"),
+        "{shown}"
+    );
+    assert!(shown.contains("hird answer 1 <ANSWER>"), "{shown}");
+
+    let answered = sandbox.run(&["answer", "1", "No; migrate it."]);
+    assert!(answered.contains("task 1 answered"), "{answered}");
+    assert!(answered.contains("No; migrate it."), "{answered}");
+    let shown = sandbox.run(&["show", "1"]);
+    assert!(shown.contains("answer    No; migrate it."), "{shown}");
+    assert!(shown.contains("answered      cli"), "{shown}");
+
+    let mut claude = McpSession::start(&sandbox, "claude-code");
+    let claim = claude.claim(1);
+    assert_eq!(claim["questions"][0]["answer"], "No; migrate it.");
+    codex.shutdown();
+    claude.shutdown();
+}
+
+#[test]
 fn mem_add_prints_an_id_and_search_finds_it() {
     let sandbox = Sandbox::new();
     let id = sandbox

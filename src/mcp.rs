@@ -35,8 +35,8 @@ use crate::footing;
 use crate::herald::{Announcement, Cause, Herald};
 use crate::identity::{self, AgentId};
 use crate::model::{
-    Assertion, Blocker, Conflict, Contention, Footprint, Ground, Observed, Recusal, Shifted,
-    Standing, Status, Task, TaskEvent, TaskSummary, Verdict, VerdictRecord,
+    Assertion, Blocker, Conflict, Contention, Footprint, Ground, Observed, Question, Recusal,
+    Shifted, Standing, Status, Task, TaskEvent, TaskSummary, Verdict, VerdictRecord,
 };
 use crate::repo::{
     Claim, Claimable, Delivered, Dispatch, Finished, MemoryQuery, NewAssertion, ProjectScope,
@@ -421,7 +421,10 @@ impl HirdMcp {
              When a task turns out to be bigger than one job, `task_split` files the pieces \
              as real tasks, makes the original wait for them, and puts it back in the pool — \
              so the other agents can work the pieces in parallel while it waits. When you \
-             simply cannot do a task, `task_release` hands it back without marking it failed.\n\
+             simply cannot do a task, `task_release` hands it back without marking it failed. \
+             When no agent can continue until a human decides or supplies something, pass the \
+             exact `question`: the task stays out of dispatch until `hird answer` records the \
+             response, and the next claim receives that question and answer.\n\
              \n\
              Tasks can depend on other tasks. A task whose dependencies are unfinished \
              cannot be claimed, and the refusal names what it is waiting for. When you do \
@@ -606,6 +609,10 @@ pub struct TaskReleaseArgs {
     pub seq: i64,
     /// Why you are handing it back, for the next agent and the human.
     pub reason: String,
+    /// The answer this task needs before any agent can continue. When present,
+    /// the task stays out of dispatch until a human runs `hird answer`.
+    #[serde(default)]
+    pub question: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -705,6 +712,9 @@ struct TaskRow {
     /// cannot be claimed yet.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     blocked_by: Vec<i64>,
+    /// The question keeping this otherwise-open task out of dispatch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    awaiting_answer: Option<String>,
     /// Set when this task is a review of work *you* did, so you cannot claim
     /// it however open it looks. Same reason `blocked_by` is here: a list that
     /// shows unclaimable work as available is lying to whoever reads it.
@@ -722,6 +732,7 @@ impl TaskRow {
         summary: TaskSummary,
         show_project: bool,
         blocked_by: Vec<i64>,
+        awaiting_answer: Option<Question>,
         recused: Option<Recusal>,
         verdict: Option<Verdict>,
     ) -> TaskRow {
@@ -735,6 +746,7 @@ impl TaskRow {
             updated_at: summary.updated_at,
             project: show_project.then_some(summary.project),
             blocked_by,
+            awaiting_answer: awaiting_answer.map(|q| q.question),
             recused_from_you: recused.map(|r| r.describe()),
         }
     }
@@ -754,6 +766,10 @@ struct TaskDetail {
     lease_expires_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     result: Option<String>,
+    /// Questions earlier holders asked, including the answer that resumed
+    /// each completed round and the current unanswered one, when present.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    questions: Vec<QuestionRow>,
     created_at: String,
     updated_at: String,
     /// Tasks that must finish before this one can be claimed.
@@ -867,6 +883,7 @@ struct TaskContext {
     recalled: Vec<Recalled>,
     witness: Evidence,
     events: Vec<TaskEvent>,
+    questions: Vec<Question>,
 }
 
 impl TaskDetail {
@@ -881,6 +898,11 @@ impl TaskDetail {
             holder: task.claimed_by,
             lease_expires_at: task.lease_expires_at,
             result: task.result,
+            questions: context
+                .questions
+                .into_iter()
+                .map(QuestionRow::from)
+                .collect(),
             created_at: task.created_at,
             updated_at: task.updated_at,
             waiting_for: context
@@ -903,6 +925,34 @@ impl TaskDetail {
             recalled: recall_rows(context.recalled),
             witness: context.witness,
             events: context.events.into_iter().map(EventRow::from).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct QuestionRow {
+    n: i64,
+    question: String,
+    asked_by: String,
+    asked_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    answer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    answered_by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    answered_at: Option<String>,
+}
+
+impl From<Question> for QuestionRow {
+    fn from(q: Question) -> QuestionRow {
+        QuestionRow {
+            n: q.n,
+            question: q.question,
+            asked_by: q.asked_by,
+            asked_at: q.asked_at,
+            answer: q.answer,
+            answered_by: q.answered_by,
+            answered_at: q.answered_at,
         }
     }
 }
@@ -1029,6 +1079,10 @@ struct ClaimResult {
     /// be — so here it is, unasked.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     built_on: Vec<GroundRow>,
+    /// Decisions earlier holders stopped to ask for. Every row here is
+    /// answered — an unresolved one would have prevented this claim.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    questions: Vec<QuestionRow>,
     /// What happened to this task before this claim, when it has changed
     /// hands: who held it, how that holding ended, and what moved under them
     /// — because whatever they left uncommitted is in the tree this claim
@@ -1048,6 +1102,12 @@ impl ClaimResult {
         previously: Option<String>,
     ) -> ClaimResult {
         let overlaps = describe_all(&claim.conflicts);
+        let questions: Vec<QuestionRow> = claim
+            .questions
+            .iter()
+            .cloned()
+            .map(QuestionRow::from)
+            .collect();
         let provisional: Vec<i64> = claim
             .ground
             .iter()
@@ -1093,6 +1153,12 @@ impl ClaimResult {
                  {reminder}"
             );
         }
+        if !questions.is_empty() {
+            reminder = format!(
+                "read `questions` before continuing — an earlier holder stopped for those \
+                 decisions, and the answers are part of this task's brief. Then: {reminder}"
+            );
+        }
         ClaimResult {
             claimed: claim.task.seq,
             holder,
@@ -1105,6 +1171,7 @@ impl ClaimResult {
             overlaps,
             recalled: recall_rows(recalled),
             built_on: ground_rows(claim.ground),
+            questions,
             previously,
             reminder,
         }
@@ -1128,6 +1195,9 @@ struct NextResult {
     /// not work being done.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     held: Vec<HeldRow>,
+    /// Open tasks parked until a human answers the named question.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    awaiting_answer: Vec<AwaitingAnswerRow>,
     /// Ready tasks passed over because another agent is in their files.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     deferred: Vec<DeferredRow>,
@@ -1149,6 +1219,12 @@ struct HeldRow {
     seq: i64,
     /// The unfinished review whose verdict this task waits on.
     review: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct AwaitingAnswerRow {
+    seq: i64,
+    question: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1177,6 +1253,14 @@ impl NextResult {
                 .into_iter()
                 .map(|(seq, review)| HeldRow { seq, review })
                 .collect(),
+            awaiting_answer: dispatch
+                .awaiting_answer
+                .into_iter()
+                .map(|(seq, question)| AwaitingAnswerRow {
+                    seq,
+                    question: question.question,
+                })
+                .collect(),
             deferred: dispatch
                 .deferred
                 .into_iter()
@@ -1201,13 +1285,14 @@ impl NextResult {
 fn idle_reason(dispatch: &Dispatch) -> String {
     let recused = dispatch.recused.len();
     let held = dispatch.held.len();
+    let awaiting = dispatch.awaiting_answer.len();
     let blocked = dispatch.blocked.len();
     let deferred = dispatch.deferred.len();
 
     // Named first when it is the only thing left, because it is the only one
     // of the four that waiting will not fix: a review of this harness's own
     // work stays unclaimable until somebody opens a different tool.
-    if recused > 0 && held == 0 && blocked == 0 && deferred == 0 {
+    if recused > 0 && held == 0 && awaiting == 0 && blocked == 0 && deferred == 0 {
         return format!(
             "{recused} task{} ready, but every one of them is a review of work this harness \
              did — they need an agent in another harness. Tell the human; waiting will not \
@@ -1218,7 +1303,7 @@ fn idle_reason(dispatch: &Dispatch) -> String {
     // Held gets its own sentence when it is the whole story: "the work is done
     // and its review has not concluded" points at a review to work or chase,
     // where "waiting on dependencies" points at work that has not happened.
-    if held > 0 && recused == 0 && blocked == 0 && deferred == 0 {
+    if held > 0 && recused == 0 && awaiting == 0 && blocked == 0 && deferred == 0 {
         let mut reviews: Vec<i64> = dispatch.held.iter().map(|(_, review)| *review).collect();
         reviews.sort_unstable();
         reviews.dedup();
@@ -1233,6 +1318,15 @@ fn idle_reason(dispatch: &Dispatch) -> String {
             plural(held, " is", "s are")
         );
     }
+    if awaiting > 0 && recused == 0 && held == 0 && blocked == 0 && deferred == 0 {
+        return format!(
+            "{awaiting} open task{} awaiting a human answer; `awaiting_answer` names the \
+             question{}. No agent can make progress on {} until the answer is recorded",
+            plural(awaiting, " is", "s are"),
+            plural(awaiting, "", "s"),
+            plural(awaiting, "it", "them"),
+        );
+    }
     let mut tail = String::new();
     if held > 0 {
         tail.push_str(&format!(
@@ -1242,6 +1336,11 @@ fn idle_reason(dispatch: &Dispatch) -> String {
     if recused > 0 {
         tail.push_str(&format!(
             ", and {recused} that this harness is recused from (they need another harness)"
+        ));
+    }
+    if awaiting > 0 {
+        tail.push_str(&format!(
+            ", and {awaiting} awaiting a human answer before any agent can continue"
         ));
     }
     match (blocked, deferred) {
@@ -1436,6 +1535,16 @@ struct FinishResult {
     advice: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct ReleaseResult {
+    #[serde(flatten)]
+    finish: FinishResult,
+    /// Present when this was not an ordinary handoff: no agent can claim the
+    /// task until the human records an answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    awaiting_answer: Option<String>,
+}
+
 impl FinishResult {
     fn new(
         seq: i64,
@@ -1575,47 +1684,49 @@ impl HirdMcp {
         let show_project = scope.is_all();
 
         let actor = self.actor();
-        let (released, dispatched, tasks, unmet, recused, standing) = self.with_db(|db| {
-            let released = db
-                .tasks()
-                .sweep_leases()
-                .map(|s| s.expired)
-                .unwrap_or_default();
-            // Expiry is enforced lazily, so this sweep is the moment the
-            // queue first knows these tasks are back in the pool — which
-            // makes it the herald's moment too.
-            let dispatched = self.expired_announcements(db, &released);
-            let listed = db.tasks().list(&scope, status);
-            // Which of these this session is barred from. Only the open ones
-            // are worth asking about: a claimed or finished task's claimability
-            // is not the reader's question.
-            let recused: BTreeMap<i64, Recusal> = listed
-                .as_ref()
-                .map(|tasks| {
-                    tasks
-                        .iter()
-                        .filter(|t| t.status == Status::Open)
-                        .filter_map(|t| {
-                            db.recusals()
-                                .bars(t.seq, &actor)
-                                .ok()
-                                .flatten()
-                                .map(|r| (t.seq, r))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            (
-                released,
-                dispatched,
-                listed,
-                db.deps()
-                    .unmet_map(&scope, self.config.clearance())
-                    .unwrap_or_default(),
-                recused,
-                db.verdicts().standing(&scope).unwrap_or_default(),
-            )
-        });
+        let (released, dispatched, tasks, unmet, questions, recused, standing) =
+            self.with_db(|db| {
+                let released = db
+                    .tasks()
+                    .sweep_leases()
+                    .map(|s| s.expired)
+                    .unwrap_or_default();
+                // Expiry is enforced lazily, so this sweep is the moment the
+                // queue first knows these tasks are back in the pool — which
+                // makes it the herald's moment too.
+                let dispatched = self.expired_announcements(db, &released);
+                let listed = db.tasks().list(&scope, status);
+                // Which of these this session is barred from. Only the open ones
+                // are worth asking about: a claimed or finished task's claimability
+                // is not the reader's question.
+                let recused: BTreeMap<i64, Recusal> = listed
+                    .as_ref()
+                    .map(|tasks| {
+                        tasks
+                            .iter()
+                            .filter(|t| t.status == Status::Open)
+                            .filter_map(|t| {
+                                db.recusals()
+                                    .bars(t.seq, &actor)
+                                    .ok()
+                                    .flatten()
+                                    .map(|r| (t.seq, r))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                (
+                    released,
+                    dispatched,
+                    listed,
+                    db.deps()
+                        .unmet_map(&scope, self.config.clearance())
+                        .unwrap_or_default(),
+                    db.questions().unanswered_map(&scope).unwrap_or_default(),
+                    recused,
+                    db.verdicts().standing(&scope).unwrap_or_default(),
+                )
+            });
         self.announce(&dispatched);
         let tasks = tasks.map_err(stringify)?;
 
@@ -1627,9 +1738,10 @@ impl HirdMcp {
                 .into_iter()
                 .map(|t| {
                     let blocked = unmet.get(&t.seq).cloned().unwrap_or_default();
+                    let question = questions.get(&t.seq).cloned();
                     let barred = recused.get(&t.seq).cloned();
                     let verdict = standing.get(&t.seq).copied();
-                    TaskRow::from_summary(t, show_project, blocked, barred, verdict)
+                    TaskRow::from_summary(t, show_project, blocked, question, barred, verdict)
                 })
                 .collect(),
             released,
@@ -1664,6 +1776,7 @@ impl HirdMcp {
                     recalled: self.recall(db, args.seq, recall_limit),
                     witness: self.evidence(db, args.seq),
                     events: db.tasks().events(&task.id, EVENT_WINDOW)?,
+                    questions: db.questions().for_task(args.seq)?,
                 },
             ))
         });
@@ -1885,28 +1998,44 @@ impl HirdMcp {
     ) -> Result<String, String> {
         self.sweep_announcing();
         let actor = self.actor();
-        let (task, evidence, dispatched) = self
+        let question = args.question.as_deref().map(str::trim);
+        let (task, evidence, dispatched, asked) = self
             .with_db(|db| {
                 // Before the release, while this session still holds the lease
                 // and the record of what moved under it is still its own.
                 let evidence = self.witnessed(db, args.seq);
-                let task = db.tasks().release(args.seq, &actor, &args.reason)?;
-                // The task is back in the pool, waiting for hands other than
-                // the ones that just let go of it.
-                let dispatched = self.dispatchable(db, Cause::Released, task.seq);
-                Ok::<_, Error>((task, evidence, dispatched))
+                let (task, asked) = match question {
+                    Some(question) => {
+                        let (task, asked) =
+                            db.tasks()
+                                .release_asking(args.seq, &actor, &args.reason, question)?;
+                        (task, Some(asked))
+                    }
+                    None => (db.tasks().release(args.seq, &actor, &args.reason)?, None),
+                };
+                // An ordinary release is back in the pool. A question release
+                // is deliberately not announced: it is waiting for a human,
+                // not another agent.
+                let dispatched = asked
+                    .is_none()
+                    .then(|| self.dispatchable(db, Cause::Released, task.seq))
+                    .flatten();
+                Ok::<_, Error>((task, evidence, dispatched, asked))
             })
             .map_err(stringify)?;
         self.announce(dispatched.as_slice());
-        json(&FinishResult::new(
-            task.seq,
-            task.status,
-            args.reason.trim().to_string(),
-            evidence,
-            // Releasing is not finishing, so nothing is filed to review.
-            None,
-            &[],
-        ))
+        json(&ReleaseResult {
+            finish: FinishResult::new(
+                task.seq,
+                task.status,
+                args.reason.trim().to_string(),
+                evidence,
+                // Releasing is not finishing, so nothing is filed to review.
+                None,
+                &[],
+            ),
+            awaiting_answer: asked.map(|q| q.question),
+        })
     }
 
     /// Record progress and renew your lease. Only the holder may call this.
@@ -3359,6 +3488,7 @@ mod tests {
             s.task_release(Parameters(TaskReleaseArgs {
                 seq,
                 reason: "needs credentials I do not have".into(),
+                question: None,
             }))
             .await,
         );
@@ -3368,6 +3498,48 @@ mod tests {
         // Straight back on the ready list, no human intervention needed.
         let handed = parse(s.task_next(Parameters(next_args())).await);
         assert_eq!(handed["claimed"]["claimed"], seq);
+    }
+
+    #[tokio::test]
+    async fn a_question_parks_work_until_its_answer_is_handed_to_the_next_claim() {
+        let s = server();
+        let seq = seed(&s, "choose compatibility", "implement after the decision");
+        s.task_claim(Parameters(just(seq))).await.unwrap();
+
+        let released = parse(
+            s.task_release(Parameters(TaskReleaseArgs {
+                seq,
+                reason: "the implementation point is isolated".into(),
+                question: Some("Preserve the legacy config format?".into()),
+            }))
+            .await,
+        );
+        assert_eq!(
+            released["awaiting_answer"],
+            "Preserve the legacy config format?"
+        );
+
+        let refused = s.task_claim(Parameters(just(seq))).await.unwrap_err();
+        assert!(refused.contains("awaiting an answer"), "{refused}");
+        let idle = parse(s.task_next(Parameters(next_args())).await);
+        assert_eq!(idle["awaiting_answer"][0]["seq"], seq);
+        assert!(idle["idle"].as_str().unwrap().contains("human answer"));
+
+        let detail = parse(s.task_get(Parameters(SeqArgs { seq })).await);
+        assert_eq!(
+            detail["questions"][0]["question"],
+            "Preserve the legacy config format?"
+        );
+        assert!(detail["questions"][0].get("answer").is_none());
+
+        s.with_db(|db| db.questions().answer(seq, "cli", "No; migrate it."))
+            .unwrap();
+        let claimed = parse(s.task_claim(Parameters(just(seq))).await);
+        assert_eq!(claimed["questions"][0]["answer"], "No; migrate it.");
+        assert!(claimed["reminder"]
+            .as_str()
+            .unwrap()
+            .contains("`questions`"));
     }
 
     #[tokio::test]

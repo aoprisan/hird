@@ -7,11 +7,11 @@ use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction, TransactionBehavior};
 
 use super::scope::OnConflict;
-use super::{deps, new_id, recusal, scope, ProjectScope};
+use super::{deps, new_id, questions, recusal, scope, ProjectScope};
 use crate::error::{Error, Result};
 use crate::model::{
-    fmt_ts, now_ts, Clearance, Conflict, EventKind, Ground, Status, Task, TaskEvent, TaskSummary,
-    Transition,
+    fmt_ts, now_ts, Clearance, Conflict, EventKind, Ground, Question, Status, Task, TaskEvent,
+    TaskSummary, Transition,
 };
 
 /// Columns selected for a full [`Task`], in the order [`row_to_task`] expects.
@@ -44,6 +44,10 @@ pub struct Claim {
     /// over here because the claim is the one moment the claimant is
     /// guaranteed to be listening.
     pub ground: Vec<Ground>,
+    /// Questions earlier holders asked and the answers that made this task
+    /// workable again. Handed over on the claim so continuation never depends
+    /// on the next agent knowing to inspect history.
+    pub questions: Vec<Question>,
 }
 
 /// The outcome of asking the queue for whatever should be worked next.
@@ -70,6 +74,9 @@ pub struct Dispatch {
     /// review has not read it yet" points a human at a completely different
     /// fix than "the work has not happened".
     pub held: Vec<(i64, i64)>,
+    /// Open tasks whose holder released them with a question. These are not
+    /// blocked on more agent work; they need a human answer.
+    pub awaiting_answer: Vec<(i64, Question)>,
 }
 
 /// A finished task, and everything its completion set in motion.
@@ -239,6 +246,40 @@ impl<'a> Tasks<'a> {
         let task = release_in_tx(&tx, &task, actor, &now, reason)?;
         tx.commit()?;
         Ok(task)
+    }
+
+    /// Release a held task and park it behind a question, atomically.
+    ///
+    /// The task becomes `open` but the unresolved question is a readiness
+    /// gate, so no agent can churn through it while the needed decision is
+    /// absent. Answering is deliberately a human-side repository operation.
+    pub fn release_asking(
+        &self,
+        seq: i64,
+        actor: &str,
+        reason: &str,
+        question: &str,
+    ) -> Result<(Task, Question)> {
+        let reason = reason.trim();
+        if reason.is_empty() {
+            return Err(Error::invalid(
+                "reason must not be empty; say what you finished before asking",
+            ));
+        }
+        let question = question.trim();
+        if question.is_empty() {
+            return Err(Error::invalid(
+                "question must not be empty; say what answer the task needs",
+            ));
+        }
+        self.sweep_leases()?;
+        let now = now_ts();
+        let tx = self.immediate_tx()?;
+        let task = require_holder(&tx, seq, actor)?;
+        let asked = questions::ask_in_tx(&tx, &task.id, actor, question, &now)?;
+        let task = release_in_tx(&tx, &task, actor, &now, reason)?;
+        tx.commit()?;
+        Ok((task, asked))
     }
 
     // ----------------------------------------------------------------- reads
@@ -513,6 +554,10 @@ impl<'a> Tasks<'a> {
 
         let mut dispatch = Dispatch::default();
         for (seq, id) in candidates {
+            if let Some(question) = questions::unanswered_in(&tx, &id)? {
+                dispatch.awaiting_answer.push((seq, question));
+                continue;
+            }
             let unmet = deps::unmet_blockers(&tx, &id, clearance)?;
             if !unmet.is_empty() {
                 // A task whose every blocker is `done` is not waiting for work
@@ -990,6 +1035,18 @@ fn claim_in_tx(
 ) -> Result<Claim> {
     let id = task_id_for_seq(tx, seq)?;
 
+    let status: String = tx.query_row("SELECT status FROM tasks WHERE id = ?1", [&id], |row| {
+        row.get(0)
+    })?;
+    if status == Status::Open.as_str() {
+        if let Some(question) = questions::unanswered_in(tx, &id)? {
+            return Err(Error::AwaitingAnswer {
+                seq,
+                question: Box::new(question),
+            });
+        }
+    }
+
     let blockers = deps::unmet_blockers(tx, &id, clearance)?;
     if !blockers.is_empty() {
         return Err(Error::Blocked { seq, blockers });
@@ -1046,6 +1103,7 @@ fn claim_in_tx(
     // claimant is handed each finished dependency's own summary here, at the
     // one moment it is guaranteed to be listening.
     let ground = deps::ground_for(tx, &id)?;
+    let questions = questions::history_for_id(tx, &id)?;
 
     let task = fetch_task_by_seq(tx, seq)?.expect("claimed row exists");
     Ok(Claim {
@@ -1053,6 +1111,7 @@ fn claim_in_tx(
         paths: declared,
         conflicts,
         ground,
+        questions,
     })
 }
 
