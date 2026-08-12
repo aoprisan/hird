@@ -3542,6 +3542,49 @@ mod tests {
             .contains("`questions`"));
     }
 
+    /// A parked question is not the whole story when the task is also waiting
+    /// on work. Told only about the question, a human answers it and watches
+    /// nothing move — so the task is named in both buckets, and the idle
+    /// sentence stops claiming the answer is all that stands in the way.
+    #[tokio::test]
+    async fn a_task_both_blocked_and_parked_is_reported_as_both() {
+        let s = server();
+        let groundwork = seed(&s, "land the migration", "");
+        let seq = seed(&s, "choose compatibility", "");
+
+        s.task_claim(Parameters(just(seq))).await.unwrap();
+        s.task_release(Parameters(TaskReleaseArgs {
+            seq,
+            reason: "the implementation point is isolated".into(),
+            question: Some("Preserve the legacy config format?".into()),
+        }))
+        .await
+        .unwrap();
+        // The graph learns what this work waits on only after the holder let
+        // go of it — which is the ordinary way both gates end up on one task.
+        s.with_db(|db| db.deps().add(seq, groundwork, "cli"))
+            .unwrap();
+        // And somebody is already on the groundwork, so it is not what the
+        // queue would hand out instead.
+        s.with_db(|db| {
+            db.tasks().claim(
+                groundwork,
+                "codex:other",
+                std::time::Duration::from_secs(900),
+            )
+        })
+        .unwrap();
+
+        let idle = parse(s.task_next(Parameters(next_args())).await);
+        assert_eq!(idle["awaiting_answer"][0]["seq"], seq);
+        let reason = idle["idle"].as_str().unwrap();
+        assert!(reason.contains("awaiting a human answer"), "{reason}");
+        assert!(
+            !reason.contains("No agent can make progress"),
+            "the answer is not the only thing in the way: {reason}"
+        );
+    }
+
     #[tokio::test]
     async fn task_get_shows_dependencies_scope_and_overlaps() {
         let s = server();

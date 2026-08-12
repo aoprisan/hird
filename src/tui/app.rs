@@ -118,6 +118,18 @@ pub struct Readiness {
     pub questions: Vec<Question>,
 }
 
+/// What `c` and `r` do to the selected card.
+///
+/// An enum rather than the word itself: the write and the announcement that
+/// follows it are two decisions made from one name, and a spelling that only
+/// matched in one of them would show up as a summons that silently never
+/// happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Act {
+    Cancel,
+    Reopen,
+}
+
 /// A column of the kanban board.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Column {
@@ -648,8 +660,8 @@ impl App {
                 }
             }
             KeyCode::Enter => self.open_task_detail(db)?,
-            KeyCode::Char('c') => self.act_on_selection(db, "cancel")?,
-            KeyCode::Char('r') => self.act_on_selection(db, "reopen")?,
+            KeyCode::Char('c') => self.act_on_selection(db, Act::Cancel)?,
+            KeyCode::Char('r') => self.act_on_selection(db, Act::Reopen)?,
             KeyCode::Char('A') => {
                 let Some(seq) = self.selected_task().map(|t| t.seq) else {
                     self.warn("nothing selected".to_string());
@@ -1030,18 +1042,18 @@ impl App {
     }
 
     /// Cancel or reopen whatever the cursor is on.
-    fn act_on_selection(&mut self, db: &Db, action: &str) -> anyhow::Result<()> {
+    fn act_on_selection(&mut self, db: &Db, action: Act) -> anyhow::Result<()> {
         let Some(seq) = self.selected_task().map(|t| t.seq) else {
             self.warn("nothing selected".to_string());
             return Ok(());
         };
         let outcome = match action {
-            "cancel" => db.tasks().cancel(seq, ACTOR_TUI, ""),
-            _ => db.tasks().reopen(seq, ACTOR_TUI, ""),
+            Act::Cancel => db.tasks().cancel(seq, ACTOR_TUI, ""),
+            Act::Reopen => db.tasks().reopen(seq, ACTOR_TUI, ""),
         };
         match outcome {
             Ok(task) => {
-                if action == "reopen" {
+                if action == Act::Reopen {
                     crate::herald::announce_claimable(
                         self.herald.as_ref(),
                         db,

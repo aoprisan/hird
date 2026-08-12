@@ -24,7 +24,7 @@
 
 use std::collections::BTreeMap;
 
-use rusqlite::{params, Connection, Row, Transaction, TransactionBehavior};
+use rusqlite::{params, Connection, Row};
 
 use super::deps::id_for_seq;
 use super::{new_id, ProjectScope};
@@ -64,7 +64,7 @@ impl<'a> Witnessed<'a> {
     /// previous holder left uncommitted, and this record is the only account
     /// of what that was.
     pub fn begin(&self, seq: i64, tree: &Tree, holder: &str) -> Result<()> {
-        let tx = Transaction::new_unchecked(self.conn, TransactionBehavior::Immediate)?;
+        let tx = super::immediate_tx(self.conn)?;
         let task_id = id_for_seq(&tx, seq)?;
         let now = now_ts();
         archive_tenure(&tx, &task_id, &now)?;
@@ -178,7 +178,7 @@ impl<'a> Witnessed<'a> {
     /// one. A path seen here for the first time is recorded at what it says
     /// now, because there is no earlier version to preserve.
     pub fn record(&self, seq: i64, changes: &[Change], actor: &str) -> Result<Vec<String>> {
-        let tx = Transaction::new_unchecked(self.conn, TransactionBehavior::Immediate)?;
+        let tx = super::immediate_tx(self.conn)?;
         let task_id = id_for_seq(&tx, seq)?;
         let now = now_ts();
 
@@ -246,7 +246,7 @@ impl<'a> Witnessed<'a> {
     /// having its copy marked current has been told nothing at all. So a
     /// check-in reads the evidence first, and confirms second.
     pub fn confirm(&self, seq: i64, changes: &[Change]) -> Result<()> {
-        let tx = Transaction::new_unchecked(self.conn, TransactionBehavior::Immediate)?;
+        let tx = super::immediate_tx(self.conn)?;
         let task_id = id_for_seq(&tx, seq)?;
         let now = now_ts();
         for change in changes {
@@ -495,7 +495,7 @@ impl<'a> Witnessed<'a> {
         if blobs.is_empty() {
             return Ok(());
         }
-        let tx = Transaction::new_unchecked(self.conn, TransactionBehavior::Immediate)?;
+        let tx = super::immediate_tx(self.conn)?;
         let now = now_ts();
         for (hash, content) in blobs {
             tx.execute(

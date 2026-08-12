@@ -15,7 +15,7 @@
 //! them sort it out — or enforced, when the configuration says overlapping work
 //! should simply be refused.
 
-use rusqlite::{params, Connection, Row, Transaction, TransactionBehavior};
+use rusqlite::{params, Connection, Row, Transaction};
 
 use super::deps::id_for_seq;
 use super::{new_id, ProjectScope};
@@ -54,7 +54,7 @@ impl<'a> Scopes<'a> {
         actor: &str,
         on_conflict: OnConflict,
     ) -> Result<Vec<Conflict>> {
-        let tx = Transaction::new_unchecked(self.conn, TransactionBehavior::Immediate)?;
+        let tx = super::immediate_tx(self.conn)?;
         let conflicts = declare_in_tx(&tx, seq, patterns, actor, on_conflict)?;
         tx.commit()?;
         Ok(conflicts)
@@ -62,7 +62,7 @@ impl<'a> Scopes<'a> {
 
     /// Forget everything task `seq` declared.
     pub fn clear(&self, seq: i64, actor: &str) -> Result<usize> {
-        let tx = Transaction::new_unchecked(self.conn, TransactionBehavior::Immediate)?;
+        let tx = super::immediate_tx(self.conn)?;
         let task_id = id_for_seq(&tx, seq)?;
         let removed = tx.execute("DELETE FROM task_paths WHERE task_id = ?1", [&task_id])?;
         if removed > 0 {

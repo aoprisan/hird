@@ -664,6 +664,17 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc
         format!("· {ready} ready  "),
         Style::default().fg(theme::status_color(Status::Open)),
     ));
+    // A parked question is the one kind of stall nothing else will clear:
+    // the queue deliberately does not summon an agent to it, so it waits on
+    // somebody reading this bar. Shown only when there is one, in the colour
+    // the board already uses for work that cannot move.
+    let awaiting = app.questions.len();
+    if awaiting > 0 {
+        spans.push(Span::styled(
+            format!("· {awaiting} awaiting you  "),
+            theme::blocked_style(),
+        ));
+    }
     spans.push(Span::styled(
         format!("· {} memory  ", app.memory_total),
         theme::dim_style(),
@@ -725,7 +736,14 @@ fn render_help(frame: &mut Frame, app: &App) {
     ];
 
     let mut lines = Vec::new();
+    // Blank line *before* each section rather than after every one: the same
+    // separation, without spending a row between the last section and the
+    // note that follows it. Rows are the scarce thing here — the box has to
+    // fit a short terminal whole, and what does not fit is simply not drawn.
     let section = |title: &str, keys: &[(&str, &str)], lines: &mut Vec<Line<'static>>| {
+        if !lines.is_empty() {
+            lines.push(Line::from(""));
+        }
         lines.push(Line::from(Span::styled(
             title.to_string(),
             theme::focus_style(),
@@ -741,6 +759,9 @@ fn render_help(frame: &mut Frame, app: &App) {
     section("Queue board", queue, &mut lines);
     section("Memory browser", memory, &mut lines);
     section("Swarm", swarm, &mut lines);
+    // No separator before the note: it is dim and reads as a footer already,
+    // and the row it would cost is a row the box does not have on a short
+    // terminal.
     lines.push(Line::from(Span::styled(
         format!(
             "Leases last {} minutes; expired claims return to Open automatically.",
@@ -748,15 +769,56 @@ fn render_help(frame: &mut Frame, app: &App) {
         ),
         theme::dim_style(),
     )));
-    lines.push(Line::from(Span::styled(
-        "any key closes this".to_string(),
-        theme::dim_style(),
-    )));
 
-    // Sized to its contents so adding a section cannot silently push the
-    // lease note off the bottom of the box.
-    let height = lines.len() as u16 + 2;
-    overlay(frame, " Keys ", Text::from(lines), 62, height);
+    // Sized to what the box will actually draw, not to how many lines went
+    // in: the overlay wraps, so one long line costs two rows, and a height
+    // counted in lines silently loses the last one. How to close this lives
+    // in the title, where a clipped row cannot take it.
+    let height = wrapped_height(&lines, HELP_WIDTH);
+    overlay(
+        frame,
+        " Keys · any key closes ",
+        Text::from(lines),
+        HELP_WIDTH,
+        height,
+    );
+}
+
+/// The help overlay's width. Wide enough that the lease note fits on one row,
+/// which is one row the key list gets to keep.
+const HELP_WIDTH: u16 = 72;
+
+/// How many rows `lines` occupy once [`overlay`] wraps them to `width`,
+/// borders included.
+fn wrapped_height(lines: &[Line<'static>], width: u16) -> u16 {
+    let inner = width.saturating_sub(2).max(1) as usize;
+    let rows: usize = lines.iter().map(|line| wrapped_rows(line, inner)).sum();
+    u16::try_from(rows).unwrap_or(u16::MAX).saturating_add(2)
+}
+
+/// Greedy word wrap, counted rather than performed — the same rule
+/// `Wrap { trim: false }` applies, which is what the box will be drawn with.
+fn wrapped_rows(line: &Line<'_>, inner: usize) -> usize {
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    let mut rows = 1;
+    let mut used = 0;
+    for word in text.split(' ') {
+        let width = word.chars().count();
+        if used == 0 {
+            used = width;
+        } else if used + 1 + width <= inner {
+            used += 1 + width;
+        } else {
+            rows += 1;
+            used = width;
+        }
+        // A single word longer than the box breaks across rows of its own.
+        while used > inner {
+            rows += 1;
+            used -= inner;
+        }
+    }
+    rows
 }
 
 fn render_add_task(frame: &mut Frame, title: &str, body: &str, focus: usize) {
@@ -1450,6 +1512,44 @@ mod tests {
         assert!(out.contains("15 minutes"), "{out}");
     }
 
+    /// The lease note is the last thing in the help box, and a box sized by
+    /// counting lines loses it the moment one of them wraps — silently, since
+    /// nothing else in the app reports what did not get drawn. It has to
+    /// survive on the short terminal the rest of these tests draw to, with
+    /// every section still separated.
+    #[test]
+    fn the_help_overlay_draws_its_last_line_whole() {
+        let db = Db::open_in_memory().unwrap();
+        let mut app = app_with(&db);
+        app.mode = Mode::Help;
+        let out = screen(&app);
+        assert!(
+            out.contains("expired claims return to Open automatically."),
+            "{out}"
+        );
+        // How to close it lives in the title, which clipping cannot reach.
+        assert!(out.contains("any key closes"), "{out}");
+        for section in ["Anywhere", "Queue board", "Memory browser", "Swarm"] {
+            assert!(out.contains(section), "help omits {section:?}:\n{out}");
+        }
+    }
+
+    /// Counted the way the box is drawn: greedily, on spaces, at the width
+    /// inside the borders.
+    #[test]
+    fn wrapped_height_counts_the_rows_a_wrap_will_take() {
+        let one = Line::from("four words fit here");
+        let two = Line::from("a line long enough to need a second row of its own");
+        // 19 characters inside a box 12 wide (10 usable) is two rows.
+        assert_eq!(wrapped_rows(&one, 10), 2);
+        assert_eq!(wrapped_rows(&one, 40), 1);
+        assert_eq!(wrapped_rows(&Line::from(""), 10), 1);
+        // A word longer than the box breaks across rows of its own.
+        assert_eq!(wrapped_rows(&Line::from("abcdefghijkl"), 5), 3);
+        // Two lines, one of them wrapping, plus the two border rows.
+        assert_eq!(wrapped_height(&[one, two], 22), 1 + 3 + 2);
+    }
+
     #[test]
     fn the_add_prompt_shows_both_fields() {
         let db = Db::open_in_memory().unwrap();
@@ -1762,6 +1862,10 @@ mod tests {
         let out = screen(&app_with(&db));
         assert!(out.contains("awaits answer"), "{out}");
         assert!(out.contains("0 ready"), "{out}");
+        // The queue will not summon anyone to a parked question on purpose,
+        // so the only thing that can unstick it is a human noticing. The
+        // status bar is where they are already looking.
+        assert!(out.contains("1 awaiting you"), "{out}");
     }
 
     /// A done card whose review has not concluded is provisionally done, and

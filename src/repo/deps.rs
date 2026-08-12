@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
-use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use super::ProjectScope;
 use crate::error::{Error, Result};
@@ -59,7 +59,7 @@ impl<'a> Deps<'a> {
                 "task {seq} cannot depend on itself"
             )));
         }
-        let tx = Transaction::new_unchecked(self.conn, TransactionBehavior::Immediate)?;
+        let tx = super::immediate_tx(self.conn)?;
         let task_id = id_for_seq(&tx, seq)?;
         let on_id = id_for_seq(&tx, on_seq)?;
 
@@ -95,7 +95,7 @@ impl<'a> Deps<'a> {
 
     /// Drop the dependency of `seq` on `on_seq`. `false` if there was none.
     pub fn remove(&self, seq: i64, on_seq: i64, actor: &str) -> Result<bool> {
-        let tx = Transaction::new_unchecked(self.conn, TransactionBehavior::Immediate)?;
+        let tx = super::immediate_tx(self.conn)?;
         let task_id = id_for_seq(&tx, seq)?;
         let on_id = id_for_seq(&tx, on_seq)?;
         let now = now_ts();

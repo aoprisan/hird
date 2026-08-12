@@ -363,6 +363,12 @@ rides in the next claim beside the question, so the next agent cannot miss the
 decision that resumed its work. An ordinary release without `question` remains
 immediately claimable.
 
+Nothing summons you, because a question is exactly the stall no agent can
+clear — so it is the one thing on the board that waits on you noticing.
+`hird ls` marks the row, `hird show 42` prints the question and the command
+that answers it, and the TUI counts them in its status bar (`· 2 awaiting
+you`) so a card in a column you are not looking at still says so.
+
 ## Working the queue without assigning anything
 
 Naming a task number works, but it does not scale past one agent. Give the
