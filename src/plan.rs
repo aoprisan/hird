@@ -13,14 +13,15 @@
 //!
 //! # What a plan may say
 //!
-//! Exactly what a row can hold — a title, a body, a priority, the files a task
-//! expects to touch, and the other tasks it waits for. There are no
+//! Exactly what the queue stores about a task — title, body, priority, files,
+//! dependencies, required capabilities and whether to review it. There are no
 //! conditionals, no loops, no templating and no retries, and that is not an
 //! omission to be filled in later: `hird` hands work out because an agent asked
 //! for it, and a file that could say *when* to run something would be
 //! describing a scheduler this queue deliberately does not have. The rule that
-//! keeps it honest is that nothing may appear in a plan that is not already a
-//! column: there is no table for a conditional, so there is no syntax for one.
+//! keeps it honest is that nothing may appear in a plan that is not already
+//! stored task state: there is no table for a conditional, so there is no
+//! syntax for one.
 //!
 //! ```toml
 //! plan = "serde-migration"
@@ -87,6 +88,10 @@ pub struct PlanTask {
     /// Files or globs this task expects to touch, relative to the project root.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<String>,
+    /// Capabilities a claimant must advertise before this task can be handed
+    /// out, e.g. `browser`, `network` or `macos`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<String>,
     /// Names of the tasks in this plan that must finish first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub needs: Vec<String>,
@@ -173,6 +178,7 @@ impl Plan {
             }
             // Reject unusable globs here rather than halfway through filing.
             normalize_all(&task.paths)?;
+            crate::capability::normalize_all(&task.requires)?;
         }
 
         for task in &self.tasks {
@@ -268,6 +274,7 @@ impl Plan {
                 claimed_by: None,
                 lease_expires_at: None,
                 updated_at: String::new(),
+                requirements: task.requires.clone(),
             })
             .collect();
         let index: BTreeMap<&str, i64> = self

@@ -103,6 +103,7 @@ pub struct Readiness {
     pub ground: Vec<crate::model::Ground>,
     pub blocks: Vec<i64>,
     pub paths: Vec<String>,
+    pub requirements: Vec<String>,
     pub conflicts: Vec<Conflict>,
     /// Harnesses this task is barred from, already written out.
     pub recusals: Vec<crate::model::Recusal>,
@@ -1016,6 +1017,7 @@ impl App {
                 .map(|b| b.seq)
                 .collect(),
             paths: db.scopes().for_task(seq)?,
+            requirements: db.requirements().for_task(seq)?,
             conflicts,
             recusals: db.recusals().for_task(seq)?,
             verdicts: db.verdicts().for_task(seq)?,

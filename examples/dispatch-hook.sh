@@ -38,7 +38,7 @@ mkdir -p "$XDG_CONFIG_HOME/hird"
 
 log="$(mktemp -d)/herald.log"
 cat >"$XDG_CONFIG_HOME/hird/config.toml" <<EOF
-dispatch_hook = "echo \"\$HIRD_EVENT #\$HIRD_TASK \$HIRD_TITLE [\$HIRD_RECUSED]\" >> $log"
+dispatch_hook = "echo \"\$HIRD_EVENT #\$HIRD_TASK \$HIRD_TITLE [\$HIRD_RECUSED] requires=[\$HIRD_REQUIRES]\" >> $log"
 EOF
 cat "$XDG_CONFIG_HOME/hird/config.toml"
 
@@ -111,7 +111,7 @@ say "next"
 cat <<EOF
 Each line above was one detached run of the configured command, told about one
 claimable task through HIRD_EVENT, HIRD_TASK, HIRD_TITLE, HIRD_PROJECT,
-HIRD_RECUSED and HIRD_DB. Two events did not appear because nothing here
+HIRD_RECUSED, HIRD_REQUIRES and HIRD_DB. Two events did not appear because nothing here
 caused them: released (a holder handing work back) and lease_expired (a
 holder going quiet — expiry is enforced lazily, and announced by the next
 queue call that notices it).

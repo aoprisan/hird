@@ -63,8 +63,8 @@ EOF
 chmod +x "$tmp/bin/hird"
 
 cat >"$tmp/dispatch.conf" <<'EOF'
-worker claude claude-code
-worker codex codex,codex-cli
+worker claude claude-code browser,network
+worker codex codex,codex-cli filesystem,shell
 EOF
 
 run_dispatch() {
@@ -78,6 +78,7 @@ run_dispatch() {
         HIRD_TASK=7 \
         HIRD_TITLE="test the relay" \
         HIRD_RECUSED='' \
+        HIRD_REQUIRES="${1:-}" \
         sh "$repo/herdr-plugin/dispatch.sh"
 }
 
@@ -89,6 +90,15 @@ printf '%s\n' idle >"$tmp/state/codex"
 run_dispatch
 [ "$(sed -n '1p' "$tmp/prompts")" = codex ] ||
     fail "a busy preferred worker was not skipped"
+
+# Capability-bound work skips an otherwise idle preferred worker when its
+# fourth roster column does not contain every label in HIRD_REQUIRES.
+printf '%s\n' idle >"$tmp/state/claude"
+printf '%s\n' idle >"$tmp/state/codex"
+: >"$tmp/prompts"
+run_dispatch filesystem,shell
+[ "$(sed -n '1p' "$tmp/prompts")" = codex ] ||
+    fail "a worker missing a required capability was not skipped"
 
 # Two detached hooks can start together. The routing lock lets the first prompt
 # reach working before the second chooses, so both idle workers are used.
@@ -184,7 +194,8 @@ run_dispatch
     fail "a lock held by a dead owner was not reaped"
 [ ! -d "$tmp/dispatch.lock" ] || fail "the lock outlived the relay that took it"
 
-# The manual action obeys the same busy-worker contract as the relay.
+# The manual action obeys the same busy-worker contract as the relay. It has no
+# particular task announcement, so capability filtering does not apply.
 printf '%s\n' blocked >"$tmp/state/claude"
 printf '%s\n' 'done' >"$tmp/state/codex"
 : >"$tmp/prompts"

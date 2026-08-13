@@ -58,12 +58,13 @@ const SELF_CONTAINED: &str =
 /// Serve the MCP protocol on stdio until the client disconnects.
 pub async fn serve(db_path: &Path, config: Config) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
-    let server = HirdMcp::new(
+    let server = HirdMcp::with_capabilities(
         Db::open(db_path)?,
         AgentId::from_env(),
         identity::resolve_project(&cwd),
         config,
-    );
+        crate::capability::from_env()?,
+    )?;
     let running = match server.serve(rmcp::transport::stdio()).await {
         Ok(running) => running,
         Err(rmcp::service::ServerInitializeError::ExpectedInitializeRequest(opener)) => {
@@ -114,6 +115,10 @@ pub struct HirdMcp {
     agent: AgentId,
     project: String,
     config: Config,
+    /// Human-controlled labels read once for this process. Like identity,
+    /// changing them mid-session would make two calls from one agent obey
+    /// different claim rules.
+    capabilities: Vec<String>,
     /// Resolved once at startup: whether this project is somewhere the working
     /// tree can be watched. `None` is an ordinary state, not a degraded one.
     witness: Option<Witness>,
@@ -124,16 +129,28 @@ pub struct HirdMcp {
 
 impl HirdMcp {
     pub fn new(db: Db, agent: AgentId, project: String, config: Config) -> HirdMcp {
+        HirdMcp::with_capabilities(db, agent, project, config, Vec::new())
+            .expect("an empty capability set is valid")
+    }
+
+    pub fn with_capabilities(
+        db: Db,
+        agent: AgentId,
+        project: String,
+        config: Config,
+        capabilities: Vec<String>,
+    ) -> crate::Result<HirdMcp> {
         let witness = config.witness(Path::new(&project));
         let herald = config.herald(db.path());
-        HirdMcp {
+        Ok(HirdMcp {
             db: Mutex::new(db),
             agent,
             project,
             config,
+            capabilities: crate::capability::normalize_all(&capabilities)?,
             witness,
             herald,
-        }
+        })
     }
 
     /// The identity recorded on this session's claims and assertions.
@@ -436,6 +453,11 @@ impl HirdMcp {
              answers with `ground_shifted` — stop and re-read the reopened task before \
              building further on what it made.\n\
              \n\
+             A task may require capabilities such as `browser` or `network`. This session \
+             advertises [{capabilities}]. Named claims are refused when those do not fit, \
+             and `task_next` routes around incompatible work. That is not a transient race: \
+             relay it to the human, who must use a suitably configured harness.\n\
+             \n\
              Some tasks are reviews, and a review is barred to the harness whose work it \
              reviews — including this one. If a claim comes back saying the task is recused, \
              that is not a race you can retry: relay it to the human, who needs to point a \
@@ -469,6 +491,7 @@ impl HirdMcp {
              `all_projects: true`.",
             ttl = self.config.lease_ttl_minutes,
             heartbeat = self.heartbeat_minutes(),
+            capabilities = self.capabilities.join(", "),
             project = self.project,
             footing = self.footing_instructions(),
             witness = self.witness_instructions(),
@@ -601,6 +624,9 @@ pub struct SubtaskArgs {
     /// Files this piece is expected to touch.
     #[serde(default)]
     pub paths: Option<Vec<String>>,
+    /// Capabilities a claimant must advertise for this piece.
+    #[serde(default)]
+    pub requires: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -705,6 +731,12 @@ struct TaskRow {
     #[serde(skip_serializing_if = "Option::is_none")]
     holder: Option<String>,
     priority: i64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    requires: Vec<String>,
+    /// Required capabilities this MCP session did not advertise. A non-empty
+    /// value means the task may be ready globally but cannot be claimed here.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    missing_capabilities: Vec<String>,
     updated_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     project: Option<String>,
@@ -735,7 +767,9 @@ impl TaskRow {
         awaiting_answer: Option<Question>,
         recused: Option<Recusal>,
         verdict: Option<Verdict>,
+        capabilities: &[String],
     ) -> TaskRow {
+        let missing_capabilities = crate::capability::missing(&summary.requirements, capabilities);
         TaskRow {
             seq: summary.seq,
             title: summary.title,
@@ -743,6 +777,8 @@ impl TaskRow {
             status: summary.status,
             holder: summary.claimed_by,
             priority: summary.priority,
+            requires: summary.requirements,
+            missing_capabilities,
             updated_at: summary.updated_at,
             project: show_project.then_some(summary.project),
             blocked_by,
@@ -760,6 +796,9 @@ struct TaskDetail {
     body: String,
     status: Status,
     priority: i64,
+    /// Capabilities a claimant must advertise.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    requires: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     holder: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -884,6 +923,7 @@ struct TaskContext {
     witness: Evidence,
     events: Vec<TaskEvent>,
     questions: Vec<Question>,
+    requirements: Vec<String>,
 }
 
 impl TaskDetail {
@@ -895,6 +935,7 @@ impl TaskDetail {
             body: task.body,
             status: task.status,
             priority: task.priority,
+            requires: context.requirements,
             holder: task.claimed_by,
             lease_expires_at: task.lease_expires_at,
             result: task.result,
@@ -1062,6 +1103,9 @@ struct ClaimResult {
     body: String,
     priority: i64,
     project: String,
+    /// Capabilities this session proved it had when the claim landed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    requires: Vec<String>,
     /// The files this task is on record as touching.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     paths: Vec<String>,
@@ -1167,6 +1211,7 @@ impl ClaimResult {
             body: claim.task.body,
             priority: claim.task.priority,
             project: claim.task.project,
+            requires: claim.requirements,
             paths: claim.paths,
             overlaps,
             recalled: recall_rows(recalled),
@@ -1206,6 +1251,9 @@ struct NextResult {
     /// for a different tool and not for time to pass.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     recused: Vec<RecusedRow>,
+    /// Ready tasks this session is not equipped to perform.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    incompatible: Vec<IncompatibleRow>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1231,6 +1279,12 @@ struct AwaitingAnswerRow {
 struct RecusedRow {
     seq: i64,
     why: String,
+}
+
+#[derive(Debug, Serialize)]
+struct IncompatibleRow {
+    seq: i64,
+    missing: Vec<String>,
 }
 
 impl NextResult {
@@ -1277,6 +1331,11 @@ impl NextResult {
                     why: recusal.describe(),
                 })
                 .collect(),
+            incompatible: dispatch
+                .incompatible
+                .into_iter()
+                .map(|(seq, missing)| IncompatibleRow { seq, missing })
+                .collect(),
         }
     }
 }
@@ -1288,11 +1347,18 @@ fn idle_reason(dispatch: &Dispatch) -> String {
     let awaiting = dispatch.awaiting_answer.len();
     let blocked = dispatch.blocked.len();
     let deferred = dispatch.deferred.len();
+    let incompatible = dispatch.incompatible.len();
 
     // Named first when it is the only thing left, because it is the only one
     // of the four that waiting will not fix: a review of this harness's own
     // work stays unclaimable until somebody opens a different tool.
-    if recused > 0 && held == 0 && awaiting == 0 && blocked == 0 && deferred == 0 {
+    if recused > 0
+        && held == 0
+        && awaiting == 0
+        && blocked == 0
+        && deferred == 0
+        && incompatible == 0
+    {
         return format!(
             "{recused} task{} ready, but every one of them is a review of work this harness \
              did — they need an agent in another harness. Tell the human; waiting will not \
@@ -1303,7 +1369,13 @@ fn idle_reason(dispatch: &Dispatch) -> String {
     // Held gets its own sentence when it is the whole story: "the work is done
     // and its review has not concluded" points at a review to work or chase,
     // where "waiting on dependencies" points at work that has not happened.
-    if held > 0 && recused == 0 && awaiting == 0 && blocked == 0 && deferred == 0 {
+    if held > 0
+        && recused == 0
+        && awaiting == 0
+        && blocked == 0
+        && deferred == 0
+        && incompatible == 0
+    {
         let mut reviews: Vec<i64> = dispatch.held.iter().map(|(_, review)| *review).collect();
         reviews.sort_unstable();
         reviews.dedup();
@@ -1318,7 +1390,13 @@ fn idle_reason(dispatch: &Dispatch) -> String {
             plural(held, " is", "s are")
         );
     }
-    if awaiting > 0 && recused == 0 && held == 0 && blocked == 0 && deferred == 0 {
+    if awaiting > 0
+        && recused == 0
+        && held == 0
+        && blocked == 0
+        && deferred == 0
+        && incompatible == 0
+    {
         return format!(
             "{awaiting} open task{} awaiting a human answer; `awaiting_answer` names the \
              question{}. No agent can make progress on {} until the answer is recorded",
@@ -1341,6 +1419,11 @@ fn idle_reason(dispatch: &Dispatch) -> String {
     if awaiting > 0 {
         tail.push_str(&format!(
             ", and {awaiting} awaiting a human answer before any agent can continue"
+        ));
+    }
+    if incompatible > 0 {
+        tail.push_str(&format!(
+            ", and {incompatible} requiring capabilities this session does not advertise"
         ));
     }
     match (blocked, deferred) {
@@ -1494,6 +1577,8 @@ struct SubtaskRow {
     title: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     waiting_for: Vec<i64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    requires: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1741,7 +1826,15 @@ impl HirdMcp {
                     let question = questions.get(&t.seq).cloned();
                     let barred = recused.get(&t.seq).cloned();
                     let verdict = standing.get(&t.seq).copied();
-                    TaskRow::from_summary(t, show_project, blocked, question, barred, verdict)
+                    TaskRow::from_summary(
+                        t,
+                        show_project,
+                        blocked,
+                        question,
+                        barred,
+                        verdict,
+                        &self.capabilities,
+                    )
                 })
                 .collect(),
             released,
@@ -1777,6 +1870,7 @@ impl HirdMcp {
                     witness: self.evidence(db, args.seq),
                     events: db.tasks().events(&task.id, EVENT_WINDOW)?,
                     questions: db.questions().for_task(args.seq)?,
+                    requirements: db.requirements().for_task(args.seq)?,
                 },
             ))
         });
@@ -1801,13 +1895,14 @@ impl HirdMcp {
         // of recall work on the very first call.
         let (claim, recalled, previously) = self
             .with_db(|db| {
-                let claim = db.tasks().claim_scoped(
+                let claim = db.tasks().claim_scoped_with_capabilities(
                     args.seq,
                     &actor,
                     ttl,
                     &paths,
                     policy,
                     self.config.clearance(),
+                    &self.capabilities,
                 )?;
                 // The tree as it stands is this task's baseline, so anything
                 // that moves from here is inside its window and everything
@@ -1845,9 +1940,14 @@ impl HirdMcp {
         let recall_limit = self.config.recall_limit();
         let (dispatch, recalled, previously) = self
             .with_db(|db| {
-                let dispatch =
-                    db.tasks()
-                        .claim_next(&actor, ttl, &scope, avoid, self.config.clearance())?;
+                let dispatch = db.tasks().claim_next_with_capabilities(
+                    &actor,
+                    ttl,
+                    &scope,
+                    avoid,
+                    self.config.clearance(),
+                    &self.capabilities,
+                )?;
                 let (recalled, previously) = match &dispatch.claim {
                     Some(claim) => {
                         self.begin_witnessing(db, claim.task.seq);
@@ -1940,6 +2040,7 @@ impl HirdMcp {
                 body: s.body.as_deref().unwrap_or(""),
                 priority: s.priority,
                 paths: s.paths.as_ref().unwrap_or(&empty),
+                requirements: s.requires.as_ref().unwrap_or(&empty),
             })
             .collect();
         let sequential = args.sequential.unwrap_or(false);
@@ -1962,7 +2063,8 @@ impl HirdMcp {
         let mut previous: Option<i64> = None;
         let rows = children
             .iter()
-            .map(|child| {
+            .enumerate()
+            .map(|(index, child)| {
                 let waiting_for = match previous.replace(child.seq) {
                     Some(prior) if sequential => vec![prior],
                     _ => Vec::new(),
@@ -1971,6 +2073,14 @@ impl HirdMcp {
                     seq: child.seq,
                     title: child.title.clone(),
                     waiting_for,
+                    requires: args.subtasks[index]
+                        .requires
+                        .as_ref()
+                        .map(|r| {
+                            crate::capability::normalize_all(r)
+                                .expect("subtask requirements were validated before filing")
+                        })
+                        .unwrap_or_default(),
                 }
             })
             .collect();
@@ -2359,6 +2469,7 @@ fn announcement(cause: Cause, claimable: Claimable) -> Announcement {
         title: claimable.title,
         project: claimable.project,
         recused: claimable.recused,
+        requirements: claimable.requirements,
     }
 }
 
@@ -2386,6 +2497,17 @@ mod tests {
             PROJECT.to_string(),
             Config::default(),
         )
+    }
+
+    fn capable_server(capabilities: &[&str]) -> HirdMcp {
+        HirdMcp::with_capabilities(
+            Db::open_in_memory().unwrap(),
+            AgentId::new("codex", "fit1"),
+            PROJECT.to_string(),
+            Config::default(),
+            capabilities.iter().map(|c| c.to_string()).collect(),
+        )
+        .unwrap()
     }
 
     /// A claim with no declared file scope, which is most of these tests.
@@ -3087,6 +3209,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn capability_matching_is_visible_on_named_and_next_claims() {
+        let s = capable_server(&["network"]);
+        let browser = s
+            .with_db(|db| db.tasks().create(PROJECT, "visual QA", "", 5, "cli"))
+            .unwrap()
+            .seq;
+        s.with_db(|db| {
+            db.requirements()
+                .set(browser, &["browser".into()], "cli")
+                .unwrap()
+        });
+        let ordinary = seed(&s, "write docs", "");
+
+        let listed = parse(
+            s.task_list(Parameters(TaskListArgs {
+                status: None,
+                all_projects: None,
+            }))
+            .await,
+        );
+        let browser_row = listed["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["seq"] == browser)
+            .unwrap();
+        assert_eq!(browser_row["requires"][0], "browser");
+        assert_eq!(browser_row["missing_capabilities"][0], "browser");
+
+        let refused = s.task_claim(Parameters(just(browser))).await.unwrap_err();
+        assert!(refused.contains("requires browser"), "{refused}");
+        assert!(refused.contains("advertises network"), "{refused}");
+
+        let handed = parse(s.task_next(Parameters(next_args())).await);
+        assert_eq!(handed["claimed"]["claimed"], ordinary);
+        assert_eq!(handed["incompatible"][0]["seq"], browser);
+        assert_eq!(handed["incompatible"][0]["missing"][0], "browser");
+    }
+
+    #[tokio::test]
     async fn next_explains_an_empty_queue_rather_than_going_quiet() {
         let s = server();
         let out = parse(s.task_next(Parameters(next_args())).await);
@@ -3383,12 +3545,14 @@ mod tests {
                         body: Some("start with the lexer".into()),
                         priority: None,
                         paths: Some(vec!["src/parse.rs".into()]),
+                        requires: None,
                     },
                     SubtaskArgs {
                         title: "port the tests".into(),
                         body: None,
                         priority: Some(3),
                         paths: None,
+                        requires: None,
                     },
                 ],
             }))
@@ -3426,12 +3590,14 @@ mod tests {
                         body: None,
                         priority: None,
                         paths: None,
+                        requires: None,
                     },
                     SubtaskArgs {
                         title: "backfill".into(),
                         body: None,
                         priority: None,
                         paths: None,
+                        requires: None,
                     },
                 ],
             }))
@@ -3460,6 +3626,7 @@ mod tests {
                     body: None,
                     priority: None,
                     paths: None,
+                    requires: None,
                 }],
             }))
             .await

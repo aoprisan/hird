@@ -170,6 +170,16 @@ impl McpSession {
         McpSession::spawn(sandbox, Some(harness), Lifecycle::Handshake(CLIENT_NAME))
     }
 
+    /// A session whose registration advertises capability labels.
+    pub fn start_capable(sandbox: &Sandbox, harness: &str, capabilities: &str) -> McpSession {
+        McpSession::spawn_capable(
+            sandbox,
+            Some(harness),
+            Lifecycle::Handshake(CLIENT_NAME),
+            Some(capabilities),
+        )
+    }
+
     /// A session started the way a harness that forgot to set `HIRD_HARNESS`
     /// starts one.
     pub fn start_unnamed(sandbox: &Sandbox) -> McpSession {
@@ -199,9 +209,21 @@ impl McpSession {
     }
 
     fn spawn(sandbox: &Sandbox, harness: Option<&str>, lifecycle: Lifecycle) -> McpSession {
+        McpSession::spawn_capable(sandbox, harness, lifecycle, None)
+    }
+
+    fn spawn_capable(
+        sandbox: &Sandbox,
+        harness: Option<&str>,
+        lifecycle: Lifecycle,
+        capabilities: Option<&str>,
+    ) -> McpSession {
         let mut command: Command = sandbox.command();
         if let Some(harness) = harness {
             command.env("HIRD_HARNESS", harness);
+        }
+        if let Some(capabilities) = capabilities {
+            command.env("HIRD_CAPABILITIES", capabilities);
         }
         let mut child = command
             .arg("mcp")

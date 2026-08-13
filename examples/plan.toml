@@ -41,6 +41,8 @@ needs = ["schema"]
 
 # `paths` is what lets the queue keep two agents out of one file — globs, not
 # files, because nothing has been written yet.
+# `requires` names hard worker capabilities. Sessions advertise them through
+# HIRD_CAPABILITIES; task_next routes around a task that does not fit.
 #
 # `review = true` says this work should not be the last word of whoever does
 # it: finishing files a review of exactly what moved, and the queue refuses
@@ -52,6 +54,7 @@ name = "renderer"
 title = "Rewrite the renderer"
 priority = 2
 paths = ["src/tui/**"]
+requires = ["browser"]
 review = true
 
 # This one overlaps `renderer` and waits for nothing, which `--dry-run` will

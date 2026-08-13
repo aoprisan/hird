@@ -64,6 +64,27 @@ fn ls_filters_by_status_and_says_so_when_empty() {
 }
 
 #[test]
+fn capability_requirements_round_trip_through_add_list_show_and_require() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["add", "visual QA", "--requires", "Browser,network"]);
+
+    let listed = sandbox.run(&["ls"]);
+    assert!(listed.contains("requires browser,network"), "{listed}");
+    let shown = sandbox.run(&["show", "1"]);
+    assert!(shown.contains("requires  browser, network"), "{shown}");
+    assert_eq!(sandbox.run(&["require", "1"]), "browser\nnetwork\n");
+
+    assert_eq!(
+        sandbox.run(&["require", "1", "--capability", "macos"]),
+        "macos\n"
+    );
+    assert_eq!(
+        sandbox.run(&["require", "1", "--clear"]),
+        "task 1 requires no capabilities\n"
+    );
+}
+
+#[test]
 fn ls_rejects_an_unknown_status_with_the_valid_set() {
     let sandbox = Sandbox::new();
     let err = sandbox.run_failing(&["ls", "--status", "blocked"]);

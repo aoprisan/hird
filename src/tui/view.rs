@@ -229,6 +229,15 @@ fn task_card(
         }
         badges.push(Span::styled("awaits answer", theme::blocked_style()));
     }
+    if !task.requirements.is_empty() {
+        if !badges.is_empty() {
+            badges.push(Span::raw("  "));
+        }
+        badges.push(Span::styled(
+            format!("requires {}", task.requirements.join(",")),
+            Style::default().cyan(),
+        ));
+    }
     // A review looks like any other open task until you know what it is, and
     // what it is decides who can take it — which is exactly the thing a human
     // scanning the board needs to see without opening the card.
@@ -1008,6 +1017,12 @@ fn render_task_detail(
             Span::raw(readiness.paths.join(", ")),
         ]));
     }
+    if !readiness.requirements.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("requires   ", theme::focus_style()),
+            Span::styled(readiness.requirements.join(", "), Style::default().cyan()),
+        ]));
+    }
     // `files` above is what somebody said would happen; this is what the tree
     // says did — including the case where the answer is "nothing at all".
     if let Some(sentence) = readiness.footprint.describe(task.status.is_active()) {
@@ -1322,6 +1337,22 @@ mod tests {
         assert!(out.contains("write the parser"), "{out}");
         assert!(out.contains("codex"), "holder badge missing:\n{out}");
         assert!(out.contains("left"), "lease countdown missing:\n{out}");
+    }
+
+    #[test]
+    fn a_card_shows_the_capabilities_work_requires() {
+        let db = Db::open_in_memory().unwrap();
+        let seq = db
+            .tasks()
+            .create(PROJECT, "visual QA", "", 0, "cli")
+            .unwrap()
+            .seq;
+        db.requirements()
+            .set(seq, &["browser".into()], "cli")
+            .unwrap();
+
+        let out = screen(&app_with(&db));
+        assert!(out.contains("requires browser"), "{out}");
     }
 
     /// The card has to distinguish work that left a mark from work that only

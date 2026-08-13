@@ -125,6 +125,8 @@ pub enum Command {
     Graph(ScopeFilterArgs),
     /// Show or set the files a task is expected to touch.
     Scope(ScopeArgs),
+    /// Show or set the capabilities a claimant must advertise.
+    Require(RequireArgs),
     /// Show which agent is working what, and where they overlap.
     Agents(ScopeFilterArgs),
     /// Bar whoever worked one task from working another, or lift the bar.
@@ -213,6 +215,10 @@ pub struct RegisterArgs {
     /// Replace an entry of the same name that says something else.
     #[arg(long, conflicts_with = "print")]
     pub force: bool,
+    /// Capability this harness can satisfy, e.g. browser or network.
+    /// Repeatable, or comma-separated.
+    #[arg(long = "capability", value_name = "NAME", value_delimiter = ',')]
+    pub capabilities: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -239,6 +245,10 @@ pub struct AddArgs {
     /// the same file.
     #[arg(long = "path", value_name = "GLOB")]
     pub paths: Vec<String>,
+    /// Capability a claimant must advertise, e.g. browser or network.
+    /// Repeatable, or comma-separated.
+    #[arg(long = "requires", value_name = "CAPABILITY", value_delimiter = ',')]
+    pub requirements: Vec<String>,
     /// When this task finishes, file a review of what it changed — scoped to
     /// the files that actually moved, and barred to the harness that moved
     /// them.
@@ -327,6 +337,19 @@ pub struct ScopeFilterArgs {
     /// Span every project rather than just the current one.
     #[arg(long)]
     pub all_projects: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct RequireArgs {
+    /// The task whose requirements to show or replace.
+    pub seq: i64,
+    /// Required capabilities. Repeatable, or comma-separated. Supplying any
+    /// replaces the existing set.
+    #[arg(long = "capability", value_name = "NAME", value_delimiter = ',')]
+    pub capabilities: Vec<String>,
+    /// Remove every capability requirement.
+    #[arg(long, conflicts_with = "capabilities")]
+    pub clear: bool,
 }
 
 #[derive(Debug, Args)]
@@ -507,6 +530,7 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
         Command::Plan(cmd) => plan_cmd(&db, &project, &config, herald.as_ref(), cmd, out),
         Command::Graph(args) => graph(&db, &scope_of(&project, &config, args.all_projects), out),
         Command::Scope(args) => scope_cmd(&db, args, out),
+        Command::Require(args) => require_cmd(&db, args, out),
         Command::Agents(args) => {
             look(&db, &config, &project);
             agents(&db, &scope_of(&project, &config, args.all_projects), out)
@@ -528,7 +552,8 @@ fn register_cmd(
     out: &mut impl Write,
 ) -> anyhow::Result<()> {
     let harness = args.harness;
-    let registration = Registration::new(harness, &args.name, db);
+    let registration =
+        Registration::new(harness, &args.name, db).with_capabilities(&args.capabilities)?;
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     if args.print {
@@ -716,6 +741,10 @@ fn add(db: &Db, project: &str, args: &AddArgs, out: &mut impl Write) -> anyhow::
         db.scopes()
             .declare(task.seq, &args.paths, ACTOR_CLI, OnConflict::Report)?;
     }
+    if !args.requirements.is_empty() {
+        db.requirements()
+            .set(task.seq, &args.requirements, ACTOR_CLI)?;
+    }
     if args.review {
         db.tasks().set_review(task.seq, true, ACTOR_CLI)?;
     }
@@ -891,6 +920,9 @@ fn preview(
             if !task.paths.is_empty() {
                 writeln!(out, "      files  {}", task.paths.join(", "))?;
             }
+            if !task.requires.is_empty() {
+                writeln!(out, "      requires {}", task.requires.join(", "))?;
+            }
         }
     }
 
@@ -1033,6 +1065,24 @@ fn scope_cmd(db: &Db, args: &ScopeArgs, out: &mut impl Write) -> anyhow::Result<
     } else {
         for pattern in patterns {
             writeln!(out, "{pattern}")?;
+        }
+    }
+    Ok(())
+}
+
+fn require_cmd(db: &Db, args: &RequireArgs, out: &mut impl Write) -> anyhow::Result<()> {
+    if args.clear {
+        db.requirements().set(args.seq, &[], ACTOR_CLI)?;
+    } else if !args.capabilities.is_empty() {
+        db.requirements()
+            .set(args.seq, &args.capabilities, ACTOR_CLI)?;
+    }
+    let required = db.requirements().for_task(args.seq)?;
+    if required.is_empty() {
+        writeln!(out, "task {} requires no capabilities", args.seq)?;
+    } else {
+        for capability in required {
+            writeln!(out, "{capability}")?;
         }
     }
     Ok(())
@@ -1280,6 +1330,9 @@ fn ls_line(
     if task.priority != 0 {
         line.push_str(&format!("  p{}", task.priority));
     }
+    if !task.requirements.is_empty() {
+        line.push_str(&format!("  requires {}", task.requirements.join(",")));
+    }
     // Whether the work left a mark. A task nobody watched says nothing here,
     // because "read-only" and "hird was not looking" are opposite claims and
     // only one of them is this column's to make.
@@ -1517,6 +1570,10 @@ fn show(db: &Db, seq: i64, config: &Config, out: &mut impl Write) -> anyhow::Res
     let patterns = db.scopes().for_task(seq)?;
     if !patterns.is_empty() {
         writeln!(out, "files     {}", patterns.join(", "))?;
+    }
+    let required = db.requirements().for_task(seq)?;
+    if !required.is_empty() {
+        writeln!(out, "requires  {}", required.join(", "))?;
     }
     if task.review {
         writeln!(out, "review    on finishing, by another harness")?;
@@ -1857,6 +1914,7 @@ mod tests {
             claimed_by: None,
             lease_expires_at: None,
             updated_at: crate::model::fmt_ts(now()),
+            requirements: Vec::new(),
         }
     }
 

@@ -4,18 +4,19 @@
 #
 # hird runs this detached, through `sh -c`, the moment a task becomes
 # claimable, with the announcement in the environment: HIRD_EVENT,
-# HIRD_TASK, HIRD_TITLE, HIRD_PROJECT, HIRD_RECUSED, HIRD_DB. Nothing
+# HIRD_TASK, HIRD_TITLE, HIRD_PROJECT, HIRD_RECUSED, HIRD_REQUIRES, HIRD_DB. Nothing
 # is read back and stdout/stderr are closed, so this script's whole
 # answer is whom it wakes.
 #
 # It walks a roster of workers in preference order and prompts the first
-# one that (a) the queue would not refuse this task to, and (b) herdr does not
-# report as occupied. HIRD_RECUSED carries the harnesses barred from the task
-# — a filed review names whoever did the work under judgement — so the
-# summons never knocks on the door the claim would turn away. A worker that
-# herdr reports working or blocked is skipped; a prompt that fails (no such
-# agent, agent gone) falls through to the next worker instead of dying with
-# the summons undelivered.
+# one that (a) the queue would not refuse this task to, (b) advertises every
+# capability the task requires, and (c) herdr does not report as occupied.
+# HIRD_RECUSED carries the harnesses barred from the task — a filed review
+# names whoever did the work under judgement — while HIRD_REQUIRES carries
+# the task's required capabilities. The summons therefore never knocks on a
+# door the claim would turn away. A worker that herdr reports working or
+# blocked is skipped; a prompt that fails (no such agent, agent gone) falls
+# through to the next worker instead of dying with the summons undelivered.
 #
 # wire.sh writes the hook line that runs this, baking in three paths so the
 # relay needs nothing from hird's environment:
@@ -48,6 +49,9 @@ fi
 . "$(dirname "$0")/lib.sh"
 
 summons="hird task #${HIRD_TASK:-?} (\"${HIRD_TITLE:-}\") is ready; work the hird queue."
+if [ -n "${HIRD_REQUIRES:-}" ]; then
+    summons="$summons This task requires: $HIRD_REQUIRES."
+fi
 
 trap lock_release 0
 trap 'exit 1' HUP INT TERM
@@ -57,11 +61,12 @@ trap 'exit 1' HUP INT TERM
 # the lock closes the ordinary simultaneous-announcement race.
 lock_acquire || :
 
-# Read `worker <agent> <harness[,harness...]>` lines; anything else is
-# comment. The harness column is what hird will refuse — commas cannot
-# appear in a harness name, so the membership test is safe.
+# Read `worker <agent> <harness[,harness...]> [capability[,capability...]]`
+# lines; anything else is comment. Harnesses route around recusal; the optional
+# fourth column routes work only to workers equipped for it. Commas cannot
+# appear in either kind of name, so both membership tests are safe.
 try_roster() {
-    while read -r kind agent harnesses _; do
+    while read -r kind agent harnesses capabilities _; do
         [ "$kind" = "worker" ] || continue
         [ -n "$agent" ] || continue
         barred=no
@@ -74,6 +79,17 @@ try_roster() {
         done
         IFS=$old_ifs
         [ "$barred" = yes ] && continue
+        equipped=yes
+        IFS=,
+        for required in ${HIRD_REQUIRES:-}; do
+            case ",${capabilities:-}," in
+                *",$required,"*) ;;
+                *) equipped=no ;;
+            esac
+        done
+        IFS=$old_ifs
+        [ "$equipped" = yes ] || continue
+
         worker_busy "$agent" && continue
         if worker_prompt "$agent" "$summons"; then
             exit 0

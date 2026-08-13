@@ -68,6 +68,14 @@ pub enum Error {
         actor: String,
     },
 
+    /// The task is ready, but this session lacks capabilities it requires.
+    #[error("{}", missing_capabilities_message(*.seq, .required, .available))]
+    MissingCapabilities {
+        seq: i64,
+        required: Vec<String>,
+        available: Vec<String>,
+    },
+
     /// The declared file scope overlaps work another agent is doing.
     #[error("{}", conflict_message(*.seq, .conflicts))]
     PathConflict { seq: i64, conflicts: Vec<Conflict> },
@@ -164,6 +172,18 @@ fn recused_message(seq: i64, recusal: &Recusal, actor: &str) -> String {
          cannot take it. Tell the human it needs an agent in a different harness.",
         recusal.from_seq,
         crate::fmt::truncate(&recusal.from_title, 40),
+    )
+}
+
+fn missing_capabilities_message(seq: i64, required: &[String], available: &[String]) -> String {
+    let missing = join_and(required.iter().cloned());
+    let advertised = if available.is_empty() {
+        "none".to_string()
+    } else {
+        available.join(", ")
+    };
+    format!(
+        "task {seq} requires {missing}, but this session advertises {advertised}; start a capable harness or update HIRD_CAPABILITIES"
     )
 }
 

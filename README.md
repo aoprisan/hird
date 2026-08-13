@@ -49,8 +49,9 @@ redo has written over it.
 All of that is pull: agents ask, hird answers, and a task that becomes ready
 while nobody is asking waits in silence. One config key closes that seam
 without a daemon. Set `dispatch_hook` to a command and hird runs it, detached,
-the moment a task becomes claimable — which task, why, and whom the queue
-would refuse it to, in its environment. Point it at anything that can wake an
+the moment a task becomes claimable — which task, why, whom the queue would
+refuse it to, and any capabilities its worker must have, in its environment.
+Point it at anything that can wake an
 agent — under [herdr](https://herdr.dev), `herdr agent prompt worker "work
 the hird queue"` — and the plan's next wave, the freshly filed review, the
 work a verdict sent back, each arrives at an idle agent with nobody carrying
@@ -419,6 +420,37 @@ The edge is also a context channel: when the blockers are done and the
 dependent is claimed, the claim arrives carrying each blocker's own result —
 see [the ground a task builds on](#the-ground-a-task-builds-on).
 
+### Work knows what its worker must have
+
+Harnesses are not interchangeable. One may have a browser, another network
+access or deployment credentials, and a third may be the only session running
+on macOS. Put those hard constraints on the work instead of discovering them
+after the wrong agent takes a lease:
+
+```sh
+hird add "Verify the responsive UI" --path 'frontend/**' --requires browser
+hird register codex --capability network
+hird register claude-code --capability browser --capability network
+```
+
+The registration writes `HIRD_CAPABILITIES`; labels are lowercase free-form
+tokens such as `browser`, `network`, `macos` or `deploy.staging`. A named claim
+from an unequipped session is refused before it writes anything:
+
+```
+task 7 requires browser, but this session advertises network; start a capable
+harness or update HIRD_CAPABILITIES
+```
+
+`task_next` routes around the mismatch and reports skipped tasks under
+`incompatible`, alongside blocked, contended and recused work. This does not
+make hird an agent router: the queue knows what the task requires and what this
+caller advertises, but it has no roster and chooses nobody. The external
+dispatch hook receives the same requirements as `HIRD_REQUIRES` and remains
+the place that maps labels to workers. Reviews inherit the work's requirements,
+because checking browser-only work generally requires a browser too; use
+`hird require <seq> --clear` when a particular review only needs its diff.
+
 ### Two agents, one file
 
 The queue also knows which files each task expects to touch, so it can see the
@@ -485,8 +517,9 @@ it was filed with, so applying an edited plan files only what the file has
 gained — the tasks already in flight keep their claims, their history and their
 numbers.
 
-What a plan may say is exactly what a task row can hold: a title, a body, a
-priority, the files it expects to touch, the tasks it waits for. There are no
+What a plan may say is exactly what the queue stores about a task: a title, a
+body, priority, files, dependencies, required capabilities and whether to
+review it. There are no
 conditionals, no loops and no retries, and that is not an omission to be filled
 in later — `hird` hands work out because an agent asked for it, and a file that
 could say *when* to run something would be describing a scheduler this queue
@@ -1138,7 +1171,7 @@ server's instructions do not mention it.
 
 ```
 hird add <title> [--body <md>|--body-file <path>] [--priority N] [--project <path>]
-                 [--needs <seq>,…] [--path <glob>]… [--review]
+                 [--needs <seq>,…] [--path <glob>]… [--requires <capability>]… [--review]
 hird ls [--status <status>] [--all-projects]
 hird show <seq>
 hird diff <seq> [--path <file>]
@@ -1151,6 +1184,7 @@ hird dep rm  <seq> --needs <seq>,…
 hird plan apply <file> [--dry-run] [--project <path>]
 hird graph [--all-projects]
 hird scope <seq> [--path <glob>]… [--clear]
+hird require <seq> [--capability <name>]… [--clear]
 hird agents [--all-projects]
 hird recuse <seq> --from <seq>,… [--reason <text>] | --clear
 hird record [--all-projects]
@@ -1162,7 +1196,8 @@ hird mem search [query] [--limit N] [--all-projects] [--include-superseded]
 hird mem standing [--shaky] [--all-projects]
 hird tui
 hird mcp
-hird register <claude-code|codex|copilot|copilot-cli|opencode> [--name <name>] [--print] [--force]
+hird register <claude-code|codex|copilot|copilot-cli|opencode> [--name <name>]
+              [--capability <name>]… [--print] [--force]
 hird db-path
 ```
 
@@ -1339,6 +1374,7 @@ more room.
 | Variable | Meaning |
 |---|---|
 | `HIRD_HARNESS` | This session's harness name. Set it in the MCP registration. |
+| `HIRD_CAPABILITIES` | Comma-separated capabilities this MCP session can satisfy. |
 | `HIRD_PROJECT` | Override project detection. |
 | `HIRD_DB` | Override the database path. |
 
@@ -1350,8 +1386,8 @@ Twelve, and no more.
 |---|---|
 | `task_list` | What work exists, optionally filtered by status — marking the ones your harness cannot claim. |
 | `task_get` | One task in full: dependencies, file scope, recent history. |
-| `task_next` | **Be handed the next workable task, already claimed.** |
-| `task_claim` | Take a named task. Atomic; fails if someone else has it. |
+| `task_next` | **Be handed the next compatible, workable task, already claimed.** |
+| `task_claim` | Take a named task. Atomic; fails if held, blocked, recused or capability-incompatible. |
 | `task_scope` | Say which files you will change; find out who else is in them. |
 | `task_update` | Record progress and renew the lease. Holder only. |
 | `task_split` | Break a task into pieces the other agents can work. Holder only. |

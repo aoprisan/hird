@@ -10,8 +10,8 @@ use rusqlite::Connection;
 
 use crate::error::Result;
 use crate::repo::{
-    Deps, Events, Footings, Memory, Plans, Questions, Recall, Recusals, Scopes, Tasks, Verdicts,
-    Witnessed,
+    Deps, Events, Footings, Memory, Plans, Questions, Recall, Recusals, Requirements, Scopes,
+    Tasks, Verdicts, Witnessed,
 };
 
 /// Numbered migrations, applied in order and recorded in `meta.schema_version`.
@@ -275,6 +275,17 @@ CREATE INDEX idx_task_questions_task ON task_questions(task_id, n);
 CREATE UNIQUE INDEX idx_task_questions_one_open
   ON task_questions(task_id) WHERE answer IS NULL;
 "#,
+    // 11 — the fit: work states what a claimant must be equipped to do
+    r#"
+CREATE TABLE task_requirements (
+  task_id    TEXT NOT NULL REFERENCES tasks(id),
+  capability TEXT NOT NULL,
+  PRIMARY KEY (task_id, capability)
+);
+
+CREATE INDEX idx_task_requirements_capability
+  ON task_requirements(capability, task_id);
+"#,
 ];
 
 /// An open connection to the hird database.
@@ -342,6 +353,11 @@ impl Db {
     /// Questions that keep otherwise-open tasks waiting for human input.
     pub fn questions(&self) -> Questions<'_> {
         Questions::new(&self.conn)
+    }
+
+    /// Capabilities a worker must advertise before claiming a task.
+    pub fn requirements(&self) -> Requirements<'_> {
+        Requirements::new(&self.conn)
     }
 
     /// The event trail read across tasks, in the order things happened.

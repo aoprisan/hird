@@ -44,7 +44,8 @@ pub struct Placed {
 pub struct Drift {
     pub name: String,
     pub seq: i64,
-    /// Which part differs: `"title"`, `"body"` or `"priority"`.
+    /// Which part differs: `"title"`, `"body"`, `"priority"` or
+    /// `"requirements"`.
     pub field: &'static str,
 }
 
@@ -103,7 +104,12 @@ impl<'a> Plans<'a> {
         for task in &plan.tasks {
             match find_node(&tx, project, &plan.plan, &task.name)? {
                 Some(existing) => {
-                    if let Some(field) = drifted_field(&existing, task) {
+                    let planned_requirements = crate::capability::normalize_all(&task.requires)?;
+                    let existing_requirements = super::requirements::for_id(&tx, &existing.id)?;
+                    let field = drifted_field(&existing, task).or_else(|| {
+                        (existing_requirements != planned_requirements).then_some("requirements")
+                    });
+                    if let Some(field) = field {
                         applied.drifted.push(Drift {
                             name: task.name.clone(),
                             seq: existing.seq,
@@ -120,6 +126,8 @@ impl<'a> Plans<'a> {
                 None => {
                     let created =
                         create_in_tx(&tx, project, &task.title, &task.body, task.priority, actor)?;
+                    let required = crate::capability::normalize_all(&task.requires)?;
+                    super::requirements::set_in_tx(&tx, &created.id, &required, actor, &now_ts())?;
                     tx.execute(
                         "INSERT INTO task_plan_nodes (task_id, project, plan, node, at)
                          VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -612,5 +620,19 @@ title = \"Write the release notes\"
         let claimed = db.tasks().claim(2, "codex:9f2c", TTL).unwrap();
         assert_eq!(claimed.status, Status::Claimed);
         assert_eq!(db.scopes().for_task(2).unwrap(), vec!["src/repo/**"]);
+    }
+
+    #[test]
+    fn a_plan_files_capability_requirements_with_the_task() {
+        let db = db();
+        let source = SAMPLE.replace(
+            "paths = [\"src/repo/**\"]",
+            "paths = [\"src/repo/**\"]\nrequires = [\"browser\", \"network\"]",
+        );
+        apply(&db, &source);
+        assert_eq!(
+            db.requirements().for_task(2).unwrap(),
+            vec!["browser", "network"]
+        );
     }
 }

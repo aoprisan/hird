@@ -105,7 +105,8 @@ pub struct Config {
     /// released by a finished dependency, reopened by a verdict or a human,
     /// or dropped by an expired lease. Runs detached through `sh -c` with
     /// `HIRD_EVENT`, `HIRD_TASK`, `HIRD_TITLE`, `HIRD_PROJECT`,
-    /// `HIRD_RECUSED` and `HIRD_DB` in its environment; empty means no hook.
+    /// `HIRD_RECUSED`, `HIRD_REQUIRES` and `HIRD_DB` in its environment; empty
+    /// means no hook.
     /// See [`crate::herald`].
     pub dispatch_hook: String,
 }

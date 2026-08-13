@@ -67,7 +67,7 @@ else
 #
 # One line per worker:
 #
-#   worker <herdr agent name> <hird harness[,harness...]>
+#   worker <herdr agent name> <hird harness[,harness...]> [capability[,capability...]]
 #
 # The agent name is what `herdr agent list` shows — the name the agent
 # was started under. The harness column is how hird knows the same
@@ -75,6 +75,11 @@ else
 # codex, copilot. It is what HIRD_RECUSED is matched against, so a
 # review of that agent's work is never routed back to its own door.
 # List every name the harness may report, comma-separated, no spaces.
+#
+# The optional fourth column lists the capabilities this worker registers
+# with hird (for example browser,network). A task carrying HIRD_REQUIRES is
+# routed only to a worker whose column contains every required capability.
+# Omit it for a general worker with no special capabilities.
 #
 # The relay prompts the first idle worker that is not recused and answers;
 # reorder the lines to change whom it tries first when several are idle.

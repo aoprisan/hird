@@ -566,9 +566,10 @@ queue numbers.
 
 ### The rule that keeps it a format and not a language
 
-**Nothing may appear in a plan that is not already a column.** A plan may carry
-a title, a body, a priority, declared paths and `needs`, because `tasks`,
-`task_paths` and `task_deps` hold exactly those. It may not carry a
+**Nothing may appear in a plan that is not already stored task state.** A plan
+may carry a title, body, priority, declared paths, `needs`, `requires` and the
+review flag because `tasks`, `task_paths`, `task_deps` and `task_requirements`
+hold exactly those. It may not carry a
 conditional, a loop, a retry policy or a schedule, because there is no table
 for one.
 
@@ -1709,3 +1710,84 @@ the claim; the human answers through the CLI or board. `open` remains the task's
 stored status and readiness gains one derived predicate. No `blocked` or
 `waiting_for_human` status is added, no lease is held while nobody can work,
 and no thirteenth MCP tool gives agents the authority to answer themselves.
+
+## 25. (v2.6) The fit — work knows what its worker must have
+
+The queue had learned three reasons not to hand a ready task to a caller:
+unfinished ground, live work in the same files, and recusal from work that
+caller already did. It still treated every remaining harness as fungible.
+They are not. Browser control, network access, deployment credentials, an
+operating system, a GPU, and access to a particular external application are
+properties of the environment around an agent, not of the model's willingness
+to try.
+
+Discovering that mismatch after a claim costs a lease and a handoff. Releasing
+the task only lets the next equally unequipped session repeat it; asking a human
+misstates the blocker, because the missing answer is not a decision but a
+different pair of hands. A hard requirement therefore belongs in the same
+readiness decision as recusal: before the compare-and-set writes anything.
+
+### Migration 11
+
+```sql
+CREATE TABLE task_requirements (
+  task_id     TEXT NOT NULL REFERENCES tasks(id),
+  capability  TEXT NOT NULL,
+  PRIMARY KEY (task_id, capability)
+);
+
+CREATE INDEX idx_task_requirements_capability
+  ON task_requirements(capability, task_id);
+```
+
+Labels are lowercase tokens, at most 48 characters, using letters, numbers,
+`.`, `-` and `_`. Hird defines no vocabulary: `browser`, `macos`,
+`deploy.staging` and `gpu.cuda` mean what the human who configured the workers
+says they mean. Sorting and deduplication make a set written in a plan, CLI or
+environment compare the same way everywhere.
+
+Tasks receive requirements from `hird add --requires`, `requires = [...]` in a
+plan, or the `requires` field of a split piece. `hird require` is the human edit
+path. A review inherits the judged work's requirements: work that needed a
+browser normally needs one to reproduce and judge it too, while the human can
+clear the requirement on a review that genuinely needs only its exhibit.
+
+### The claimant says what it can do
+
+`HIRD_CAPABILITIES` is read once when an MCP server process starts, beside
+`HIRD_HARNESS`. That makes it the human-controlled half of the match: a model
+does not gain deployment access by adding `deploy` to a tool argument. Named
+claims with any missing requirement are refused by name before the status row
+moves. `task_next` walks past them and returns an `incompatible` bucket with
+each task and its missing labels, then takes the best remaining candidate.
+
+An unset variable is an empty set. Old tasks have no requirements, so existing
+registrations and queues behave exactly as they did until somebody files
+constrained work. Claims return `requires`, and list/detail/TUI readers show it,
+so a task that is open but not open *to this session* never looks universally
+workable.
+
+### One more routing input, still no router
+
+The herald adds `HIRD_REQUIRES`, comma-separated, next to `HIRD_RECUSED`.
+Recusal says whom not to wake; requirements say what the worker selected by the
+hook must have. The hook still owns the mapping from labels to panes, harnesses
+or machines. Hird has no roster, does not track which capable workers are idle,
+and does not choose or start one. This preserves §23's boundary: the queue
+contributes the fact only it owns and leaves addressing and liveness to the
+user's command.
+
+There are deliberately no preferred capabilities, scores, automatic installs
+or fallback attempts. A requirement is a correctness constraint. Preferences
+would turn `task_next` into a placement optimizer and capability labels into a
+scheduler policy, neither of which a local pull queue should own.
+
+### Still twelve tools and still six statuses
+
+Requirements ride on task creation, plan filing and `task_split`; session
+capabilities come from the environment; matching is part of the existing claim
+tools. `incompatible` is an explanation on `task_next`, like `blocked`,
+`deferred` and `recused`. No capability tool exists for an agent to overstate
+its own environment, no stored status pretends incompatibility blocks every
+worker, and no new status is needed for a predicate that changes with the
+caller.

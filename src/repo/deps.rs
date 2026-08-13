@@ -37,6 +37,9 @@ pub struct Claimable {
     /// address more than one agent knows whom not to wake. Empty for most
     /// tasks; a filed review names whoever did the work under review.
     pub recused: Vec<String>,
+    /// Capabilities a worker must advertise before claiming this task. The
+    /// external hook uses these labels to choose whom to wake.
+    pub requirements: Vec<String>,
 }
 
 /// Repository over `task_deps`.
@@ -159,6 +162,7 @@ impl<'a> Deps<'a> {
                     title: row.get(2)?,
                     project: row.get(3)?,
                     recused: Vec::new(),
+                    requirements: Vec::new(),
                 },
             ))
         })?;
@@ -169,6 +173,7 @@ impl<'a> Deps<'a> {
                 && super::questions::unanswered_in(self.conn, &id)?.is_none()
             {
                 claimable.recused = super::recusal::barred_harnesses(self.conn, &id)?;
+                claimable.requirements = super::requirements::for_id(self.conn, &id)?;
                 released.push(claimable);
             }
         }
@@ -193,6 +198,7 @@ impl<'a> Deps<'a> {
                             title: row.get(2)?,
                             project: row.get(3)?,
                             recused: Vec::new(),
+                            requirements: Vec::new(),
                         },
                     ))
                 },
@@ -204,6 +210,7 @@ impl<'a> Deps<'a> {
                     && super::questions::unanswered_in(self.conn, &id)?.is_none() =>
             {
                 claimable.recused = super::recusal::barred_harnesses(self.conn, &id)?;
+                claimable.requirements = super::requirements::for_id(self.conn, &id)?;
                 Ok(Some(claimable))
             }
             _ => Ok(None),
@@ -929,6 +936,7 @@ mod tests {
             claimed_by: None,
             lease_expires_at: None,
             updated_at: crate::model::now_ts(),
+            requirements: Vec::new(),
         }
     }
 

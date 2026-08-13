@@ -7,7 +7,7 @@ use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 
 use super::scope::OnConflict;
-use super::{deps, new_id, questions, recusal, scope, ProjectScope};
+use super::{deps, new_id, questions, recusal, requirements, scope, ProjectScope};
 use crate::error::{Error, Result};
 use crate::model::{
     fmt_ts, now_ts, Clearance, Conflict, EventKind, Ground, Question, Status, Task, TaskEvent,
@@ -35,6 +35,9 @@ impl SweepOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Claim {
     pub task: Task,
+    /// Capabilities this task required. The claim proves this session
+    /// advertised every one of them.
+    pub requirements: Vec<String>,
     /// The task's file scope, as it now stands on record.
     pub paths: Vec<String>,
     /// Overlaps between that scope and work other agents are holding.
@@ -68,6 +71,9 @@ pub struct Dispatch {
     /// out loud: a queue whose only remaining work is a review of your own
     /// code is not an idle queue, it is a queue waiting for another harness.
     pub recused: Vec<(i64, crate::model::Recusal)>,
+    /// Ready tasks passed over because this session lacks one or more
+    /// capabilities they require.
+    pub incompatible: Vec<(i64, Vec<String>)>,
     /// Tasks whose every dependency is finished but for a verdict — held only
     /// under `under_review = "holds"`, each with the review it waits on. Its
     /// own bucket rather than `blocked`, because "the work is done and the
@@ -153,6 +159,10 @@ impl<'a> Tasks<'a> {
             .iter()
             .map(|s| scope::normalize_all(s.paths))
             .collect::<Result<_>>()?;
+        let requirements: Vec<Vec<String>> = subtasks
+            .iter()
+            .map(|s| crate::capability::normalize_all(s.requirements))
+            .collect::<Result<_>>()?;
 
         self.sweep_leases()?;
         let now = now_ts();
@@ -160,7 +170,7 @@ impl<'a> Tasks<'a> {
         let parent = require_holder(&tx, seq, actor)?;
 
         let mut children = Vec::with_capacity(subtasks.len());
-        for (sub, paths) in subtasks.iter().zip(scopes) {
+        for ((sub, paths), required) in subtasks.iter().zip(scopes).zip(requirements) {
             let child = create_in_tx(
                 &tx,
                 &parent.project,
@@ -169,6 +179,7 @@ impl<'a> Tasks<'a> {
                 sub.priority.unwrap_or(parent.priority),
                 actor,
             )?;
+            requirements::set_in_tx(&tx, &child.id, &required, actor, &now_ts())?;
             if !paths.is_empty() {
                 scope::declare_in_tx(&tx, child.seq, &paths, actor, OnConflict::Report)?;
             }
@@ -290,7 +301,10 @@ impl<'a> Tasks<'a> {
         self.sweep_leases()?;
         let (project_clause, project_value) = scope.clause("project");
         let mut sql = format!(
-            "SELECT seq, project, title, status, priority, claimed_by, lease_expires_at, updated_at
+            "SELECT seq, project, title, status, priority, claimed_by, lease_expires_at, updated_at,
+                    COALESCE((SELECT group_concat(capability, ',') FROM
+                        (SELECT capability FROM task_requirements r
+                         WHERE r.task_id = tasks.id ORDER BY capability)), '')
              FROM tasks WHERE {project_clause}"
         );
         if status.is_some() {
@@ -316,6 +330,7 @@ impl<'a> Tasks<'a> {
 
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(binds.iter()), |row| {
+            let raw_requirements: String = row.get(8)?;
             Ok(TaskSummary {
                 seq: row.get(0)?,
                 project: row.get(1)?,
@@ -325,6 +340,11 @@ impl<'a> Tasks<'a> {
                 claimed_by: row.get(5)?,
                 lease_expires_at: row.get(6)?,
                 updated_at: row.get(7)?,
+                requirements: raw_requirements
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect(),
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -486,10 +506,34 @@ impl<'a> Tasks<'a> {
         on_conflict: OnConflict,
         clearance: Clearance,
     ) -> Result<Claim> {
+        self.claim_scoped_with_capabilities(
+            seq,
+            actor,
+            lease_ttl,
+            paths,
+            on_conflict,
+            clearance,
+            &[],
+        )
+    }
+
+    /// Claim and declare scope, after checking this session's capabilities.
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim_scoped_with_capabilities(
+        &self,
+        seq: i64,
+        actor: &str,
+        lease_ttl: Duration,
+        paths: &[String],
+        on_conflict: OnConflict,
+        clearance: Clearance,
+        capabilities: &[String],
+    ) -> Result<Claim> {
         self.sweep_leases()?;
         // Validate the patterns before anything is claimed, so a typo cannot
         // cost the caller a lease it has to hand back.
         let paths = scope::normalize_all(paths)?;
+        let capabilities = crate::capability::normalize_all(capabilities)?;
 
         let now = Utc::now();
         let now_s = fmt_ts(now);
@@ -505,6 +549,7 @@ impl<'a> Tasks<'a> {
             &paths,
             on_conflict,
             clearance,
+            &capabilities,
         )?;
         tx.commit()?;
         Ok(claim)
@@ -529,7 +574,21 @@ impl<'a> Tasks<'a> {
         avoid_conflicts: bool,
         clearance: Clearance,
     ) -> Result<Dispatch> {
+        self.claim_next_with_capabilities(actor, lease_ttl, scope, avoid_conflicts, clearance, &[])
+    }
+
+    /// Claim the next workable task this session is equipped to perform.
+    pub fn claim_next_with_capabilities(
+        &self,
+        actor: &str,
+        lease_ttl: Duration,
+        scope: &ProjectScope,
+        avoid_conflicts: bool,
+        clearance: Clearance,
+        capabilities: &[String],
+    ) -> Result<Dispatch> {
         self.sweep_leases()?;
+        let capabilities = crate::capability::normalize_all(capabilities)?;
         let now = Utc::now();
         let now_s = fmt_ts(now);
         let expires = fmt_ts(now + chrono::Duration::from_std(lease_ttl).unwrap_or_default());
@@ -588,6 +647,11 @@ impl<'a> Tasks<'a> {
                 dispatch.recused.push((seq, recusal));
                 continue;
             }
+            let missing = requirements::missing_for(&tx, &id, &capabilities)?;
+            if !missing.is_empty() {
+                dispatch.incompatible.push((seq, missing));
+                continue;
+            }
             if avoid_conflicts {
                 let patterns = declared_patterns(&tx, &id)?;
                 let conflicts = scope::conflicts_for(&tx, &id, &patterns)?;
@@ -605,6 +669,7 @@ impl<'a> Tasks<'a> {
                 &[],
                 OnConflict::Report,
                 clearance,
+                &capabilities,
             )?);
             break;
         }
@@ -911,6 +976,8 @@ pub struct Subtask<'a> {
     /// Defaults to the parent task's priority.
     pub priority: Option<i64>,
     pub paths: &'a [String],
+    /// Capabilities a claimant must advertise for this piece.
+    pub requirements: &'a [String],
 }
 
 pub(crate) fn create_in_tx(
@@ -1039,6 +1106,7 @@ fn claim_in_tx(
     paths: &[String],
     on_conflict: OnConflict,
     clearance: Clearance,
+    capabilities: &[String],
 ) -> Result<Claim> {
     let id = task_id_for_seq(tx, seq)?;
 
@@ -1066,6 +1134,15 @@ fn claim_in_tx(
             seq,
             recusal,
             actor: actor.to_string(),
+        });
+    }
+    let required = requirements::for_id(tx, &id)?;
+    let missing = crate::capability::missing(&required, capabilities);
+    if !missing.is_empty() {
+        return Err(Error::MissingCapabilities {
+            seq,
+            required: missing,
+            available: capabilities.to_vec(),
         });
     }
 
@@ -1115,6 +1192,7 @@ fn claim_in_tx(
     let task = fetch_task_by_seq(tx, seq)?.expect("claimed row exists");
     Ok(Claim {
         task,
+        requirements: required,
         paths: declared,
         conflicts,
         ground,
@@ -2036,6 +2114,76 @@ mod tests {
             .claim_next("a:1", TTL, &scope(), true, Clearance::Done)
             .unwrap();
         assert_eq!(dispatch, Dispatch::default());
+    }
+
+    #[test]
+    fn a_named_claim_requires_every_capability_on_the_task() {
+        let db = db();
+        let seq = seed(&db, "visual QA");
+        db.requirements()
+            .set(seq, &["browser".into(), "network".into()], "cli")
+            .unwrap();
+
+        let err = db
+            .tasks()
+            .claim_scoped_with_capabilities(
+                seq,
+                "codex:1",
+                TTL,
+                &[],
+                OnConflict::Report,
+                Clearance::Done,
+                &["browser".into()],
+            )
+            .unwrap_err();
+        assert!(matches!(err, Error::MissingCapabilities { .. }), "{err}");
+        assert!(err.to_string().contains("network"), "{err}");
+        assert_eq!(db.tasks().get(seq).unwrap().status, Status::Open);
+
+        let claim = db
+            .tasks()
+            .claim_scoped_with_capabilities(
+                seq,
+                "codex:1",
+                TTL,
+                &[],
+                OnConflict::Report,
+                Clearance::Done,
+                &["network".into(), "browser".into()],
+            )
+            .unwrap();
+        assert_eq!(claim.requirements, vec!["browser", "network"]);
+    }
+
+    #[test]
+    fn next_routes_around_incompatible_work_and_explains_what_is_missing() {
+        let db = db();
+        let browser = db
+            .tasks()
+            .create(PROJECT, "browser work", "", 5, "cli")
+            .unwrap()
+            .seq;
+        let ordinary = seed(&db, "ordinary work");
+        db.requirements()
+            .set(browser, &["browser".into()], "cli")
+            .unwrap();
+
+        let dispatch = db
+            .tasks()
+            .claim_next_with_capabilities(
+                "shell:1",
+                TTL,
+                &scope(),
+                true,
+                Clearance::Done,
+                &["network".into()],
+            )
+            .unwrap();
+        assert_eq!(dispatch.claim.unwrap().task.seq, ordinary);
+        assert_eq!(
+            dispatch.incompatible,
+            vec![(browser, vec!["browser".into()])]
+        );
     }
 
     #[test]

@@ -59,6 +59,10 @@ agents and a human may be using it at the same time.
   retry: the task is a review of your own harness's work. Call `task_next`
   for something else, and mention the review needs other hands if no other
   agent is around to take it.
+- A claim refused for missing capabilities is also not a race to retry. The
+  task needs a harness configured with the labels the refusal names. Call
+  `task_next` for compatible work and tell the human what equipment is missing
+  if the queue has nothing else.
 
 ## More hands, inside herdr
 
@@ -96,7 +100,8 @@ dispatch instead.
   human answers it. Do not use a question for work another agent could do —
   release normally or split that work instead.
 - If one task is really several independently workable jobs, call `task_split`
-  with self-contained bodies and accurate file scopes.
+  with self-contained bodies, accurate file scopes, and `requires` labels on
+  pieces that need capabilities not every harness has.
 
 Always quote task numbers back to the user. Do not mark work complete merely
 because a lease or session is ending.

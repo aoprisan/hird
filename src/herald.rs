@@ -12,7 +12,8 @@
 //! (`dispatch_hook` in `config.toml`), run at the moment a task becomes
 //! claimable, told which task, why, and whom the queue would refuse it to
 //! (`HIRD_RECUSED` — so a summons never wakes the one agent a filed review
-//! is barred from), and then left entirely alone. What the
+//! is barred from — and `HIRD_REQUIRES`, so a router can choose equipped
+//! hands), and then left entirely alone. What the
 //! command does — prompt an idle agent through a terminal multiplexer such as
 //! herdr, post a notification, append to a log, nothing — is the human's
 //! business. hird neither waits for it nor reads its answer, so the queue's
@@ -86,6 +87,9 @@ pub struct Announcement {
     /// which is every `review_filed` announcement under a hook that always
     /// prompts the same worker.
     pub recused: Vec<String>,
+    /// Capabilities a suitable worker must advertise. The hook remains the
+    /// router; hird only supplies the fact it could not otherwise infer.
+    pub requirements: Vec<String>,
 }
 
 /// The configured messenger, or nothing.
@@ -117,7 +121,8 @@ impl Herald {
     /// environment and walk away.
     ///
     /// The command runs through `sh -c` with `HIRD_EVENT`, `HIRD_TASK`,
-    /// `HIRD_TITLE`, `HIRD_PROJECT`, `HIRD_RECUSED` and `HIRD_DB` set.
+    /// `HIRD_TITLE`, `HIRD_PROJECT`, `HIRD_RECUSED`, `HIRD_REQUIRES` and
+    /// `HIRD_DB` set.
     /// `HIRD_RECUSED` is comma-separated harness names — commas cannot appear
     /// in a harness name, so `case ",$HIRD_RECUSED," in *,codex,*)` is a safe
     /// membership test — and empty for the tasks anybody may take. All three
@@ -134,6 +139,7 @@ impl Herald {
             .env("HIRD_TITLE", &a.title)
             .env("HIRD_PROJECT", &a.project)
             .env("HIRD_RECUSED", a.recused.join(","))
+            .env("HIRD_REQUIRES", a.requirements.join(","))
             .env(identity::DB_ENV, &self.db)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -191,6 +197,7 @@ pub fn announce_claimable(
         title: claimable.title,
         project: claimable.project,
         recused: claimable.recused,
+        requirements: claimable.requirements,
     });
 }
 
@@ -263,6 +270,7 @@ mod tests {
             title: "port the loader".to_string(),
             project: "/repo".to_string(),
             recused: Vec::new(),
+            requirements: Vec::new(),
         });
         assert_eq!(
             wait_for(&log),
@@ -287,6 +295,7 @@ mod tests {
             title: "Review: port the loader".to_string(),
             project: "/repo".to_string(),
             recused: vec!["claude-code".to_string(), "codex".to_string()],
+            requirements: Vec::new(),
         });
         assert_eq!(wait_for(&log), "[claude-code,codex]");
     }
@@ -302,6 +311,27 @@ mod tests {
             title: "t".to_string(),
             project: "p".to_string(),
             recused: Vec::new(),
+            requirements: Vec::new(),
         });
+    }
+
+    #[test]
+    fn the_hook_is_told_what_the_worker_must_have() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("log");
+        let herald = Herald::new(
+            &format!("printf '[%s]' \"$HIRD_REQUIRES\" > {}", log.display()),
+            Path::new("/tmp/board.db"),
+        )
+        .unwrap();
+        herald.announce(&Announcement {
+            cause: Cause::Filed,
+            seq: 9,
+            title: "visual QA".to_string(),
+            project: "/repo".to_string(),
+            recused: Vec::new(),
+            requirements: vec!["browser".to_string(), "network".to_string()],
+        });
+        assert_eq!(wait_for(&log), "[browser,network]");
     }
 }

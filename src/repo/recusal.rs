@@ -240,6 +240,12 @@ pub(super) fn file_review(
         task.priority,
         actor,
     )?;
+    // A reviewer needs the same equipment the work required. This is a hard
+    // default because a browser-only result cannot be independently checked
+    // by a harness with no browser; the human can clear the requirement if a
+    // particular review only needs the diff.
+    let required = super::requirements::for_id(tx, &task.id)?;
+    super::requirements::set_in_tx(tx, &review.id, &required, actor, &now_ts())?;
     // Scoped to what actually moved, so the collision detector and recall both
     // treat the review as work in those files — which it is.
     let paths: Vec<String> = super::witness::Witnessed::new(tx)
@@ -695,6 +701,42 @@ mod tests {
             .claimable(seq, crate::model::Clearance::Done)
             .unwrap();
         assert!(work.is_none(), "finished work is not claimable");
+    }
+
+    #[test]
+    fn a_filed_review_inherits_the_capabilities_needed_to_check_the_work() {
+        let db = db();
+        let seq = task(&db, "visual QA");
+        db.scopes()
+            .declare(
+                seq,
+                &["src/ui.rs".into()],
+                "cli",
+                crate::repo::OnConflict::Report,
+            )
+            .unwrap();
+        db.requirements()
+            .set(seq, &["browser".into()], "cli")
+            .unwrap();
+        db.tasks().set_review(seq, true, "cli").unwrap();
+        db.tasks()
+            .claim_scoped_with_capabilities(
+                seq,
+                "codex:9f2c",
+                TTL,
+                &[],
+                crate::repo::OnConflict::Report,
+                crate::model::Clearance::Done,
+                &["browser".into()],
+            )
+            .unwrap();
+        let review = db
+            .tasks()
+            .complete(seq, "codex:9f2c", "checked the UI")
+            .unwrap()
+            .review
+            .unwrap();
+        assert_eq!(db.requirements().for_task(review).unwrap(), vec!["browser"]);
     }
 
     /// A review with nothing to read is busywork on somebody's board.

@@ -220,6 +220,8 @@ pub enum EventKind {
     DepRemoved,
     /// The task's declared file scope changed.
     Scoped,
+    /// The capabilities a claimant must advertise changed.
+    Required,
     /// The task was recused from another one's worker, or the bar was lifted.
     Recused,
     /// A review of this task's work was filed, or this task is that review.
@@ -250,6 +252,7 @@ impl EventKind {
             EventKind::DepAdded => "dep_added",
             EventKind::DepRemoved => "dep_removed",
             EventKind::Scoped => "scoped",
+            EventKind::Required => "required",
             EventKind::Recused => "recused",
             EventKind::Reviewed => "reviewed",
             EventKind::Witnessed => "witnessed",
@@ -285,6 +288,7 @@ impl FromStr for EventKind {
             "dep_added" => Ok(EventKind::DepAdded),
             "dep_removed" => Ok(EventKind::DepRemoved),
             "scoped" => Ok(EventKind::Scoped),
+            "required" => Ok(EventKind::Required),
             "recused" => Ok(EventKind::Recused),
             "reviewed" => Ok(EventKind::Reviewed),
             "witnessed" => Ok(EventKind::Witnessed),
@@ -335,6 +339,8 @@ pub struct TaskSummary {
     pub claimed_by: Option<String>,
     pub lease_expires_at: Option<String>,
     pub updated_at: String,
+    /// Capabilities a claimant must advertise before this task is workable.
+    pub requirements: Vec<String>,
 }
 
 /// One entry in a task's audit trail.

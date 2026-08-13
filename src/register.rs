@@ -155,6 +155,18 @@ impl Registration {
         }
     }
 
+    /// Add the human-controlled capability labels this harness can satisfy.
+    pub fn with_capabilities(mut self, capabilities: &[String]) -> crate::Result<Registration> {
+        let capabilities = crate::capability::normalize_all(capabilities)?;
+        if !capabilities.is_empty() {
+            self.env.insert(
+                crate::capability::CAPABILITIES_ENV.to_string(),
+                capabilities.join(","),
+            );
+        }
+        Ok(self)
+    }
+
     /// This entry as JSON, in the dialect `harness` expects.
     fn as_json(&self, harness: Harness) -> Json {
         if harness == Harness::OpenCode {
@@ -501,6 +513,17 @@ mod tests {
     fn a_scratch_database_rides_along_in_the_environment() {
         let reg = Registration::new(Harness::Codex, "hird-scratch", Some(Path::new("/tmp/s.db")));
         assert_eq!(reg.env[DB_ENV], "/tmp/s.db");
+    }
+
+    #[test]
+    fn capabilities_are_normalized_into_the_registration_environment() {
+        let reg = Registration::new(Harness::Codex, "hird", None)
+            .with_capabilities(&[" Browser ".into(), "network".into()])
+            .unwrap();
+        assert_eq!(
+            reg.env[crate::capability::CAPABILITIES_ENV],
+            "browser,network"
+        );
     }
 
     #[test]

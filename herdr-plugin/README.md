@@ -10,7 +10,8 @@ agent is idle waits on the board in silence. hird's one push is the
 claimable. herdr is a thing that can address an idle agent. The pairing is
 already in hird's docs as two lines of shell; this plugin is that pairing
 packaged, with the part the two lines leave out: routing that survives a
-missing agent, and a summons that never knocks on a recused door.
+missing agent, and a summons that never knocks on a recused or unequipped
+door.
 
 ## Install
 
@@ -72,13 +73,17 @@ Once wired, every announcement hird makes — a task filed with nothing
 blocking it, unblocked by a finished dependency, reopened by a `sent_back`
 verdict, handed back, filed as a review, dropped by an expired lease —
 runs `dispatch.sh` with the announcement in its environment. The relay walks
-the roster in order and prompts, via `herdr agent prompt`, the first free
-worker that clears two bars:
+the roster in order and prompts, via `herdr agent prompt`, the first idle worker
+that clears three bars:
 
 - **Not recused.** `HIRD_RECUSED` names the harnesses the queue will refuse
   this task to — a filed review names whoever did the work under judgement.
   The relay skips those workers, so the review loop runs on a swarm of two
   without ever summoning the author to judge their own work.
+- **Equipped.** `HIRD_REQUIRES` names the capabilities the task needs. The
+  optional fourth roster column names what each worker advertises through
+  `HIRD_CAPABILITIES`; the relay skips any worker missing even one label. The
+  queue repeats that check atomically when the worker claims.
 - **Free and actually there.** A worker `herdr agent get` reports working or
   blocked is skipped, and a prompt that fails — no such agent, agent gone —
   falls through to the next worker instead of dying with the summons
@@ -107,20 +112,25 @@ tries again.
 One line per worker, preference order top to bottom:
 
 ```
-worker <herdr agent name> <hird harness[,harness...]>
+worker <herdr agent name> <hird harness[,harness...]> [capability[,capability...]]
 ```
 
 The agent name is what `herdr agent list` shows. The harness column is how
 hird knows the same agent — what `hird agents` and `hird record` print —
-and is what recusal is matched against. List every name the harness may
-report, comma-separated, no spaces:
+and is what recusal is matched against. The optional fourth column lists the
+capabilities the worker registers with `hird register --capability`; it is
+what `HIRD_REQUIRES` is matched against. List names comma-separated, with no
+spaces:
 
 ```
-worker claude claude-code
-worker codex codex,codex-cli
+worker claude claude-code browser,network
+worker codex codex,codex-cli filesystem,shell
 ```
 
-Without a roster the relay falls back to exactly those two lines.
+Omit the fourth column for a worker with no special capabilities. Without a
+roster the relay falls back to the same two workers with no special
+capabilities, so ordinary tasks still route while capability-bound work waits
+for an explicit roster entry.
 
 ## Undo
 

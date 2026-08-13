@@ -20,6 +20,7 @@
 //!   when a task becomes claimable, so idle agents can be summoned
 //! - [`mcp`], [`cli`], [`tui`] — the three front ends, which call [`repo`]
 
+pub mod capability;
 pub mod cli;
 pub mod config;
 pub mod db;

@@ -498,6 +498,32 @@ fn an_agent_can_split_a_task_into_work_for_the_others() {
     copilot.shutdown();
 }
 
+#[test]
+fn task_next_routes_by_the_capabilities_in_the_harness_environment() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&[
+        "add",
+        "visual QA",
+        "--priority",
+        "5",
+        "--requires",
+        "browser",
+    ]);
+    sandbox.run(&["add", "write docs"]);
+
+    let mut shell = McpSession::start_capable(&sandbox, "codex", "network");
+    let handed = shell.call("task_next", json!({})).unwrap();
+    assert_eq!(handed["claimed"]["claimed"], 2);
+    assert_eq!(handed["incompatible"][0]["seq"], 1);
+    assert_eq!(handed["incompatible"][0]["missing"][0], "browser");
+    shell.shutdown();
+
+    let mut browser = McpSession::start_capable(&sandbox, "claude-code", "browser,network");
+    let claimed = browser.call("task_claim", json!({"seq": 1})).unwrap();
+    assert_eq!(claimed["requires"][0], "browser");
+    browser.shutdown();
+}
+
 /// Handing work back has to be cheaper than failing it, or agents will sit on
 /// leases they cannot use.
 #[test]

@@ -132,6 +132,8 @@ exhibit = true
 #   HIRD_RECUSED  harnesses the queue will refuse this task to, comma-
 #                 separated; empty for tasks anybody may take. A filed
 #                 review names whoever did the work under review.
+#   HIRD_REQUIRES capabilities a worker must advertise, comma-separated;
+#                 empty for work any equipped harness may take
 #   HIRD_DB       the database, so the hook's own `hird` calls read the same
 #                 board
 #
