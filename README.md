@@ -1501,7 +1501,8 @@ witness given a memory of its own: every version it fingerprints is kept, so
 "a file moved" becomes "this is the change", a review is handed the diff it is
 judging, and the write that lands on uncommitted work stops being a loss.
 Still absent: multi-machine sync and vector search. The append-only event trail
-is meant to make sync tractable later.
+is meant to make sync tractable later. `ROADMAP.md` lays out what comes next,
+what comes later, and what stays out on purpose.
 
 ## Licence
 
