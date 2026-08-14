@@ -47,6 +47,15 @@ jobs:
           ./examples/dispatch-hook.sh
           ./examples/events.sh
 
+      # install.sh is exercised end to end by tests/install_script.rs, but
+      # get.sh downloads from a live release, so a syntax pass and shellcheck
+      # are what CI can honestly check it with.
+      - name: Installer scripts
+        run: |
+          bash -n scripts/install.sh
+          sh -n scripts/get.sh
+          shellcheck scripts/install.sh scripts/get.sh
+
       # The herdr plugin has no build step, so nothing else would catch a
       # syntax error in it before somebody's pane opens on one. Checked as
       # POSIX sh, which is what the manifest asks herdr to run them with;

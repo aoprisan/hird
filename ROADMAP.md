@@ -42,12 +42,12 @@ and a roadmap item that breaks one is a different project:
 
 ## Next
 
-**Prebuilt releases.** Installing hird today means having a Rust toolchain,
-which is one toolchain more than a queue for coding agents should assume.
-Publish to crates.io (`cargo install hird`) and attach prebuilt binaries for
-Linux and macOS to tagged GitHub releases, with `scripts/install.sh` learning
-to prefer a downloaded binary over a local build. The crate metadata is
-already in place; this is release engineering, not design.
+**The first tagged release.** The release engineering is in place — pushing a
+`v*` tag builds static Linux and macOS binaries, attaches them with checksums
+to a GitHub release that `scripts/get.sh` installs from, and publishes to
+crates.io once the `CARGO_REGISTRY_TOKEN` secret is set. What remains is the
+human act: set the secret, tag `v0.1.0`, and confirm `get.sh` and
+`cargo install hird` both land a working binary.
 
 **More first-class registrations.** `hird register` knows five harnesses;
 `--print` covers the rest by hand. Every MCP-capable CLI that people actually
