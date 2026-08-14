@@ -5,11 +5,13 @@
 //! order things happened — instead of replaying one task's history. It is
 //! what `hird events` prints and what `--follow` resumes from.
 
+use std::collections::BTreeMap;
+
 use rusqlite::{params_from_iter, Connection};
 
 use super::ProjectScope;
 use crate::error::Result;
-use crate::model::EventKind;
+use crate::model::{EventKind, Status};
 
 /// One entry in the feed, joined to the task it happened on.
 #[derive(Debug, Clone)]
@@ -25,6 +27,29 @@ pub struct FeedEvent {
     pub task_seq: i64,
     pub task_title: String,
     pub project: String,
+}
+
+/// One task's standing at a past moment, folded from the trail.
+///
+/// Only what the events can testify to: status, holder and the question
+/// gate. The title and project ride along from the present-day task row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayedTask {
+    pub seq: i64,
+    pub title: String,
+    pub project: String,
+    pub status: Status,
+    pub holder: Option<String>,
+    /// Whether an unanswered question had parked it at that moment.
+    pub awaiting_answer: bool,
+}
+
+impl ReplayedTask {
+    /// Every way a holding ends clears the holder, whatever the status.
+    fn finish(&mut self, status: Status) {
+        self.status = status;
+        self.holder = None;
+    }
 }
 
 /// What a reader wants to see of the trail. Empty means everything.
@@ -83,6 +108,114 @@ impl<'a> Events<'a> {
              ORDER BY e.rowid ASC"
         );
         self.query(&sql, &binds)
+    }
+
+    /// The board as it stood at `cutoff`, folded from the trail.
+    ///
+    /// The trail is append-only precisely so this question stays answerable:
+    /// every status a task has ever held got there through an event, so
+    /// replaying the events up to a moment recovers who held what and which
+    /// wave was live, without the board keeping any state it does not already
+    /// keep. Titles and projects are read from the present — they are not
+    /// versioned in the trail — so a replay shows yesterday's statuses under
+    /// today's names.
+    ///
+    /// `cutoff` is compared as a string, which is exact: timestamps are
+    /// stored fixed-width so lexicographic and chronological order agree, and
+    /// a prefix like `2026-08-14T10:00` reads as the start of that instant.
+    /// Ties inside the same millisecond fold in insertion order, the same
+    /// order the writes committed.
+    pub fn board_at(&self, scope: &ProjectScope, cutoff: &str) -> Result<Vec<ReplayedTask>> {
+        let (project_clause, project_value) = scope.clause("t.project");
+        let sql = format!(
+            "SELECT e.kind, e.actor, t.seq, t.title, t.project
+             FROM task_events e JOIN tasks t ON t.id = e.task_id
+             WHERE {project_clause} AND e.at <= ?
+             ORDER BY e.rowid ASC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut binds: Vec<&str> = project_value.into_iter().collect();
+        binds.push(cutoff);
+        let rows = stmt.query_map(params_from_iter(binds.iter()), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?;
+
+        let mut board: BTreeMap<i64, ReplayedTask> = BTreeMap::new();
+        for row in rows {
+            let (kind, actor, seq, title, project) = row?;
+            let Ok(kind) = kind.parse::<EventKind>() else {
+                continue;
+            };
+            let task = board.entry(seq).or_insert_with(|| ReplayedTask {
+                seq,
+                title,
+                project,
+                status: Status::Open,
+                holder: None,
+                awaiting_answer: false,
+            });
+            match kind {
+                EventKind::Created => {}
+                EventKind::Claimed => {
+                    task.status = Status::Claimed;
+                    task.holder = Some(actor);
+                }
+                // The one kind that spells its transition out; `claimed ->
+                // in_progress` is the only one a claim-holding fold needs,
+                // but reading the detail would couple this to prose. The
+                // target status is recoverable from the words that exist.
+                EventKind::Status => {
+                    if task.status == Status::Claimed {
+                        task.status = Status::InProgress;
+                    }
+                }
+                EventKind::Completed => task.finish(Status::Done),
+                EventKind::Failed => task.finish(Status::Failed),
+                EventKind::Cancelled => task.finish(Status::Cancelled),
+                EventKind::Reopened => task.finish(Status::Open),
+                EventKind::Released | EventKind::LeaseExpired => task.finish(Status::Open),
+                EventKind::Asked => task.awaiting_answer = true,
+                EventKind::Answered => task.awaiting_answer = false,
+                _ => {}
+            }
+        }
+        Ok(board.into_values().collect())
+    }
+
+    /// Every harness that has ever acted on this board, in name order.
+    ///
+    /// Read from the actors the trail records: agents act as
+    /// `harness:session`, while human surfaces (`cli`, `tui`) carry no colon
+    /// and are not harnesses. This is as close to a roster as hird gets — it
+    /// keeps none, by design — so the answer is who has shown up, not who
+    /// could.
+    pub fn harnesses_seen(&self, scope: &ProjectScope) -> Result<Vec<String>> {
+        let (project_clause, project_value) = scope.clause("t.project");
+        let sql = format!(
+            "SELECT DISTINCT e.actor
+             FROM task_events e JOIN tasks t ON t.id = e.task_id
+             WHERE {project_clause}"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let binds: Vec<&str> = project_value.into_iter().collect();
+        let rows = stmt.query_map(rusqlite::params_from_iter(binds), |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut harnesses: Vec<String> = rows
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|actor| actor.contains(':'))
+            .map(|actor| crate::identity::actor_harness(&actor).to_string())
+            .collect();
+        harnesses.sort();
+        harnesses.dedup();
+        Ok(harnesses)
     }
 
     fn query(&self, sql: &str, binds: &[&str]) -> Result<Vec<FeedEvent>> {
@@ -251,6 +384,89 @@ mod tests {
         assert_eq!(feed.len(), 1);
         assert_eq!(feed[0].kind, EventKind::Claimed);
         assert_eq!(feed[0].task_seq, 1);
+    }
+
+    /// Between two moments the same trail answers differently: the fold
+    /// recovers each status a task passed through, and who held it there.
+    #[test]
+    fn the_board_can_be_replayed_at_any_moment_in_the_trail() {
+        let db = db();
+        let seq = seed(&db, "port the loader");
+        let filed_at = crate::model::now_ts();
+        // Real timestamps carry the ordering, so give the clock room to tick
+        // past the cutoff before the next write.
+        std::thread::sleep(Duration::from_millis(5));
+
+        db.tasks().claim(seq, "codex:1", TTL).unwrap();
+        let claimed_at = crate::model::now_ts();
+        std::thread::sleep(Duration::from_millis(5));
+
+        db.tasks().complete(seq, "codex:1", "ported").unwrap();
+        let done_at = crate::model::now_ts();
+
+        let at = |cutoff: &str| {
+            let board = db.events().board_at(&scope(), cutoff).unwrap();
+            board.into_iter().find(|t| t.seq == seq).unwrap()
+        };
+        let filed = at(&filed_at);
+        assert_eq!(filed.status, Status::Open);
+        assert_eq!(filed.holder, None);
+
+        let held = at(&claimed_at);
+        assert_eq!(held.status, Status::Claimed);
+        assert_eq!(held.holder.as_deref(), Some("codex:1"));
+
+        let done = at(&done_at);
+        assert_eq!(done.status, Status::Done);
+        assert_eq!(done.holder, None, "finishing clears the holder");
+
+        assert!(
+            db.events()
+                .board_at(&scope(), "2000-01-01")
+                .unwrap()
+                .is_empty(),
+            "before the first event there is no board"
+        );
+    }
+
+    #[test]
+    fn a_replay_knows_which_tasks_were_parked_on_a_question() {
+        let db = db();
+        let seq = seed(&db, "choose");
+        db.tasks().claim(seq, "codex:1", TTL).unwrap();
+        db.tasks()
+            .release_asking(seq, "codex:1", "needs a call", "Which way?")
+            .unwrap();
+        let asked_at = crate::model::now_ts();
+
+        let board = db.events().board_at(&scope(), &asked_at).unwrap();
+        assert_eq!(board[0].status, Status::Open);
+        assert!(board[0].awaiting_answer);
+
+        std::thread::sleep(Duration::from_millis(5));
+        db.questions().answer(seq, "cli", "left").unwrap();
+        let board = db
+            .events()
+            .board_at(&scope(), &crate::model::now_ts())
+            .unwrap();
+        assert!(!board[0].awaiting_answer);
+    }
+
+    #[test]
+    fn the_trail_knows_which_harnesses_have_acted_here() {
+        let db = db();
+        let seq = seed(&db, "shared");
+        assert!(
+            db.events().harnesses_seen(&scope()).unwrap().is_empty(),
+            "the CLI is not a harness"
+        );
+        db.tasks().claim(seq, "codex:1", TTL).unwrap();
+        db.tasks().release(seq, "codex:1", "handing off").unwrap();
+        db.tasks().claim(seq, "claude-code:2", TTL).unwrap();
+        assert_eq!(
+            db.events().harnesses_seen(&scope()).unwrap(),
+            vec!["claude-code", "codex"]
+        );
     }
 
     #[test]

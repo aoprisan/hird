@@ -15,8 +15,10 @@ footing (v1.4), recusal (v1.5), the MCP 2026-07-28 lifecycle (v1.6), review
 verdicts and the sent-back loop (v1.7), footprints (v1.8), the ground a task
 builds on (v1.9), the exhibit — kept versions, `hird diff`, `hird salvage`
 (v2.0), tenures (v2.1), the dispatch hook (v2.2), the event feed (v2.3),
-routed summonses (v2.4), human question gates (v2.5), and capability-aware
-dispatch (v2.6). The herdr plugin packages the pairing.
+routed summonses (v2.4), human question gates (v2.5), capability-aware
+dispatch (v2.6), and the readings — `hird why`, `plan lint`, `replay`,
+`mem export` and the question hook (v2.7). The herdr plugin packages the
+pairing.
 
 `DESIGN.md` records each of those decisions as it was made and stays the
 specification. This file is only about what is not built yet.

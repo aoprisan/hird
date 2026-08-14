@@ -18,7 +18,7 @@ mod verdict;
 mod witness;
 
 pub use deps::{dispatch_waves, Claimable, Deps};
-pub use events::{Events, FeedEvent, FeedFilter};
+pub use events::{Events, FeedEvent, FeedFilter, ReplayedTask};
 pub use footing::Footings;
 pub use memory::{Memory, MemoryQuery, NewAssertion, Recorded};
 pub use plan::{Applied, Drift, Placed, Plans};

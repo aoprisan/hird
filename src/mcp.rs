@@ -125,6 +125,9 @@ pub struct HirdMcp {
     /// Likewise resolved once: the dispatch hook, if one is configured, ready
     /// to announce tasks this session's calls make claimable.
     herald: Option<Herald>,
+    /// The dispatch hook's twin for the other audience: the question hook, if
+    /// one is configured, ready to tell a human a task now waits on them.
+    question_herald: Option<crate::herald::QuestionHerald>,
 }
 
 impl HirdMcp {
@@ -142,6 +145,7 @@ impl HirdMcp {
     ) -> crate::Result<HirdMcp> {
         let witness = config.witness(Path::new(&project));
         let herald = config.herald(db.path());
+        let question_herald = config.question_herald(db.path());
         Ok(HirdMcp {
             db: Mutex::new(db),
             agent,
@@ -150,6 +154,7 @@ impl HirdMcp {
             capabilities: crate::capability::normalize_all(&capabilities)?,
             witness,
             herald,
+            question_herald,
         })
     }
 
@@ -2134,6 +2139,19 @@ impl HirdMcp {
             })
             .map_err(stringify)?;
         self.announce(dispatched.as_slice());
+        // The question hook is the announcement's mirror: it fires exactly
+        // when dispatch stays quiet, because the one being summoned is the
+        // human the task now waits on. After the commit, like every hook, so
+        // its own `hird` calls find the question already on the board.
+        if let (Some(hook), Some(asked)) = (self.question_herald.as_ref(), asked.as_ref()) {
+            hook.announce(&crate::herald::RaisedQuestion {
+                seq: task.seq,
+                title: task.title.clone(),
+                project: task.project.clone(),
+                question: asked.question.clone(),
+                asked_by: asked.asked_by.clone(),
+            });
+        }
         json(&ReleaseResult {
             finish: FinishResult::new(
                 task.seq,

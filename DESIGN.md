@@ -1796,3 +1796,86 @@ tools. `incompatible` is an explanation on `task_next`, like `blocked`,
 its own environment, no stored status pretends incompatibility blocks every
 worker, and no new status is needed for a predicate that changes with the
 caller.
+
+## 26. (v2.7) The reading — the queue explains itself
+
+Five additions in one release, and none of them writes anything new. Each is a
+reader over state the design already keeps, which is the argument for all
+five: twenty-five sections of refusing daemons, rosters and schedulers left a
+queue whose every answer is derivable — so derive them, out loud, instead of
+leaving the human to reconstruct them from the board.
+
+### `hird why` — the claim gates, answered aloud
+
+`task_next` passing over a task is correct and silent, and the silence reads
+as a bug. `hird why <seq>` runs the same gates a claim runs, in the same
+order — lease, dependencies, question, recusal, requirements, overlap — and
+reports each one instead of folding them into an empty hand. The verdict
+comes first (`claimable no — waiting on #3 and an answer`), the evidence
+after, one gate per line. What stops everyone is separated from what narrows
+who: a recusal or a capability requirement does not make a task unclaimable,
+so it arrives as a caveat on `yes`, not a reason for `no`. Nothing here
+consults a new source; disagreement between `why` and a real claim would be a
+bug in one of them, which is why both run the identical repo checks.
+
+### `question_hook` — the herald's twin, facing the human
+
+§24 decided a question release is deliberately not announced: it waits for a
+human, not another agent, and waking an agent would only hand the stall
+around. That left the human's half of the seam §21 closed for agents — a
+question raised while nobody watches the board waits in silence. The
+`question_hook` key is the same contract with the opposite audience: one
+command, run detached through `sh -c` at the moment the gate opens, with
+`HIRD_QUESTION` and `HIRD_ASKED_BY` beside the usual task facts, stdio
+closed, failures swallowed. `HIRD_EVENT` is always `asked` — the word the
+trail records — so one script can serve both hooks and branch on shared
+vocabulary. Answering stays a human act, and the answer's announcement stays
+the dispatch hook's job (`answered`, §24). Two hooks, two audiences, zero
+daemons.
+
+### `hird plan lint` — the trouble a fileable plan still carries
+
+Parsing was already the hard gate: cycles, dangling needs, bad globs and bad
+capability labels refuse to parse (§13), so lint deliberately re-checks none
+of them — re-litigating parse here would let the two drift. What it reads for
+is the plan that files cleanly and then disappoints: unordered tasks
+declaring the same files (waves wider on paper than the queue will run them),
+tasks the collision radar cannot see, a `review = true` task with no declared
+scope (whose finish files no review when the witness saw nothing move, §15),
+and reviews on a board where fewer than two harnesses have ever acted — a
+recusal with nobody to route around. That last check is the one place hird
+comes near a roster, and it stays on the right side of the line: the trail's
+actors say who has shown up, never who could, and lint only reports it.
+Advisories, not refusals; the plan files either way.
+
+### `hird replay` — the board at a past moment
+
+The trail is append-only precisely so no question about the past becomes
+unanswerable (§22); this is the command that asks one. A fold over
+`task_events` up to a cutoff recovers each task's status, holder and question
+gate at that moment — claims, finishes, releases, expiries and answers each
+imply their transition, and every way a holding ends clears the holder. The
+cutoff is a string compare, exact because timestamps are stored fixed-width
+(§4). What the trail does not version, replay does not invent: titles and
+projects read from the present, and the output says so. Read-only, no new
+rows, and doubles as a standing test of the trail's completeness ahead of
+`hird sync`.
+
+### `hird mem export` — the memory, on paper
+
+Recall reaches agents through claims and searches, which requires reaching
+the queue; a cloud harness or a fresh clone inherits nothing. Export renders
+the project's current assertions as Markdown for a CLAUDE.md / AGENTS.md —
+one fact per bullet, its anchors beside it — and keeps footing's honesty on
+paper: a fact whose ground has moved goes out marked `re-check`, `--firm`
+leaves it home entirely, and a fact that was never anchored goes out bare
+rather than dressed in ground it never had (§14). One-way and human-invoked;
+nothing imports, merges or rewrites, because a memory that round-trips
+through prose is a memory that loses facts.
+
+### Still twelve tools, still six statuses
+
+All five are CLI verbs and one config key. No MCP tool was added or changed:
+agents already hear their own version of `why` in every claim refusal and
+`task_next` explanation, and the exports, replays and lints are the human's
+readings, not the agents'.

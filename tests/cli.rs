@@ -509,6 +509,143 @@ fn show_reports_what_a_task_waits_for_and_what_it_touches() {
 }
 
 #[test]
+fn why_answers_first_and_shows_its_evidence_after() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["add", "write the schema"]);
+    sandbox.run(&[
+        "add",
+        "write the api",
+        "--needs",
+        "1",
+        "--requires",
+        "browser",
+    ]);
+
+    // Nothing in the way: the verdict is one word and no evidence follows.
+    let free = sandbox.run(&["why", "1"]);
+    assert!(free.contains("claimable yes"), "{free}");
+    assert!(!free.contains("waits for"), "{free}");
+
+    // Blocked: the verdict names the dependency, the evidence line details it,
+    // and the capability requirement rides along as a caveat for later.
+    let blocked = sandbox.run(&["why", "2"]);
+    assert!(
+        blocked.contains("claimable no — waiting on #1"),
+        "{blocked}"
+    );
+    assert!(blocked.contains("waits for #1 (open)"), "{blocked}");
+    assert!(blocked.contains("browser"), "{blocked}");
+
+    // Held: the lease is the whole answer.
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex.claim(1);
+    let held = sandbox.run(&["why", "1"]);
+    assert!(held.contains("claimable no — held by codex:"), "{held}");
+
+    // A question gate names the answer as what everyone is waiting on.
+    codex
+        .call(
+            "task_release",
+            serde_json::json!({
+                "seq": 1,
+                "reason": "policy call",
+                "question": "Which schema dialect?"
+            }),
+        )
+        .unwrap();
+    let asking = sandbox.run(&["why", "1"]);
+    assert!(
+        asking.contains("claimable no — waiting on an answer"),
+        "{asking}"
+    );
+    assert!(
+        asking.contains("awaits    Which schema dialect?"),
+        "{asking}"
+    );
+    assert!(asking.contains("hird answer 1 <ANSWER>"), "{asking}");
+    codex.shutdown();
+}
+
+#[test]
+fn mem_export_writes_markdown_and_keeps_the_footing_honest() {
+    let sandbox = Sandbox::new();
+    sandbox.git_init();
+    sandbox.run(&[
+        "mem",
+        "add",
+        "the loader reads config.rs top to bottom",
+        "--path",
+        "src/config.rs",
+    ]);
+    sandbox.run(&["mem", "add", "tests want HIRD_DB set"]);
+
+    // Both facts export; the anchored one carries its file, the unanchored
+    // one goes out bare rather than dressed in ground it never had.
+    let exported = sandbox.run(&["mem", "export"]);
+    assert!(
+        exported.contains("## What earlier work here learned"),
+        "{exported}"
+    );
+    assert!(
+        exported.contains("- the loader reads config.rs top to bottom"),
+        "{exported}"
+    );
+    assert!(exported.contains("`src/config.rs`"), "{exported}");
+    assert!(exported.contains("- tests want HIRD_DB set"), "{exported}");
+    // The word "re-check" lives in the header prose either way; the marker
+    // itself only appears against a fact.
+    assert!(!exported.contains("re-check:"), "{exported}");
+
+    // The ground moves; the export says so instead of exporting yesterday's
+    // certainty, and --firm leaves the fact home altogether.
+    sandbox.write_file("src/config.rs", "// rewritten since\n");
+    let shaken = sandbox.run(&["mem", "export"]);
+    assert!(
+        shaken.contains("re-check: the ground under this has moved since"),
+        "{shaken}"
+    );
+    let firm = sandbox.run(&["mem", "export", "--firm"]);
+    assert!(!firm.contains("loader reads config.rs"), "{firm}");
+
+    // --path narrows to facts anchored inside the glob.
+    let scoped = sandbox.run(&["mem", "export", "--path", "src/**"]);
+    assert!(scoped.contains("loader reads config.rs"), "{scoped}");
+    assert!(!scoped.contains("tests want HIRD_DB"), "{scoped}");
+}
+
+#[test]
+fn replay_folds_the_trail_back_into_a_board() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["add", "port the loader"]);
+    sandbox.run(&["add", "use the loader", "--needs", "1"]);
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex.claim(1);
+
+    // "0s ago" is now: every event has landed, so the replay agrees with ls.
+    let board = sandbox.run(&["replay", "0s"]);
+    assert!(board.contains("the board as of"), "{board}");
+    assert!(board.contains("#1    claimed"), "{board}");
+    assert!(board.contains("[codex:"), "{board}");
+    assert!(board.contains("#2    open"), "{board}");
+
+    // Before the first event, there was nothing to see.
+    let empty = sandbox.run(&["replay", "2000-01-01"]);
+    assert!(empty.contains("nothing had been filed yet"), "{empty}");
+
+    // A moment that is neither an instant nor an age is refused with help.
+    let err = sandbox.run_failing(&["replay", "yesterday"]);
+    assert!(err.contains("replay wants a moment"), "{err}");
+    codex.shutdown();
+}
+
+#[test]
+fn why_on_a_missing_task_fails_with_a_plain_sentence() {
+    let sandbox = Sandbox::new();
+    let err = sandbox.run_failing(&["why", "42"]);
+    assert!(err.contains("task 42 not found"), "{err}");
+}
+
+#[test]
 fn recall_answers_with_what_earlier_work_in_the_same_files_learned() {
     let sandbox = Sandbox::new();
     sandbox.run(&["add", "Port the config loader", "--path", "src/config.rs"]);
@@ -1013,6 +1150,95 @@ needs = ["a"]
     assert!(err.contains("unknown field `naem`"), "{err}");
 
     assert_eq!(sandbox.run(&["ls"]).lines().count(), 1, "nothing was filed");
+}
+
+#[test]
+fn plan_lint_reads_a_fileable_plan_for_the_trouble_it_still_carries() {
+    let sandbox = Sandbox::new();
+    sandbox.write_file(
+        "plan.toml",
+        r#"
+plan = "port"
+[[task]]
+name = "loader"
+title = "port the loader"
+paths = ["src/config/**"]
+review = true
+[[task]]
+name = "audit"
+title = "audit the config"
+paths = ["src/config/loader.rs"]
+[[task]]
+name = "notes"
+title = "write the notes"
+review = true
+"#,
+    );
+    let linted = sandbox.run(&["plan", "lint", "plan.toml"]);
+    // An unordered pair on the same files, a task the radar cannot see, a
+    // review with nothing to read, and a board with no second harness.
+    assert!(linted.contains("collision loader and audit"), "{linted}");
+    assert!(linted.contains("unscoped  notes"), "{linted}");
+    assert!(
+        linted.contains("review    notes declares no files"),
+        "{linted}"
+    );
+    assert!(linted.contains("none has acted here yet"), "{linted}");
+    assert!(linted.contains("4 advisories"), "{linted}");
+    // Advisory means advisory: nothing was filed and the exit was clean.
+    assert!(sandbox.run(&["ls"]).contains("no tasks"));
+}
+
+#[test]
+fn plan_lint_stays_quiet_when_there_is_nothing_to_flag() {
+    let sandbox = Sandbox::new();
+    // Two harnesses have acted here, so a review lint has nothing to say.
+    sandbox.run(&["add", "seed"]);
+    let mut claude = McpSession::start(&sandbox, "claude-code");
+    let mut codex = McpSession::start(&sandbox, "codex");
+    claude.claim(1);
+    claude
+        .call(
+            "task_release",
+            serde_json::json!({"seq": 1, "reason": "handing off"}),
+        )
+        .unwrap();
+    codex.claim(1);
+
+    sandbox.write_file(
+        "plan.toml",
+        r#"
+plan = "tidy"
+[[task]]
+name = "one"
+title = "the reviewed step"
+paths = ["src/a.rs"]
+review = true
+[[task]]
+name = "two"
+title = "the follow-up"
+paths = ["src/a.rs"]
+needs = ["one"]
+"#,
+    );
+    let linted = sandbox.run(&["plan", "lint", "plan.toml"]);
+    assert!(linted.contains("nothing to flag"), "{linted}");
+    // The ordered pair on the same file is not a collision: one waits for
+    // the other, so they were never going to run side by side.
+    assert!(!linted.contains("collision"), "{linted}");
+    claude.shutdown();
+    codex.shutdown();
+}
+
+#[test]
+fn plan_lint_refuses_what_apply_would_refuse() {
+    let sandbox = Sandbox::new();
+    sandbox.write_file(
+        "plan.toml",
+        "plan = \"p\"\n[[task]]\nname = \"a\"\ntitle = \"A\"\nneeds = [\"a\"]\n",
+    );
+    let err = sandbox.run_failing(&["plan", "lint", "plan.toml"]);
+    assert!(err.contains("waits for itself"), "{err}");
 }
 
 #[test]

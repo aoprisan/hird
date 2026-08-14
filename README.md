@@ -1189,6 +1189,7 @@ hird add <title> [--body <md>|--body-file <path>] [--priority N] [--project <pat
                  [--needs <seq>,…] [--path <glob>]… [--requires <capability>]… [--review]
 hird ls [--status <status>] [--all-projects]
 hird show <seq>
+hird why <seq>
 hird diff <seq> [--path <file>]
 hird salvage <seq> <path> [--baseline] [--out <file> [--force]]
 hird cancel <seq> [--reason <text>]
@@ -1197,6 +1198,7 @@ hird answer <seq> <answer>
 hird dep add <seq> --needs <seq>,…
 hird dep rm  <seq> --needs <seq>,…
 hird plan apply <file> [--dry-run] [--project <path>]
+hird plan lint <file> [--project <path>]
 hird graph [--all-projects]
 hird scope <seq> [--path <glob>]… [--clear]
 hird require <seq> [--capability <name>]… [--clear]
@@ -1205,10 +1207,12 @@ hird recuse <seq> --from <seq>,… [--reason <text>] | --clear
 hird record [--all-projects]
 hird events [--follow] [--json] [--kind <kind>,…] [--task <seq>] [--actor <name>]
             [--limit N] [--all-projects]
+hird replay <when> [--all-projects]
 hird recall <seq> [--limit N]
 hird mem add <content> [--tags a,b] [--task <seq>] [--path <file>]…
 hird mem search [query] [--limit N] [--all-projects] [--include-superseded]
 hird mem standing [--shaky] [--all-projects]
+hird mem export [--path <glob>] [--firm]
 hird tui
 hird mcp
 hird register <claude-code|codex|copilot|copilot-cli|opencode> [--name <name>]
@@ -1317,9 +1321,15 @@ $ hird events --json --kind ground_shifted,contended --follow
 
 That line is hird's whole integration surface as an emitter: pipe it into
 `jq`, a log file, a dashboard, or the thing that pages you. The `dispatch_hook`
-answers *wake somebody when work appears*; the feed answers everything after
+answers *wake somebody when work appears*, its twin `question_hook` answers
+*wake the human when work needs one*; the feed answers everything after
 that — what the swarm did, as it does it, in a form both halves of your
 tooling can read.
+
+And because the trail is append-only, the past stays a board too: `hird
+replay 2h` (or a timestamp) folds the events back into the queue as it stood
+at that moment — who held what, which wave was live, what was parked on a
+question — for the post-mortem question `--follow` was too late for.
 
 ## Projects
 
@@ -1380,6 +1390,14 @@ memory_footing = true
 # under judgement, and `hird salvage` can recover a version an overlapping
 # write discarded. Rides on `witness` and is off wherever that is. Default true.
 exhibit = true
+
+# A command to run, detached, whenever a task becomes claimable — the one push
+# in the pull design. Empty (the default) means no hook.
+dispatch_hook = ""
+
+# Its twin for the other audience: run, detached, the moment a task raises a
+# question and steps out of dispatch to wait on a human. Empty means no hook.
+question_hook = ""
 ```
 
 Agents are told the configured TTL in the MCP handshake and asked to check in at
