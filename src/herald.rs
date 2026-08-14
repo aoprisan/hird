@@ -28,6 +28,14 @@
 //! write of its own — it is enforced lazily by sweeps — so it is announced by
 //! whichever sweep first notices it, with the same latency the expiry itself
 //! already has.
+//!
+//! Questions have the same seam on the other side of the table. A task
+//! released with a question steps out of dispatch — deliberately unannounced,
+//! because it is waiting for a human, not another agent — and a human who is
+//! not watching the board waits in the same silence an idle agent did. The
+//! `question_hook` key closes that seam the same way: one command, run
+//! detached at the moment a question gate opens, with the question in its
+//! environment. Same contract, different audience.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -131,27 +139,18 @@ impl Herald {
     /// Failure to spawn is swallowed — the queue's work is already committed,
     /// and a broken hook must not turn a finished task into an error.
     pub fn announce(&self, a: &Announcement) {
-        let child = Command::new("sh")
-            .arg("-c")
-            .arg(&self.command)
-            .env("HIRD_EVENT", a.cause.as_str())
-            .env("HIRD_TASK", a.seq.to_string())
-            .env("HIRD_TITLE", &a.title)
-            .env("HIRD_PROJECT", &a.project)
-            .env("HIRD_RECUSED", a.recused.join(","))
-            .env("HIRD_REQUIRES", a.requirements.join(","))
-            .env(identity::DB_ENV, &self.db)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-        if let Ok(mut child) = child {
-            // Reap from a thread so the hook neither blocks this call nor
-            // lingers as a zombie under a long-lived MCP server.
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
-        }
+        run_detached(
+            &self.command,
+            &self.db,
+            &[
+                ("HIRD_EVENT", a.cause.as_str().to_string()),
+                ("HIRD_TASK", a.seq.to_string()),
+                ("HIRD_TITLE", a.title.clone()),
+                ("HIRD_PROJECT", a.project.clone()),
+                ("HIRD_RECUSED", a.recused.join(",")),
+                ("HIRD_REQUIRES", a.requirements.join(",")),
+            ],
+        );
     }
 
     /// Announce a batch, one hook run per task.
@@ -159,6 +158,97 @@ impl Herald {
         for a in list {
             self.announce(a);
         }
+    }
+}
+
+/// Run `command` through `sh -c` with `vars` and `HIRD_DB` set, and walk away.
+///
+/// All three stdio streams are closed: an MCP server's stdout is a JSON-RPC
+/// wire, and a hook that inherited it could corrupt the session that fired it.
+/// Failure to spawn is swallowed — the queue's work is already committed, and
+/// a broken hook must not turn a finished write into an error.
+fn run_detached(command: &str, db: &Path, vars: &[(&str, String)]) {
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c").arg(command);
+    for (name, value) in vars {
+        cmd.env(name, value);
+    }
+    let child = cmd
+        .env(identity::DB_ENV, db)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    if let Ok(mut child) = child {
+        // Reap from a thread so the hook neither blocks this call nor
+        // lingers as a zombie under a long-lived MCP server.
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+    }
+}
+
+/// One raised question: task `seq` has stepped out of dispatch to wait on a
+/// human answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RaisedQuestion {
+    pub seq: i64,
+    pub title: String,
+    pub project: String,
+    pub question: String,
+    /// Who asked, exactly as the board records it — `harness:session` for an
+    /// agent, so a notification can say which model hit the human edge.
+    pub asked_by: String,
+}
+
+/// The configured messenger for question gates, or nothing.
+///
+/// The herald's twin with the opposite audience: it speaks when a task leaves
+/// dispatch rather than when one enters it, and the one it summons is the
+/// human. Built once per process from the `question_hook` key; an empty or
+/// unset key builds `None`.
+#[derive(Debug, Clone)]
+pub struct QuestionHerald {
+    command: String,
+    db: PathBuf,
+}
+
+impl QuestionHerald {
+    /// A question herald for `command`, announcing a queue that lives at `db`.
+    ///
+    /// `None` when the command is empty: no hook configured, nothing to run.
+    pub fn new(command: &str, db: &Path) -> Option<QuestionHerald> {
+        let command = command.trim();
+        if command.is_empty() {
+            return None;
+        }
+        Some(QuestionHerald {
+            command: command.to_string(),
+            db: db.to_path_buf(),
+        })
+    }
+
+    /// Announce one open question gate: run the hook with the question in its
+    /// environment and walk away.
+    ///
+    /// The command runs through `sh -c` with `HIRD_EVENT` (always `asked`),
+    /// `HIRD_TASK`, `HIRD_TITLE`, `HIRD_PROJECT`, `HIRD_QUESTION`,
+    /// `HIRD_ASKED_BY` and `HIRD_DB` set. `HIRD_EVENT` matches the word the
+    /// event trail records, so one script can serve both hooks and branch on
+    /// the same vocabulary.
+    pub fn announce(&self, q: &RaisedQuestion) {
+        run_detached(
+            &self.command,
+            &self.db,
+            &[
+                ("HIRD_EVENT", "asked".to_string()),
+                ("HIRD_TASK", q.seq.to_string()),
+                ("HIRD_TITLE", q.title.clone()),
+                ("HIRD_PROJECT", q.project.clone()),
+                ("HIRD_QUESTION", q.question.clone()),
+                ("HIRD_ASKED_BY", q.asked_by.clone()),
+            ],
+        );
     }
 }
 
@@ -313,6 +403,41 @@ mod tests {
             recused: Vec::new(),
             requirements: Vec::new(),
         });
+    }
+
+    /// The question herald carries the question itself and who asked it, so a
+    /// notification can say what decision is waiting without a board lookup.
+    #[test]
+    fn the_question_hook_receives_the_question_in_its_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("log");
+        let herald = QuestionHerald::new(
+            &format!(
+                "printf '%s %s %s %s' \"$HIRD_EVENT\" \"$HIRD_TASK\" \"$HIRD_QUESTION\" \
+                 \"$HIRD_ASKED_BY\" > {}",
+                log.display()
+            ),
+            Path::new("/tmp/board.db"),
+        )
+        .unwrap();
+        herald.announce(&RaisedQuestion {
+            seq: 4,
+            title: "migrate the config".to_string(),
+            project: "/repo".to_string(),
+            question: "Keep the old format readable?".to_string(),
+            asked_by: "codex:1".to_string(),
+        });
+        assert_eq!(
+            wait_for(&log),
+            "asked 4 Keep the old format readable? codex:1"
+        );
+    }
+
+    #[test]
+    fn an_empty_command_builds_no_question_herald() {
+        assert!(QuestionHerald::new("", Path::new("/tmp/x.db")).is_none());
+        assert!(QuestionHerald::new("   ", Path::new("/tmp/x.db")).is_none());
+        assert!(QuestionHerald::new("true", Path::new("/tmp/x.db")).is_some());
     }
 
     #[test]

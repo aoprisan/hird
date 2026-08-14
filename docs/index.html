@@ -410,6 +410,31 @@ herdr agent prompt "$worker" "hird task $HIRD_TASK is ready; work the hird queue
 </p>
 
 <p>
+  Questions have the same seam on the other side of the table, and the
+  <code>question_hook</code> key closes it the same way. A task
+  <a href="#lifecycle">released with a question</a> steps out of dispatch on
+  purpose — it is waiting for a human, not another agent, so the dispatch hook
+  stays deliberately quiet — but a human who is not watching the board waits
+  in the same silence an idle agent did. Name a command and hird runs it,
+  detached, the moment a question gate opens, with <code>HIRD_TASK</code>,
+  <code>HIRD_TITLE</code>, <code>HIRD_PROJECT</code>,
+  <code>HIRD_QUESTION</code>, <code>HIRD_ASKED_BY</code> and
+  <code>HIRD_DB</code> in its environment (<code>HIRD_EVENT</code> is always
+  <code>asked</code>, so one script can serve both hooks and branch on the
+  same vocabulary). Point it at whatever reaches you:
+</p>
+
+<pre><code>question_hook = <span class="s">'notify-send "hird task $HIRD_TASK asks" "$HIRD_QUESTION"'</span></code></pre>
+
+<p>
+  Answering stays a human act — <code>hird answer</code> or the TUI — and the
+  moment you do, the dispatch hook announces the task back to the agents as
+  <code>answered</code>. The two hooks together close the loop's last manual
+  mile in both directions: agents are woken when work appears, and you are
+  woken when work needs you.
+</p>
+
+<p>
   Under herdr, the whole pairing also ships packaged as a
   <a href="https://github.com/aoprisan/hird/tree/main/herdr-plugin">herdr plugin</a>:
   <code>herdr plugin install aoprisan/hird/herdr-plugin</code> wires the hook
@@ -700,12 +725,15 @@ open ──cancel (human)──► cancelled</code></pre>
 </p>
 
 <p>
-  Nothing summons you to it: a question is the one stall no agent can clear,
+  No agent is summoned to it: a question is the one stall no agent can clear,
   so the dispatch hook stays silent rather than waking somebody who would
-  only hand it around again. It waits on you noticing instead, which is why
-  <code>hird ls</code> marks the row, <code>hird show</code> prints the
-  command that answers it, and the board counts them in its status bar
-  (<code>· 2 awaiting you</code>).
+  only hand it around again. On the board, <code>hird ls</code> marks the
+  row, <code>hird show</code> prints the command that answers it, and the TUI
+  counts them in its status bar (<code>· 2 awaiting you</code>) — and if
+  noticing should not have to wait for a glance, the
+  <a href="#dispatch-hook"><code>question_hook</code></a> config key runs a
+  command of yours the moment the question is raised, with the question in
+  its environment.
 </p>
 </section>
 
@@ -1497,6 +1525,7 @@ shaky     the renderer redraws on every poll
                  [--needs &lt;seq&gt;,…] [--path &lt;glob&gt;]… [--review]
 hird ls [--status &lt;status&gt;] [--all-projects]
 hird show &lt;seq&gt;
+hird why &lt;seq&gt;
 hird diff &lt;seq&gt; [--path &lt;file&gt;] [--tenure N]
 hird salvage &lt;seq&gt; &lt;path&gt; [--baseline] [--tenure N] [--out &lt;file&gt; [--force]]
 hird cancel &lt;seq&gt; [--reason &lt;text&gt;]
@@ -1505,6 +1534,7 @@ hird answer &lt;seq&gt; &lt;answer&gt;
 hird dep add &lt;seq&gt; --needs &lt;seq&gt;,…
 hird dep rm  &lt;seq&gt; --needs &lt;seq&gt;,…
 hird plan apply &lt;file&gt; [--dry-run] [--project &lt;path&gt;]
+hird plan lint &lt;file&gt; [--project &lt;path&gt;]
 hird graph [--all-projects]
 hird scope &lt;seq&gt; [--path &lt;glob&gt;]… [--clear]
 hird agents [--all-projects]
@@ -1512,10 +1542,12 @@ hird recuse &lt;seq&gt; --from &lt;seq&gt;,… [--reason &lt;text&gt;] | --clear
 hird record [--all-projects]
 hird events [--follow] [--json] [--kind &lt;kind&gt;,…] [--task &lt;seq&gt;] [--actor &lt;name&gt;]
             [--limit N] [--all-projects]
+hird replay &lt;when&gt; [--all-projects]
 hird recall &lt;seq&gt; [--limit N]
 hird mem add &lt;content&gt; [--tags a,b] [--task &lt;seq&gt;] [--path &lt;file&gt;]…
 hird mem search [query] [--limit N] [--all-projects] [--include-superseded]
 hird mem standing [--shaky] [--all-projects]
+hird mem export [--path &lt;glob&gt;] [--firm]
 hird tui
 hird mcp
 hird db-path</code></pre>
@@ -1527,19 +1559,21 @@ hird db-path</code></pre>
     <tr><td><code>add</code></td><td>File a task. Prints the number, which is how you and the agents refer to it.</td></tr>
     <tr><td><code>ls</code></td><td>The queue as rows: status, holder, lease countdown, what it waits for, and whether it <a href="#footprint">changed anything</a>.</td></tr>
     <tr><td><code>show</code></td><td>One task in full — body, dependencies, scope, history, what was learned on it, and what the working tree says it did.</td></tr>
+    <tr><td><code>why</code></td><td>Whether a task is claimable right now, verdict first — and if not, every gate in the way: the lease, unfinished dependencies, an unanswered question, recusals, capability requirements, overlap with live work.</td></tr>
     <tr><td><code>diff</code></td><td>The uncommitted diff of what moved under a task, from the versions the <a href="#exhibit">witness kept</a> — even after the task is done and the tree has moved on. <code>--tenure N</code> reads an archived round instead, after the task has changed hands.</td></tr>
     <tr><td><code>salvage</code></td><td>Recover a version of a file as it stood under a task: the last one the witness saw, or with <code>--baseline</code> the one the task started from. <code>--tenure N</code> reaches an earlier holding's record.</td></tr>
     <tr><td><code>cancel</code> / <code>reopen</code></td><td>Human overrides. They work regardless of who holds the task.</td></tr>
     <tr><td><code>answer</code></td><td>Resolve the question holding an open task out of dispatch; the answer is handed to its next claimant.</td></tr>
     <tr><td><code>dep</code></td><td>Add or remove "must wait for" edges after the fact.</td></tr>
-    <tr><td><code>plan</code></td><td>File a whole graph from a <a href="#plan-files">plan file</a>, in one transaction. <code>--dry-run</code> reads it out — waves, overlaps and all — and writes nothing.</td></tr>
+    <tr><td><code>plan</code></td><td>File a whole graph from a <a href="#plan-files">plan file</a>, in one transaction. <code>--dry-run</code> reads it out — waves, overlaps and all — and writes nothing. <code>lint</code> reads the same file for the trouble it can carry while still filing cleanly: unordered tasks on the same files, tasks the collision radar cannot see, reviews that will never be filed or that nobody present could claim.</td></tr>
     <tr><td><code>graph</code></td><td>The plan as dispatch waves: workable now, and what each later wave waits for.</td></tr>
     <tr><td><code>scope</code></td><td>Show or set the files a task is expected to touch. Warns about overlaps.</td></tr>
     <tr><td><code>agents</code></td><td>Who is working what, what has moved under each of them, and a <code>!!</code> line wherever two agents are in the same files.</td></tr>
     <tr><td><code>record</code></td><td>Each harness's track record under <a href="#verdict">review</a>: work upheld, work sent back, first-pass rate, and the verdicts it has handed out.</td></tr>
     <tr><td><code>events</code></td><td>The append-only trail read across tasks, oldest first — <a href="#events">the board as a log</a>. <code>--follow</code> keeps reading; <code>--json</code> makes each line one object.</td></tr>
+    <tr><td><code>replay</code></td><td>The board as it stood at a past moment, folded from the same trail: who held what, which wave was live, what was parked on a question. Takes an instant (<code>2026-08-14T10:00</code>, prefixes fine) or an age (<code>2h</code>, <code>3d</code>).</td></tr>
     <tr><td><code>recall</code></td><td>What earlier work already learned about a task, and why it is relevant — the same thing an agent is handed when it claims it.</td></tr>
-    <tr><td><code>mem</code></td><td>Record and search assertions.</td></tr>
+    <tr><td><code>mem</code></td><td>Record and search assertions. <code>export</code> writes the project's current facts as Markdown for a CLAUDE.md or AGENTS.md — footing-aware, so a fact whose ground has been rewritten goes out marked for a re-read.</td></tr>
     <tr><td><code>tui</code></td><td>The live board.</td></tr>
     <tr><td><code>mcp</code></td><td>Serve MCP on stdio. Harnesses run this, you generally do not.</td></tr>
     <tr><td><code>db-path</code></td><td>Print the database path this invocation would use.</td></tr>
@@ -1783,7 +1817,12 @@ exhibit = true
 
 <span class="c"># A command to run, detached, whenever a task becomes claimable — see
 # "The dispatch hook" above. Empty (the default) means no hook.</span>
-dispatch_hook = <span class="s">""</span></code></pre>
+dispatch_hook = <span class="s">""</span>
+
+<span class="c"># Its twin for the other audience: run, detached, the moment a task raises a
+# question and steps out of dispatch to wait on a human. Empty (the default)
+# means no hook.</span>
+question_hook = <span class="s">""</span></code></pre>
 
 <p>
   Unknown keys are an error rather than a shrug, so a typo is reported instead of

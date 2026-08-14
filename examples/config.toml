@@ -158,3 +158,32 @@ exhibit = true
 # examples/dispatch-hook.sh shows the announcements land; the FAQ covers the
 # herdr pairing.
 dispatch_hook = ""
+
+# A command to run whenever a task raises a question. Empty means no hook.
+#
+# A task released with a question steps out of dispatch on purpose: it is
+# waiting for a human, not another agent, so the dispatch hook stays quiet.
+# But a human who is not watching the board waits in the same silence an idle
+# agent did — a question raised while you are at lunch sits unanswered until
+# you happen to look. This hook is the dispatch hook's twin for that other
+# audience: hird runs the command, detached, the moment a question gate
+# opens, with the question in its environment:
+#
+#   HIRD_EVENT    always `asked` — the same word the event trail records, so
+#                 one script can serve both hooks and branch on it
+#   HIRD_TASK     the task number
+#   HIRD_TITLE    its title
+#   HIRD_PROJECT  its project root
+#   HIRD_QUESTION the question itself
+#   HIRD_ASKED_BY who asked, as the board records it — `harness:session`
+#   HIRD_DB       the database, so the hook's own `hird` calls read the same
+#                 board
+#
+# hird does not wait for it and does not read its answer; stdout and stderr
+# are closed. Point it at whatever reaches you:
+#
+#   question_hook = 'notify-send "hird task $HIRD_TASK asks" "$HIRD_QUESTION"'
+#
+# Answering stays a human act — `hird answer` or the TUI — and the moment you
+# do, the dispatch hook announces the task back to the agents.
+question_hook = ""

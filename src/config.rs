@@ -109,6 +109,13 @@ pub struct Config {
     /// means no hook.
     /// See [`crate::herald`].
     pub dispatch_hook: String,
+    /// A command to run the moment a task steps out of dispatch to wait on a
+    /// human answer — the other side of the seam `dispatch_hook` closes. Runs
+    /// detached through `sh -c` with `HIRD_EVENT` (always `asked`),
+    /// `HIRD_TASK`, `HIRD_TITLE`, `HIRD_PROJECT`, `HIRD_QUESTION`,
+    /// `HIRD_ASKED_BY` and `HIRD_DB` in its environment; empty means no hook.
+    /// See [`crate::herald`].
+    pub question_hook: String,
 }
 
 impl Default for Config {
@@ -124,6 +131,7 @@ impl Default for Config {
             memory_footing: true,
             exhibit: true,
             dispatch_hook: String::new(),
+            question_hook: String::new(),
         }
     }
 }
@@ -199,6 +207,13 @@ impl Config {
         crate::herald::Herald::new(&self.dispatch_hook, db)
     }
 
+    /// The herald that announces question gates to a human, if a question
+    /// hook is configured. `db` rides along as `HIRD_DB`, same as the
+    /// dispatch hook's.
+    pub fn question_herald(&self, db: &Path) -> Option<crate::herald::QuestionHerald> {
+        crate::herald::QuestionHerald::new(&self.question_hook, db)
+    }
+
     /// The witness memory may read the tree through, if it may.
     ///
     /// Narrower than [`Config::witness`] by one flag: a human who wants the
@@ -256,9 +271,12 @@ mod tests {
         // hash of files somebody already named.
         assert!(cfg.memory_footing);
         // No hook runs unless a human wrote one down: the herald is a way to
-        // summon agents, and summoning is opt-in.
+        // summon agents, and summoning is opt-in. The question hook summons
+        // the human, and is opt-in for the same reason.
         assert!(cfg.dispatch_hook.is_empty());
         assert!(cfg.herald(Path::new("/tmp/x.db")).is_none());
+        assert!(cfg.question_hook.is_empty());
+        assert!(cfg.question_herald(Path::new("/tmp/x.db")).is_none());
     }
 
     #[test]
@@ -268,6 +286,18 @@ mod tests {
             ..Config::default()
         };
         assert!(cfg.herald(Path::new("/tmp/x.db")).is_some());
+    }
+
+    #[test]
+    fn a_configured_question_hook_builds_its_own_herald() {
+        let cfg = Config {
+            question_hook: "true".to_string(),
+            ..Config::default()
+        };
+        assert!(cfg.question_herald(Path::new("/tmp/x.db")).is_some());
+        // The two hooks are independent: a question hook does not conjure a
+        // dispatch herald, nor the reverse.
+        assert!(cfg.herald(Path::new("/tmp/x.db")).is_none());
     }
 
     #[test]

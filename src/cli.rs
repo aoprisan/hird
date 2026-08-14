@@ -64,6 +64,15 @@ pub enum Command {
     Ls(LsArgs),
     /// Show one task in full, with its history.
     Show { seq: i64 },
+    /// Explain whether a task is claimable right now, and if not, everything
+    /// standing in the way.
+    ///
+    /// The claim gates, asked out loud in the order dispatch applies them: a
+    /// live lease, unfinished dependencies, an unanswered question, recusals,
+    /// capability requirements, and file-scope overlap with live work. `hird
+    /// show` says everything about a task; this answers the one question a
+    /// silent queue raises — why is nobody getting this handed to them?
+    Why { seq: i64 },
     /// The diff of what moved under a task, from the versions the witness kept.
     Diff {
         seq: i64,
@@ -150,6 +159,22 @@ pub enum Command {
     /// each line one machine-readable object for whatever wants to build on
     /// the feed.
     Events(EventsArgs),
+    /// The board as it stood at a past moment, folded from the event trail.
+    ///
+    /// The trail is append-only so that no question about the past becomes
+    /// unanswerable; this is the command that asks one. "Show me the queue at
+    /// the moment task 23 was sent back" is a fold over events that already
+    /// exist — who held what, which wave was live, what was parked on a
+    /// question — read-only, from the same trail `hird events` prints.
+    /// Statuses are yesterday's; titles are today's, since the trail does not
+    /// version them.
+    Replay {
+        /// When: an RFC3339 UTC instant, prefixes welcome ("2026-08-14",
+        /// "2026-08-14T10:00"), or how long ago ("90m", "2h", "3d").
+        when: String,
+        #[command(flatten)]
+        scope: ScopeFilterArgs,
+    },
     /// Show what earlier work already learned about a task, and why it is
     /// relevant. This is what an agent is handed when it claims the task.
     Recall {
@@ -271,6 +296,23 @@ pub enum PlanCommand {
         #[arg(long)]
         dry_run: bool,
         /// Project root to file under. Defaults to the current project.
+        #[arg(long, value_name = "PATH")]
+        project: Option<PathBuf>,
+    },
+    /// Read a plan for trouble before filing it, and write nothing.
+    ///
+    /// Parsing is already the hard gate — cycles, dangling needs, bad globs
+    /// and bad capability labels all refuse to parse, here and at apply
+    /// alike — so what this adds is the trouble a fileable plan can still
+    /// carry: unordered tasks declaring the same files, tasks the conflict
+    /// radar cannot see, reviews that will never be filed or that nobody on
+    /// this board could claim. Advisories, not refusals: the plan files
+    /// either way. The exit code is nonzero only when the plan itself is
+    /// unfileable.
+    Lint {
+        /// The plan file, as TOML ("-" for stdin).
+        file: PathBuf,
+        /// Project root to lint against. Defaults to the current project.
         #[arg(long, value_name = "PATH")]
         project: Option<PathBuf>,
     },
@@ -410,6 +452,25 @@ pub enum MemCommand {
         #[arg(long)]
         all_projects: bool,
     },
+    /// Write this project's recorded facts as Markdown, ready to paste into
+    /// a CLAUDE.md or AGENTS.md.
+    ///
+    /// The memory reaches agents through claims and searches, which only
+    /// helps a session that can reach the queue. Exporting gives the same
+    /// facts a second life on paper: a cloud harness, a fresh clone, a
+    /// session with no MCP at all still inherits what the swarm learned. The
+    /// export stays footing-aware — a fact whose ground has been rewritten
+    /// since it was recorded goes out marked for a re-read, not dressed as
+    /// this morning's.
+    Export {
+        /// Only facts anchored to files this glob names.
+        #[arg(long, value_name = "GLOB")]
+        path: Option<String>,
+        /// Only facts whose anchors still match the tree exactly; the shaky,
+        /// the orphaned and the never-anchored stay home.
+        #[arg(long)]
+        firm: bool,
+    },
 }
 
 /// Run a parsed command, writing human-readable output to `out`.
@@ -473,6 +534,7 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
             look(&db, &config, &project);
             show(&db, *seq, &config, out)
         }
+        Command::Why { seq } => why(&db, *seq, &config, out),
         Command::Diff { seq, path, tenure } => {
             diff(&db, *seq, path.as_deref(), *tenure, &config, out)
         }
@@ -537,6 +599,12 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
         }
         Command::Recuse(args) => recuse(&db, args, out),
         Command::Record(args) => record(&db, &scope_of(&project, &config, args.all_projects), out),
+        Command::Replay { when, scope } => replay(
+            &db,
+            &scope_of(&project, &config, scope.all_projects),
+            when,
+            out,
+        ),
         Command::Events(args) => events_cmd(&db, &project, &config, herald.as_ref(), args, out),
     }
 }
@@ -794,11 +862,11 @@ fn plan_cmd(
     cmd: &PlanCommand,
     out: &mut impl Write,
 ) -> anyhow::Result<()> {
-    let PlanCommand::Apply {
-        file,
-        dry_run,
-        project: explicit,
-    } = cmd;
+    let (file, explicit) = match cmd {
+        PlanCommand::Apply { file, project, .. } | PlanCommand::Lint { file, project } => {
+            (file, project)
+        }
+    };
     let source = read_text(file)?;
     let parsed =
         plan::parse(&source).with_context(|| format!("reading the plan in {}", file.display()))?;
@@ -807,7 +875,11 @@ fn plan_cmd(
         None => project.to_string(),
     };
 
-    if *dry_run {
+    let dry_run = match cmd {
+        PlanCommand::Lint { .. } => return lint(db, &project, &parsed, out),
+        PlanCommand::Apply { dry_run, .. } => *dry_run,
+    };
+    if dry_run {
         return preview(db, &project, &parsed, out);
     }
 
@@ -957,6 +1029,239 @@ fn preview(
             already,
             parsed.tasks.len() - already
         )?;
+    }
+    Ok(())
+}
+
+/// `hird mem export`: the project's current facts, as Markdown on stdout.
+///
+/// One fact per bullet, its files and footing on the line below — enough for
+/// a reader with no queue to know what was learned and whether the code it
+/// was learned from still stands. Oldest first, so re-exporting after new
+/// work appends rather than reshuffles.
+fn mem_export(
+    db: &Db,
+    project: &str,
+    witness: Option<&witness::Witness>,
+    path: Option<&str>,
+    firm_only: bool,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
+    let wanted = match path {
+        Some(raw) => Some(glob::normalize(raw).ok_or_else(|| {
+            anyhow::anyhow!("--path {raw:?} is not a usable glob; try src/**, or a literal path")
+        })?),
+        None => None,
+    };
+    if firm_only && witness.is_none() {
+        anyhow::bail!(
+            "--firm needs a watched tree to check anchors against; run inside the \
+             project's git checkout, or export without it"
+        );
+    }
+
+    let scope = ProjectScope::Only(project.to_string());
+    let mut facts = db
+        .memory()
+        .search(&MemoryQuery::new("", scope).limit(10_000))?;
+    // Recency is search's order; an export wants the stable one.
+    facts.sort_by(|a, b| (&a.created_at, &a.id).cmp(&(&b.created_at, &b.id)));
+    let ids: Vec<String> = facts.iter().map(|a| a.id.clone()).collect();
+    let anchors = db.footings().anchors_for(Some(project), &ids)?;
+    let standings = footing::standings(db, witness, project, &ids);
+
+    let kept: Vec<&crate::model::Assertion> = facts
+        .iter()
+        .filter(|fact| match &wanted {
+            Some(glob) => anchors
+                .get(&fact.id)
+                .is_some_and(|list| list.iter().any(|a| crate::glob::intersects(glob, &a.path))),
+            None => true,
+        })
+        .filter(|fact| !firm_only || matches!(standings.get(&fact.id), Some(Standing::Firm { .. })))
+        .collect();
+
+    if kept.is_empty() {
+        writeln!(out, "nothing to export; hird mem add is how facts get here")?;
+        return Ok(());
+    }
+
+    writeln!(out, "## What earlier work here learned")?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "<!-- hird mem export, {}. Facts recorded by agents working this\n\
+         project, each anchored to the files it was read off. One marked\n\
+         \"re-check\" has had that ground rewritten since it was learned. -->",
+        Utc::now().format("%Y-%m-%d")
+    )?;
+    writeln!(out)?;
+    for fact in kept {
+        writeln!(out, "- {}", fact.content.trim())?;
+        let mut notes: Vec<String> = Vec::new();
+        if let Some(list) = anchors.get(&fact.id).filter(|l| !l.is_empty()) {
+            let paths: Vec<String> = list.iter().map(|a| format!("`{}`", a.path)).collect();
+            notes.push(paths.join(", "));
+        }
+        match standings.get(&fact.id) {
+            Some(Standing::Shaky { .. }) => {
+                notes.push("re-check: the ground under this has moved since".to_string());
+            }
+            Some(Standing::Orphaned { .. }) => {
+                notes.push("re-check: the files this was read off are gone".to_string());
+            }
+            _ => {}
+        }
+        if let Some(spoken) = footing::corroboration(db, fact) {
+            notes.push(spoken);
+        }
+        if !notes.is_empty() {
+            writeln!(out, "  — {}", notes.join("; "))?;
+        }
+    }
+    Ok(())
+}
+
+/// `hird replay`: the board as it stood at a past moment.
+fn replay(db: &Db, scope: &ProjectScope, when: &str, out: &mut impl Write) -> anyhow::Result<()> {
+    let now = Utc::now();
+    let cutoff = parse_when(when, now)?;
+    let board = db.events().board_at(scope, &cutoff)?;
+
+    // The age is only worth saying when the cutoff is a full instant; a
+    // prefix like "2026-08-14" already reads as itself.
+    let age = crate::model::parse_ts(&cutoff)
+        .map(|_| format!(" — {}", fmt::age_phrase(&cutoff, now)))
+        .unwrap_or_default();
+    writeln!(out, "the board as of {cutoff}{age}")?;
+    if board.is_empty() {
+        writeln!(out, "nothing had been filed yet")?;
+        return Ok(());
+    }
+    for task in &board {
+        let mut line = format!(
+            "#{:<4} {:<11}  {}",
+            task.seq,
+            task.status,
+            fmt::truncate(&task.title, 48)
+        );
+        if let Some(holder) = &task.holder {
+            line.push_str(&format!("  [{holder}]"));
+        }
+        if task.awaiting_answer {
+            line.push_str("  awaits answer");
+        }
+        if scope.is_all() {
+            line.push_str(&format!("  ({})", task.project));
+        }
+        writeln!(out, "{}", line.trim_end())?;
+    }
+    Ok(())
+}
+
+/// A moment from the command line: an age like `2h`, or an RFC3339 instant —
+/// a prefix of one included, since stored timestamps are fixed-width UTC and
+/// compare correctly as strings.
+fn parse_when(raw: &str, now: chrono::DateTime<Utc>) -> anyhow::Result<String> {
+    let raw = raw.trim();
+    if let Some(digits) = raw.strip_suffix(['s', 'm', 'h', 'd']) {
+        if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
+            let n: i64 = digits.parse()?;
+            let delta = match raw.chars().last() {
+                Some('s') => chrono::Duration::seconds(n),
+                Some('m') => chrono::Duration::minutes(n),
+                Some('h') => chrono::Duration::hours(n),
+                _ => chrono::Duration::days(n),
+            };
+            return Ok(crate::model::fmt_ts(now - delta));
+        }
+    }
+    let looks_absolute = raw.len() >= 4
+        && raw.starts_with(|c: char| c.is_ascii_digit())
+        && raw
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '-' | ':' | 'T' | '.' | 'Z' | '+'));
+    if looks_absolute {
+        return Ok(raw.to_string());
+    }
+    anyhow::bail!(
+        "replay wants a moment: an RFC3339 UTC instant (\"2026-08-14T10:00\", prefixes \
+         welcome) or how long ago (\"90m\", \"2h\", \"3d\"), not {raw:?}"
+    )
+}
+
+/// `hird plan lint`: the trouble a fileable plan can still carry.
+///
+/// Everything fatal is already `parse`'s job, and re-litigating it here would
+/// let the two drift. What lint reads for is the plan that files cleanly and
+/// then disappoints: waves wider on paper than the queue will run them,
+/// tasks the collision radar cannot see, reviews that will never exist or
+/// that nobody present may claim.
+fn lint(db: &Db, project: &str, parsed: &plan::Plan, out: &mut impl Write) -> anyhow::Result<()> {
+    let preview = parsed.preview();
+    let mut advisories = 0usize;
+
+    writeln!(
+        out,
+        "plan {:?} parses — {}, {}, at most {} at once",
+        parsed.plan,
+        count(parsed.tasks.len(), "task"),
+        count(preview.waves.len(), "wave"),
+        preview.widest()
+    )?;
+
+    for collision in &preview.collisions {
+        advisories += 1;
+        writeln!(out, "collision {}", collision.describe())?;
+        writeln!(
+            out,
+            "          nothing orders them, so the queue hands them out one at a time"
+        )?;
+    }
+    if !preview.unscoped.is_empty() {
+        advisories += 1;
+        writeln!(out, "unscoped  {}", preview.unscoped.join(", "))?;
+        writeln!(
+            out,
+            "          declaring no files, the queue cannot keep another agent out \
+             of what these touch"
+        )?;
+    }
+
+    // The reviews: work marked `review = true` files one on finishing — but
+    // only when there is something to read, and only usefully when a second
+    // harness exists to read it.
+    let reviewed: Vec<&plan::PlanTask> = parsed.tasks.iter().filter(|t| t.review).collect();
+    for task in reviewed.iter().filter(|t| t.paths.is_empty()) {
+        advisories += 1;
+        writeln!(
+            out,
+            "review    {} declares no files — if the witness sees nothing move, \
+             finishing it files no review",
+            task.name
+        )?;
+    }
+    if !reviewed.is_empty() {
+        let seen = db
+            .events()
+            .harnesses_seen(&ProjectScope::Only(project.to_string()))?;
+        if seen.len() < 2 {
+            advisories += 1;
+            let present = match seen.as_slice() {
+                [] => "none has acted here yet".to_string(),
+                only => format!("this board has only seen {}", only.join(", ")),
+            };
+            writeln!(
+                out,
+                "review    a review is refused to the harness that did the work, and \
+                 {present} — a second harness is what makes these claimable",
+            )?;
+        }
+    }
+
+    match advisories {
+        0 => writeln!(out, "\nnothing to flag; hird plan apply files it")?,
+        n => writeln!(out, "\n{}; the plan files either way", count(n, "advisory"))?,
     }
     Ok(())
 }
@@ -1691,6 +1996,160 @@ fn show(db: &Db, seq: i64, config: &Config, out: &mut impl Write) -> anyhow::Res
     Ok(())
 }
 
+/// `hird why`: the claim gates, run against one task and answered out loud.
+///
+/// Every check `task_claim` and `task_next` apply, in the order they apply
+/// them, each reported rather than silently folded into an empty hand. The
+/// verdict comes first — a human asking *why* wants the answer before the
+/// evidence — and every line after it is one gate with something to say.
+fn why(db: &Db, seq: i64, config: &Config, out: &mut impl Write) -> anyhow::Result<()> {
+    // Readiness sweeps leases first, exactly as a claim would: a task whose
+    // holder went quiet is open again by the time this answers.
+    let (blockers, conflicts) = db.tasks().readiness(seq, config.clearance())?;
+    let task = db.tasks().get(seq)?;
+    let now = Utc::now();
+    let question = db.questions().unanswered(seq)?;
+    let recusals: Vec<_> = db
+        .recusals()
+        .for_task(seq)?
+        .into_iter()
+        // A recusal on work nobody has done bars nobody yet; `hird show`
+        // lists those, but they are not part of why a claim would fail now.
+        .filter(|r| r.worker.is_some())
+        .collect();
+    let required = db.requirements().for_task(seq)?;
+    let refuses = config.on_conflict() == crate::repo::OnConflict::Refuse;
+
+    writeln!(out, "#{} {}", task.seq, task.title)?;
+    writeln!(out, "status    {}", task.status)?;
+
+    // A lease or a terminal status answers the question by itself.
+    if task.status.is_active() {
+        let holder = task.claimed_by.as_deref().unwrap_or("?");
+        let lease = task
+            .lease_expires_at
+            .as_deref()
+            .map(|e| format!(", {}", fmt::lease_remaining(e, now)))
+            .unwrap_or_default();
+        writeln!(out, "claimable no — held by {holder}{lease}")?;
+        return Ok(());
+    }
+    if task.status.is_terminal() {
+        writeln!(
+            out,
+            "claimable no — {}; hird reopen {seq} returns it to the pool",
+            task.status
+        )?;
+        return Ok(());
+    }
+
+    // What refuses the claim outright, in gate order.
+    let mut stoppers: Vec<String> = Vec::new();
+    if question.is_some() {
+        stoppers.push("an answer".to_string());
+    }
+    if !blockers.is_empty() {
+        // The one distinction dispatch makes inside "blocked": work that is
+        // all done but for a verdict is held, not waiting on hands.
+        let verdicts: Vec<String> = blockers
+            .iter()
+            .filter(|b| b.status == Status::Done)
+            .filter_map(|b| b.pending_review.map(|r| format!("#{r}")))
+            .collect();
+        let unfinished: Vec<String> = blockers
+            .iter()
+            .filter(|b| !(b.status == Status::Done && b.pending_review.is_some()))
+            .map(|b| format!("#{}", b.seq))
+            .collect();
+        if !unfinished.is_empty() {
+            stoppers.push(unfinished.join(", "));
+        }
+        if !verdicts.is_empty() {
+            stoppers.push(format!("the verdict of review {}", verdicts.join(", ")));
+        }
+    }
+    if refuses && !conflicts.is_empty() {
+        stoppers.push("the overlap below to clear".to_string());
+    }
+
+    // What narrows who may claim without stopping everyone.
+    let mut caveats: Vec<String> = Vec::new();
+    if !recusals.is_empty() {
+        let barred: Vec<&str> = recusals
+            .iter()
+            .filter_map(|r| r.worker.as_deref())
+            .map(crate::identity::actor_harness)
+            .collect();
+        caveats.push(format!("not by {}", barred.join(" or ")));
+    }
+    if !required.is_empty() {
+        caveats.push(format!(
+            "only by a harness advertising {}",
+            required.join(", ")
+        ));
+    }
+    if !refuses && !conflicts.is_empty() && config.avoid_conflicts(None) {
+        caveats.push(
+            "task_next passes it over while the overlap lives; claiming it by number still works"
+                .to_string(),
+        );
+    }
+
+    if stoppers.is_empty() {
+        let trailing = if caveats.is_empty() {
+            String::new()
+        } else {
+            format!(" — {}", caveats.join("; "))
+        };
+        writeln!(out, "claimable yes{trailing}")?;
+    } else {
+        writeln!(out, "claimable no — waiting on {}", stoppers.join(" and "))?;
+        for caveat in &caveats {
+            writeln!(out, "and then   {caveat}")?;
+        }
+    }
+
+    // The evidence behind the verdict, one gate per line.
+    if let Some(question) = question {
+        writeln!(out, "awaits    {}", question.question)?;
+        writeln!(
+            out,
+            "          asked by {} {} — hird answer {seq} <ANSWER>",
+            question.asked_by,
+            fmt::age_phrase(&question.asked_at, now)
+        )?;
+    }
+    if !blockers.is_empty() {
+        let listed = blockers
+            .iter()
+            .map(|b| match b.pending_review {
+                Some(review) if b.status == Status::Done => {
+                    format!("#{} (done, under review {review})", b.seq)
+                }
+                _ => format!("#{} ({})", b.seq, b.status),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(out, "waits for {listed}")?;
+    }
+    for recusal in &recusals {
+        writeln!(out, "recused   {}", recusal.describe())?;
+    }
+    if !required.is_empty() {
+        writeln!(out, "requires  {}", required.join(", "))?;
+    }
+    for conflict in &conflicts {
+        writeln!(out, "overlap   {}", conflict.describe())?;
+    }
+    if refuses && !conflicts.is_empty() {
+        writeln!(
+            out,
+            "          path_conflicts = \"refuse\": a claim is rejected while the overlap lives"
+        )?;
+    }
+    Ok(())
+}
+
 fn mem(
     db: &Db,
     project: &str,
@@ -1741,6 +2200,9 @@ fn mem(
         } => {
             let scope = ProjectScope::resolve(project, config.all_projects(Some(*all_projects)));
             standing(db, config, witness, &scope, *shaky, out)
+        }
+        MemCommand::Export { path, firm } => {
+            mem_export(db, project, witness, path.as_deref(), *firm, out)
         }
         MemCommand::Search {
             query,
