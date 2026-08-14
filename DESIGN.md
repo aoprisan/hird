@@ -115,7 +115,12 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); -- schema_version
 
 Indexes: `tasks(project, status)`, `tasks(status, lease_expires_at)`, `task_events(task_id, at)`, `assertions(project, superseded_by)`.
 
-**Schema migrations:** embed numbered SQL migrations, apply on open, track in `meta.schema_version`.
+**Schema migrations:** embed numbered SQL migrations, apply on open, track in
+`meta.schema_version`. **(v2.7)** A database whose recorded version exceeds
+what the binary knows is refused at open — naming both versions, the running
+binary's path and the fix — rather than failing later, mid-call, on a column
+the old binary never heard of, in an error indistinguishable from corruption.
+The refusal writes nothing.
 
 **(v1.1) Migration 2 — the dependency graph and declared file scopes.**
 

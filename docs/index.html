@@ -95,25 +95,44 @@
 <section id="install">
 <h2>Install</h2>
 
-<pre><code>./scripts/install.sh --install-skill</code></pre>
+<pre><code>curl -fsSL https://raw.githubusercontent.com/aoprisan/hird/main/scripts/get.sh | sh</code></pre>
 
 <p>
-  This builds the Rust release binary and copies that standalone snapshot to
-  <code>~/.local/bin/hird</code>, then removes the release build artifacts.
-  Re-run the script after upgrading the source. <code>--install-skill</code>
-  installs the bundled portable skill for Codex and OpenCode
-  (<code>~/.agents/skills/hird</code>), Claude Code
-  (<code>~/.claude/skills/hird</code>), and GitHub Copilot
-  (<code>~/.copilot/skills/hird</code>). It is optional and can be run
-  separately. Start new agent sessions after installing it.
+  No Rust toolchain: this downloads the
+  <a href="https://github.com/aoprisan/hird/releases">release</a> binary for
+  your platform (Linux x86_64/aarch64, macOS Intel/Apple&nbsp;silicon — the
+  Linux ones are static musl builds that run on any distribution), verifies
+  it against the release's checksum, and installs it as
+  <code>~/.local/bin/hird</code>. Append <code>-s -- --install-skill</code>
+  to the <code>sh</code> to also install the agent skill, and set
+  <code>HIRD_VERSION=v0.1.0</code> to pin a release instead of taking the
+  latest.
 </p>
 
 <p>
-  Needs a Rust toolchain (1.88 or newer). SQLite is compiled in, so there is
-  nothing else to install and nothing to configure before first use. The
-  database is created on first write at
-  <code>${XDG_DATA_HOME:-~/.local/share}/hird/hird.db</code>; ask for the exact
-  path with <code>hird db-path</code>.
+  With a Rust toolchain (1.88 or newer),
+  <code>cargo install hird --locked</code> gets the same binary from
+  crates.io, and from a checkout
+  <code>./scripts/install.sh --install-skill</code> builds the release
+  binary, copies that standalone snapshot to <code>~/.local/bin/hird</code>,
+  then removes the release build artifacts; re-run it after upgrading the
+  source.
+</p>
+
+<p>
+  Whichever way it arrived, <code>--install-skill</code> installs the bundled
+  portable skill for Codex and OpenCode (<code>~/.agents/skills/hird</code>),
+  Claude Code (<code>~/.claude/skills/hird</code>), and GitHub Copilot
+  (<code>~/.copilot/skills/hird</code>). It is optional, can be run
+  separately (<code>hird --install-skill</code>), and new agent sessions
+  should be started after installing it.
+</p>
+
+<p>
+  SQLite is compiled in, so there is nothing else to install and nothing to
+  configure before first use. The database is created on first write at
+  <code>${XDG_DATA_HOME:-~/.local/share}/hird/hird.db</code>; ask for the
+  exact path with <code>hird db-path</code>.
 </p>
 </section>
 

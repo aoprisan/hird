@@ -90,20 +90,35 @@ No daemon. No server. No accounts.
 ## Install
 
 ```sh
+curl -fsSL https://raw.githubusercontent.com/aoprisan/hird/main/scripts/get.sh | sh
+```
+
+No Rust toolchain: this downloads the [release](https://github.com/aoprisan/hird/releases)
+binary for your platform (Linux x86_64/aarch64, macOS Intel/Apple silicon —
+the Linux ones are static musl builds that run on any distribution), verifies
+it against the release's checksum, and installs it as `~/.local/bin/hird`.
+Append `-s -- --install-skill` to the `sh` to also install the agent skill,
+and set `HIRD_VERSION=v0.1.0` to pin a release instead of taking the latest.
+
+With a Rust toolchain, `cargo install hird --locked` gets the same binary
+from crates.io, and from a checkout:
+
+```sh
 ./scripts/install.sh --install-skill
 ```
 
-This builds the Rust release binary and copies that standalone snapshot to
+builds the release binary, copies that standalone snapshot to
 `~/.local/bin/hird`, then removes the release build artifacts. Re-run the
 script after upgrading the source.
-`--install-skill` installs the bundled, agent-portable skill for Codex and
-OpenCode (`~/.agents/skills/hird`), Claude Code (`~/.claude/skills/hird`), and
-GitHub Copilot (`~/.copilot/skills/hird`). It is optional and can be run
-separately.
-Start new agent sessions after installing the skill.
 
-Needs a Rust toolchain. SQLite is compiled in — there is nothing else to
-install and nothing to configure before first use.
+Whichever way it arrived, `--install-skill` installs the bundled,
+agent-portable skill for Codex and OpenCode (`~/.agents/skills/hird`), Claude
+Code (`~/.claude/skills/hird`), and GitHub Copilot (`~/.copilot/skills/hird`).
+It is optional, can be run separately (`hird --install-skill`), and new agent
+sessions should be started after installing it.
+
+SQLite is compiled in — there is nothing else to install and nothing to
+configure before first use.
 
 ## Try it in two minutes
 
@@ -1501,7 +1516,8 @@ witness given a memory of its own: every version it fingerprints is kept, so
 "a file moved" becomes "this is the change", a review is handed the diff it is
 judging, and the write that lands on uncommitted work stops being a loss.
 Still absent: multi-machine sync and vector search. The append-only event trail
-is meant to make sync tractable later.
+is meant to make sync tractable later. `ROADMAP.md` lays out what comes next,
+what comes later, and what stays out on purpose.
 
 ## Licence
 

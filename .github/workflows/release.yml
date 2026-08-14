@@ -1,0 +1,142 @@
+name: Release
+
+# Pushing a v* tag builds prebuilt binaries for Linux and macOS, attaches
+# them to a GitHub release with per-asset checksums, and publishes the crate
+# to crates.io — so installing hird stops requiring a Rust toolchain.
+#
+# Cutting a release: bump the version in Cargo.toml, land it on main, then
+#
+#   git tag v0.x.y && git push origin v0.x.y
+#
+# The crates.io publish skips with a notice until the CARGO_REGISTRY_TOKEN
+# repository secret is set (Settings → Secrets and variables → Actions).
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # A tag that disagrees with Cargo.toml would name every asset after the
+  # wrong version; refuse before anything is built.
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag matches the crate version
+        run: |
+          crate="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$crate" != "$tag" ]; then
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $crate" >&2
+            exit 1
+          fi
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # musl, so the Linux binaries are static: one download runs on any
+          # distribution, which is the point of shipping binaries at all.
+          # SQLite is bundled C, so the musl targets need musl-gcc to build it.
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+          # Both macOS targets build on the arm runner; the Intel one is a
+          # cross-compile the toolchain handles by itself.
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add ${{ matrix.target }}
+
+      - name: Install musl-gcc
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      # The tarball holds the bare binary at its root — scripts/get.sh
+      # extracts and runs `./hird --install`, so the layout is part of the
+      # interface. The checksum file names the asset relative, the way
+      # `sha256sum -c` wants it.
+      - name: Package
+        run: |
+          asset="hird-$GITHUB_REF_NAME-${{ matrix.target }}.tar.gz"
+          tar -C "target/${{ matrix.target }}/release" -czf "$asset" hird
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$asset" > "$asset.sha256"
+          else
+            shasum -a 256 "$asset" > "$asset.sha256"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            hird-*.tar.gz
+            hird-*.tar.gz.sha256
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      # A re-run of this job after a partial failure finds the release
+      # already created; upload with --clobber instead of failing on it.
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber \
+              hird-*.tar.gz hird-*.tar.gz.sha256
+          else
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+              --title "hird $GITHUB_REF_NAME" --verify-tag --generate-notes \
+              hird-*.tar.gz hird-*.tar.gz.sha256
+          fi
+
+  publish:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::notice::CARGO_REGISTRY_TOKEN is not set; skipping the crates.io publish"
+            exit 0
+          fi
+          cargo publish --locked

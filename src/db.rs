@@ -429,6 +429,12 @@ impl Db {
             "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
         )?;
         let applied = self.schema_version()?;
+        let known = MIGRATIONS.len() as u32;
+        if applied > known {
+            return Err(crate::error::Error::invalid(schema_from_the_future(
+                &self.path, applied, known,
+            )));
+        }
         for (idx, sql) in MIGRATIONS.iter().enumerate() {
             let version = idx as u32 + 1;
             if version <= applied {
@@ -445,6 +451,25 @@ impl Db {
         }
         Ok(())
     }
+}
+
+/// The refusal for a database migrated by a hird newer than this binary.
+///
+/// Left to run on, an old binary would fail later, mid-call, on a table or
+/// column it has never heard of — an error indistinguishable from corruption.
+/// Refusing at open costs nothing (no migration has run yet, so nothing has
+/// been written) and can name both versions and the fix.
+fn schema_from_the_future(path: &Path, found: u32, known: u32) -> String {
+    let binary = std::env::current_exe()
+        .ok()
+        .map(|p| format!(" ({})", p.display()))
+        .unwrap_or_default();
+    format!(
+        "database {} is at schema version {found}, but this hird binary{binary} only \
+         knows versions up to {known} — a newer hird has migrated it. Upgrade this \
+         binary (re-run scripts/install.sh) and try again; the database was not changed",
+        path.display()
+    )
 }
 
 #[cfg(test)]
@@ -468,6 +493,44 @@ mod tests {
         let second = Db::open(&path).unwrap();
         assert_eq!(second.schema_version().unwrap(), MIGRATIONS.len() as u32);
         assert_eq!(second.tasks().get(seq).unwrap().title, "t");
+    }
+
+    #[test]
+    fn a_database_from_a_newer_hird_is_refused_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hird.db");
+        let ahead = (MIGRATIONS.len() as u32 + 5).to_string();
+        {
+            let db = Db::open(&path).unwrap();
+            db.conn()
+                .execute(
+                    "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
+                    [&ahead],
+                )
+                .unwrap();
+        }
+
+        let err = match Db::open(&path) {
+            Ok(_) => panic!("a database from the future must be refused"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains(&format!("schema version {ahead}")), "{err}");
+        assert!(
+            err.contains(&format!("up to {}", MIGRATIONS.len())),
+            "{err}"
+        );
+        assert!(err.contains("hird.db"), "{err}");
+
+        // The refusal must not have moved the version it refused over.
+        let reread = Connection::open(&path).unwrap();
+        let stored: String = reread
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, ahead);
     }
 
     #[test]
