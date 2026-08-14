@@ -56,12 +56,6 @@ entry that writes the right file with the right absolute path, because the
 absolute path is the thing hand-written configs get wrong and the reason
 `register` exists.
 
-**A version for the database, spoken out loud.** Migrations apply silently on
-open, which is right until two hird binaries of different ages share one
-database file. An older binary opening a newer schema should refuse in a
-sentence naming both versions and the upgrade path, rather than failing on a
-column it has never heard of.
-
 ## Later
 
 **Multi-machine sync (`hird sync`).** The flagship deferral, and the reason
