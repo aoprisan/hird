@@ -16,9 +16,10 @@ verdicts and the sent-back loop (v1.7), footprints (v1.8), the ground a task
 builds on (v1.9), the exhibit — kept versions, `hird diff`, `hird salvage`
 (v2.0), tenures (v2.1), the dispatch hook (v2.2), the event feed (v2.3),
 routed summonses (v2.4), human question gates (v2.5), capability-aware
-dispatch (v2.6), and the readings — `hird why`, `plan lint`, `replay`,
-`mem export` and the question hook (v2.7). The herdr plugin packages the
-pairing.
+dispatch (v2.6), the readings — `hird why`, `plan lint`, `replay`,
+`mem export` and the question hook (v2.7), and the recess — `hird recess` /
+`hird resume`, the human standing a queue down without killing anything
+(v2.8). The herdr plugin packages the pairing.
 
 `DESIGN.md` records each of those decisions as it was made and stays the
 specification. This file is only about what is not built yet.
@@ -57,26 +58,6 @@ run beside the current five — Gemini CLI is the obvious next — deserves an
 entry that writes the right file with the right absolute path, because the
 absolute path is the thing hand-written configs get wrong and the reason
 `register` exists.
-
-**The recess (`hird recess` / `hird resume`).** The one control the human
-does not have. Every hand-out path is live all the time: `task_next` answers
-whoever asks, and with a `dispatch_hook` wired, a task that becomes claimable
-summons a worker within the second. The moment you need the tree to
-yourself — a rebase, a merge landing, a plan you have stopped believing in —
-there is no way to say so short of killing sessions or unwiring the hook.
-`hird recess "rebasing main"` stands the queue down, per project: no new
-claims, named or dispatched, each refusal carrying that reason; `task_next`
-answers *in recess*, not *idle*, because those point you at different doors;
-and the herald stays quiet. Work in flight is untouched — a lease already
-granted runs to its own end, because a recess stops the hand-out, not the
-work — and questions can still be answered while it holds. `hird resume`
-lifts it, and everything that became claimable while the queue stood down
-wakes the dispatch hook then. It fits inside the constraints because it is
-almost nothing: a flag in the database, enforced where claims are already
-decided, on the trail like every other act. Calling a recess is a human
-act, like filing a plan, so there is no thirteenth tool; nothing runs in
-the background; and nothing about it is scheduled — a recess ends when you
-say so, never at a time.
 
 ## Later
 

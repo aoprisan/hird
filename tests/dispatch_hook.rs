@@ -221,6 +221,43 @@ fn a_question_stays_quiet_until_the_answer_makes_it_claimable() {
 }
 
 #[test]
+fn a_recess_quiets_the_hook_and_resume_announces_the_backlog() {
+    let (sandbox, log) = hooked_sandbox();
+    let before: i64 = sandbox
+        .run(&["add", "before the recess"])
+        .trim()
+        .parse()
+        .unwrap();
+    wait_for(&log, &format!("filed {before} before the recess"));
+
+    let called = sandbox.run(&["recess", "rebasing main"]);
+    assert!(called.contains("in recess"), "{called}");
+
+    // Work filed during the recess would be claimable, and the hook must not
+    // hear about it: a summons to a stood-down queue sends an agent straight
+    // into a refusal. The hook runs detached, so give a wrong announcement
+    // time to land before reading the log.
+    let during: i64 = sandbox
+        .run(&["add", "during the recess"])
+        .trim()
+        .parse()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    let contents = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        !contents.contains(&format!("filed {during}")),
+        "the hook must stay quiet while the queue stands down:\n{contents}"
+    );
+
+    // Lifting announces everything that waited behind the recess — the task
+    // filed during it and the one from before, both claimable now.
+    let resumed = sandbox.run(&["resume"]);
+    assert!(resumed.contains("claims resume"), "{resumed}");
+    wait_for(&log, &format!("resumed {during} during the recess"));
+    wait_for(&log, &format!("resumed {before} before the recess"));
+}
+
+#[test]
 fn without_a_hook_nothing_runs_and_nothing_breaks() {
     let sandbox = Sandbox::new();
     let seq: i64 = sandbox.run(&["add", "quiet"]).trim().parse().unwrap();

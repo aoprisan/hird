@@ -3,7 +3,7 @@
 //! Every variant's `Display` is written to be relayed verbatim to a human or a
 //! model — see the "errors are descriptive strings" rule in DESIGN.md §6.
 
-use crate::model::{Blocker, Conflict, Question, Recusal, Status};
+use crate::model::{Blocker, Conflict, Question, Recess, Recusal, Status};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -75,6 +75,11 @@ pub enum Error {
         required: Vec<String>,
         available: Vec<String>,
     },
+
+    /// The task's project is in recess: the human stood the queue down, so no
+    /// claim is handed out until they lift it. Work in flight is untouched.
+    #[error("task {seq} is in recess: {}", .recess.describe())]
+    InRecess { seq: i64, recess: Recess },
 
     /// The declared file scope overlaps work another agent is doing.
     #[error("{}", conflict_message(*.seq, .conflicts))]

@@ -64,6 +64,8 @@ pub enum Cause {
     Answered,
     /// Its holder went quiet and the lease ran out.
     LeaseExpired,
+    /// The human lifted a recess, and this task was waiting behind it.
+    Resumed,
 }
 
 impl Cause {
@@ -78,6 +80,7 @@ impl Cause {
             Cause::Released => "released",
             Cause::Answered => "answered",
             Cause::LeaseExpired => "lease_expired",
+            Cause::Resumed => "resumed",
         }
     }
 }

@@ -207,7 +207,12 @@ impl<'a> Deps<'a> {
         match row {
             Some((id, mut claimable))
                 if unmet_blockers(self.conn, &id, clearance)?.is_empty()
-                    && super::questions::unanswered_in(self.conn, &id)?.is_none() =>
+                    && super::questions::unanswered_in(self.conn, &id)?.is_none()
+                    // A recess makes nothing claimable, and this is the one
+                    // check every announcement path reads — so the dispatch
+                    // hook falls silent for as long as the human stands the
+                    // queue down, without any caller knowing to ask.
+                    && super::recess::current_in(self.conn, &claimable.project)?.is_none() =>
             {
                 claimable.recused = super::recusal::barred_harnesses(self.conn, &id)?;
                 claimable.requirements = super::requirements::for_id(self.conn, &id)?;
@@ -1122,5 +1127,30 @@ mod tests {
             .claimable(9_999, Clearance::Done)
             .unwrap()
             .is_none());
+    }
+
+    /// During a recess nothing is claimable, so every announcement path —
+    /// filing, unblocking, answering, expiries — goes quiet through this one
+    /// gate, and speaks again the moment the human lifts it.
+    #[test]
+    fn a_recess_makes_nothing_claimable_until_it_is_lifted() {
+        let db = db();
+        let ready = seed(&db, "ready");
+        db.recesses().call(PROJECT, "rebasing main", "cli").unwrap();
+        assert!(db
+            .deps()
+            .claimable(ready, Clearance::Done)
+            .unwrap()
+            .is_none());
+
+        db.recesses().lift(PROJECT).unwrap();
+        assert_eq!(
+            db.deps()
+                .claimable(ready, Clearance::Done)
+                .unwrap()
+                .unwrap()
+                .seq,
+            ready
+        );
     }
 }

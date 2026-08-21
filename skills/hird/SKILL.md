@@ -63,6 +63,10 @@ agents and a human may be using it at the same time.
   task needs a harness configured with the labels the refusal names. Call
   `task_next` for compatible work and tell the human what equipment is missing
   if the queue has nothing else.
+- A refusal or `task_next` reply saying the queue is **in recess** means the
+  human stood it down on purpose (`hird recess`). Do not retry or poll: finish
+  any task you already hold, then stand by and tell the user the queue is in
+  recess and why. Claims resume when the human runs `hird resume`.
 
 ## More hands, inside herdr
 

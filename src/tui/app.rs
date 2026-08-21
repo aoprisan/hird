@@ -263,6 +263,10 @@ pub struct App {
     /// many files moved. Absent for every task hird was not watching, which
     /// every reader treats as "nothing to say" rather than as "nothing moved".
     pub footprints: BTreeMap<i64, Footprint>,
+    /// The recess this project stands under, when it does — the status bar
+    /// wears it, because every card on a stood-down board is a card nobody is
+    /// being handed. Only read in the single-project view.
+    pub recess: Option<crate::model::Recess>,
 
     // Swarm screen.
     pub agents: Vec<AgentRow>,
@@ -327,6 +331,7 @@ impl App {
             under_review: BTreeMap::new(),
             verdicts: BTreeMap::new(),
             footprints: BTreeMap::new(),
+            recess: None,
             agents: Vec::new(),
             waves: Vec::new(),
             swarm_selected: 0,
@@ -451,6 +456,11 @@ impl App {
             .collect();
         self.verdicts = db.verdicts().standing(&scope)?;
         self.footprints = db.witnessed().footprints(&scope)?;
+        self.recess = if self.all_projects {
+            None
+        } else {
+            db.recesses().current(&self.project)?
+        };
         self.waves = dispatch_waves(&self.tasks, &db.deps().edges(&scope)?);
         self.look(db);
         self.agents = agent_rows(
