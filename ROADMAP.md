@@ -58,6 +58,26 @@ entry that writes the right file with the right absolute path, because the
 absolute path is the thing hand-written configs get wrong and the reason
 `register` exists.
 
+**The recess (`hird recess` / `hird resume`).** The one control the human
+does not have. Every hand-out path is live all the time: `task_next` answers
+whoever asks, and with a `dispatch_hook` wired, a task that becomes claimable
+summons a worker within the second. The moment you need the tree to
+yourself — a rebase, a merge landing, a plan you have stopped believing in —
+there is no way to say so short of killing sessions or unwiring the hook.
+`hird recess "rebasing main"` stands the queue down, per project: no new
+claims, named or dispatched, each refusal carrying that reason; `task_next`
+answers *in recess*, not *idle*, because those point you at different doors;
+and the herald stays quiet. Work in flight is untouched — a lease already
+granted runs to its own end, because a recess stops the hand-out, not the
+work — and questions can still be answered while it holds. `hird resume`
+lifts it, and everything that became claimable while the queue stood down
+wakes the dispatch hook then. It fits inside the constraints because it is
+almost nothing: a flag in the database, enforced where claims are already
+decided, on the trail like every other act. Calling a recess is a human
+act, like filing a plan, so there is no thirteenth tool; nothing runs in
+the background; and nothing about it is scheduled — a recess ends when you
+say so, never at a time.
+
 ## Later
 
 **Multi-machine sync (`hird sync`).** The flagship deferral, and the reason
