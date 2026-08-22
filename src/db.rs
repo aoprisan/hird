@@ -10,8 +10,8 @@ use rusqlite::Connection;
 
 use crate::error::Result;
 use crate::repo::{
-    Deps, Events, Footings, Memory, Plans, Questions, Recall, Recusals, Requirements, Scopes,
-    Tasks, Verdicts, Witnessed,
+    Deps, Events, Footings, Memory, Plans, Questions, Recall, Recesses, Recusals, Requirements,
+    Scopes, Tasks, Verdicts, Witnessed,
 };
 
 /// Numbered migrations, applied in order and recorded in `meta.schema_version`.
@@ -286,6 +286,17 @@ CREATE TABLE task_requirements (
 CREATE INDEX idx_task_requirements_capability
   ON task_requirements(capability, task_id);
 "#,
+    // 12 — the recess: a project's queue stood down by the human. A row here
+    //      is the whole state: while it exists nothing is handed out, and
+    //      `hird resume` deletes it.
+    r#"
+CREATE TABLE project_recess (
+  project TEXT PRIMARY KEY,
+  reason  TEXT NOT NULL DEFAULT '',
+  actor   TEXT NOT NULL,
+  at      TEXT NOT NULL
+);
+"#,
 ];
 
 /// An open connection to the hird database.
@@ -398,6 +409,11 @@ impl Db {
     /// Who must not work a task, because of what they already worked.
     pub fn recusals(&self) -> Recusals<'_> {
         Recusals::new(&self.conn)
+    }
+
+    /// Projects the human has stood down, and the standing down of them.
+    pub fn recesses(&self) -> Recesses<'_> {
+        Recesses::new(&self.conn)
     }
 
     /// What reviews concluded, and what the queue did about it.

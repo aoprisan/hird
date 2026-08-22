@@ -24,6 +24,7 @@
     <li class="sub"><a href="#work-the-queue">Letting agents pull</a></li>
     <li class="sub"><a href="#plan-files">The plan as a file</a></li>
     <li class="sub"><a href="#dispatch-hook">The dispatch hook</a></li>
+    <li class="sub"><a href="#recess">The recess</a></li>
     <li><a href="#harnesses">Registering a harness</a></li>
     <li class="sub"><a href="#protocol">The protocol</a></li>
     <li><a href="#lifecycle">How a task moves</a></li>
@@ -355,7 +356,7 @@ dispatch_hook = <span class="s">'herdr agent prompt worker "hird task $HIRD_TASK
 <table>
   <thead><tr><th>Variable</th><th>Meaning</th></tr></thead>
   <tbody>
-    <tr><td><code>HIRD_EVENT</code></td><td>Why the task is claimable: <code>filed</code>, <code>unblocked</code>, <code>review_filed</code>, <code>sent_back</code>, <code>reopened</code>, <code>released</code>, <code>answered</code> or <code>lease_expired</code>.</td></tr>
+    <tr><td><code>HIRD_EVENT</code></td><td>Why the task is claimable: <code>filed</code>, <code>unblocked</code>, <code>review_filed</code>, <code>sent_back</code>, <code>reopened</code>, <code>released</code>, <code>answered</code>, <code>lease_expired</code> or <code>resumed</code> — the last one meaning it waited behind a <a href="#recess">recess</a> you have just lifted.</td></tr>
     <tr><td><code>HIRD_TASK</code></td><td>The task number.</td></tr>
     <tr><td><code>HIRD_TITLE</code></td><td>Its title.</td></tr>
     <tr><td><code>HIRD_PROJECT</code></td><td>Its project root.</td></tr>
@@ -441,6 +442,48 @@ herdr agent prompt "$worker" "hird task $HIRD_TASK is ready; work the hird queue
   for you, keeps the worker roster in a config file instead of a shell
   one-liner, falls through to the next worker when an agent is gone, and puts
   the <a href="#tui">board</a> in an overlay pane.
+</p>
+
+<h3 id="recess">The recess: standing the queue down</h3>
+
+<p>
+  All of the above makes the queue live all the time: <code>task_next</code>
+  answers whoever asks, and with a hook wired, a task that becomes claimable
+  summons a worker within the second. The moment you need the tree to
+  yourself — a rebase, a merge landing, a plan you have stopped believing
+  in — there was no way to say so short of killing sessions or unwiring the
+  hook. Now there is one:
+</p>
+
+<pre><code><span class="k">hird</span> recess <span class="s">"rebasing main"</span>
+<span class="c"># queue for /home/you/app in recess ("rebasing main")
+#   nothing new is handed out; work already claimed continues
+#   hird resume lifts it</span></code></pre>
+
+<p>
+  A recess stands one project's queue down. Named claims and
+  <code>task_next</code> alike are refused, carrying your reason, and the
+  dispatch hook stays quiet — a summons to a stood-down queue would send an
+  agent straight into a refusal. Work already claimed is untouched: leases
+  run, check-ins land, completions finish, because a recess stops the
+  hand-out, not the work. An agent asking for work is told the difference
+  out loud — <em>in recess, not idle</em> — so it stands by instead of
+  retrying, and <code>hird ls</code>, <code>hird graph</code>,
+  <code>hird why</code> and the TUI's status bar all wear the recess while it
+  stands.
+</p>
+
+<pre><code><span class="k">hird</span> resume
+<span class="c"># recess lifted for /home/you/app — claims resume</span></code></pre>
+
+<p>
+  Lifting it announces everything that became claimable while the queue stood
+  down — each task reaching the dispatch hook as
+  <code>HIRD_EVENT=resumed</code> — so the backlog summons hands the moment
+  you are ready for them, and not a moment before. Calling and lifting a
+  recess are human acts, like <a href="#plan-files">filing a plan</a>, so
+  there is no MCP tool for either; a recess ends when you say so, never at a
+  time.
 </p>
 </section>
 
@@ -1531,6 +1574,8 @@ hird salvage &lt;seq&gt; &lt;path&gt; [--baseline] [--tenure N] [--out &lt;file&
 hird cancel &lt;seq&gt; [--reason &lt;text&gt;]
 hird reopen &lt;seq&gt; [--reason &lt;text&gt;]
 hird answer &lt;seq&gt; &lt;answer&gt;
+hird recess [reason] [--project &lt;path&gt;]
+hird resume [--project &lt;path&gt;]
 hird dep add &lt;seq&gt; --needs &lt;seq&gt;,…
 hird dep rm  &lt;seq&gt; --needs &lt;seq&gt;,…
 hird plan apply &lt;file&gt; [--dry-run] [--project &lt;path&gt;]
@@ -1564,6 +1609,7 @@ hird db-path</code></pre>
     <tr><td><code>salvage</code></td><td>Recover a version of a file as it stood under a task: the last one the witness saw, or with <code>--baseline</code> the one the task started from. <code>--tenure N</code> reaches an earlier holding's record.</td></tr>
     <tr><td><code>cancel</code> / <code>reopen</code></td><td>Human overrides. They work regardless of who holds the task.</td></tr>
     <tr><td><code>answer</code></td><td>Resolve the question holding an open task out of dispatch; the answer is handed to its next claimant.</td></tr>
+    <tr><td><code>recess</code> / <code>resume</code></td><td>Stand this project's queue down and lift it again — <a href="#recess">the recess</a>. While it stands nothing is handed out and the dispatch hook is quiet; work already claimed continues. Resuming announces everything that waited.</td></tr>
     <tr><td><code>dep</code></td><td>Add or remove "must wait for" edges after the fact.</td></tr>
     <tr><td><code>plan</code></td><td>File a whole graph from a <a href="#plan-files">plan file</a>, in one transaction. <code>--dry-run</code> reads it out — waves, overlaps and all — and writes nothing. <code>lint</code> reads the same file for the trouble it can carry while still filing cleanly: unordered tasks on the same files, tasks the collision radar cannot see, reviews that will never be filed or that nobody present could claim.</td></tr>
     <tr><td><code>graph</code></td><td>The plan as dispatch waves: workable now, and what each later wave waits for.</td></tr>

@@ -385,6 +385,28 @@ clear — so it is the one thing on the board that waits on you noticing.
 that answers it, and the TUI counts them in its status bar (`· 2 awaiting
 you`) so a card in a column you are not looking at still says so.
 
+**And you can stand the whole queue down.** Every hand-out path is live all
+the time — `task_next` answers whoever asks, and a [dispatch
+hook](#the-board-as-a-log) summons a worker the moment a task becomes
+claimable. The moment you need the tree to yourself — a rebase, a merge
+landing, a plan you have stopped believing in — say so:
+
+```sh
+hird recess "rebasing main"
+```
+
+That is a **recess**, per project: no new claims, named or dispatched, each
+refusal carrying your reason; `task_next` answers *in recess*, not *idle*,
+so an agent stands by instead of retrying; and the dispatch hook stays
+quiet. Work already claimed is untouched — leases run, check-ins land,
+completions finish — because a recess stops the hand-out, not the work.
+`hird ls`, `hird graph`, `hird why` and the TUI status bar all wear it while
+it stands. `hird resume` lifts it, and everything that became claimable
+while the queue stood down wakes the dispatch hook then, as
+`HIRD_EVENT=resumed`. Calling and lifting a recess are human acts, like
+filing a plan, so there is no MCP tool for either — a recess ends when you
+say so, never at a time.
+
 ## Working the queue without assigning anything
 
 Naming a task number works, but it does not scale past one agent. Give the
@@ -1195,6 +1217,8 @@ hird salvage <seq> <path> [--baseline] [--out <file> [--force]]
 hird cancel <seq> [--reason <text>]
 hird reopen <seq> [--reason <text>]
 hird answer <seq> <answer>
+hird recess [reason] [--project <path>]
+hird resume [--project <path>]
 hird dep add <seq> --needs <seq>,…
 hird dep rm  <seq> --needs <seq>,…
 hird plan apply <file> [--dry-run] [--project <path>]
@@ -1458,6 +1482,8 @@ points `HIRD_DB` at a throwaway file, so running one cannot disturb your board.
 ./examples/footing.sh           # a fact, the file it came from, and that file rewritten
 ./examples/review.sh            # work that files its own review, barred to whoever did it
 ./examples/verdict.sh           # the sent-back loop, and the per-harness record it leaves
+./examples/recess.sh            # the queue stood down: claims refused in your words,
+                                #   the hook quiet, and the backlog announced on resume
 ./examples/events.sh            # the board as a log: a follower tails the trail
                                 #   while two harnesses work, then reads it as JSON
 ./examples/protocol.sh          # MCP 2026-07-28 on the wire: no handshake, and who the client says it is

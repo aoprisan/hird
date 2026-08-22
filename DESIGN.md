@@ -1879,3 +1879,63 @@ All five are CLI verbs and one config key. No MCP tool was added or changed:
 agents already hear their own version of `why` in every claim refusal and
 `task_next` explanation, and the exports, replays and lints are the human's
 readings, not the agents'.
+
+## 27. (v2.8) The recess — the human stands the queue down
+
+§21 and §23 made the queue live all the time: `task_next` answers whoever
+asks, and a dispatch hook summons a worker within a second of a task
+becoming claimable. That closed the seam where ready work sat silent, and
+opened the opposite one: the human has no way to stop the hand-out. The
+moment they need the tree to themselves — a rebase, a merge landing, a plan
+they have stopped believing in — the choices were killing sessions or
+unwiring the hook, both of which destroy state to express a pause.
+
+`hird recess [reason]` stands one project's queue down; `hird resume` lifts
+it. The decisions, in the order they were made:
+
+**A recess stops the hand-out, not the work.** While it stands, no claim is
+handed out: a named `task_claim` is refused with the reason in the sentence,
+and `task_next` comes back empty-handed. Everything already claimed is
+untouched — leases run, `task_update` renews, completions and failures land,
+releases and splits work — because the tasks in flight are exactly the state
+a pause exists to protect. The gate therefore fires only on `open` tasks,
+first among the claim gates: a recess outranks questions, dependencies and
+recusals because under it none of them were going to matter.
+
+**`task_next` says which silence this is.** An agent told "nothing to do"
+walks away; one told *in recess, not idle* stands by. The dispatch result
+carries the recess and deliberately empty buckets — no blocked list, no
+deferred list — because enumerating work the human stood the queue down over
+is an invitation to act on it. Under an all-projects scope the recess stays
+per-project: other queues dispatch normally, and the stood-down project's
+tasks land in their own `in_recess` bucket rather than vanishing.
+
+**The herald falls silent through the gate it already had.** Every
+announcement path — filing, unblocking, answering, expiries, verdicts — runs
+through one claimable check before speaking (§21), and a recess makes
+nothing claimable, so the hook goes quiet without any caller knowing to ask.
+`hird resume` then announces everything left claimable in the project, each
+task reaching the hook as `HIRD_EVENT=resumed` — the backlog summons hands
+the moment the human is ready, and not a moment before. A question answered
+during a recess follows the same rule: the `answered` announcement is
+swallowed by the standing recess, and the task arrives as `resumed` when it
+lifts.
+
+**Calling and lifting are human acts.** Like filing a plan (§13), so there
+is no MCP tool for either and the count stays at twelve: an agent that could
+declare a recess could silence the queue against its human, and an agent
+that could lift one could un-pause a rebase in progress. Agents meet the
+recess in refusals and dispatch answers, which ride calls they already make.
+Calling it again is idempotent and refreshes the reason — the refusals stay
+current — without restarting the clock, because the recess began when it
+began.
+
+**The state is a row, not an event.** One row per project — reason, actor,
+called-at — and lifting deletes it. It does not ride the task trail: a
+recess belongs to no task, and the feed's cursor is `task_events`. The row
+itself is the record while the recess stands, and every board surface wears
+it — `hird ls` and `hird graph` lead with it, `hird why` reports it as the
+gate it is, the TUI status bar carries it beside the counts. No daemon and
+no scheduler follow from the same shape: enforcement happens where claims
+are already decided, and a recess ends when the human says so, never at a
+time.

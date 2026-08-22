@@ -25,7 +25,7 @@ use crate::identity::{self, ACTOR_CLI};
 use crate::model::{Footprint, Standing, Status, TaskSummary};
 use crate::plan;
 use crate::register::{self, Registration};
-use crate::repo::{dispatch_waves, MemoryQuery, NewAssertion, OnConflict, ProjectScope};
+use crate::repo::{dispatch_waves, Called, MemoryQuery, NewAssertion, OnConflict, ProjectScope};
 use crate::witness;
 
 /// Coordinate AI coding agents across harnesses through a shared work queue
@@ -122,6 +122,28 @@ pub enum Command {
         seq: i64,
         /// The decision or information the next agent should proceed with.
         answer: String,
+    },
+    /// Stand this project's queue down: nothing new is handed out until
+    /// `hird resume` lifts it.
+    ///
+    /// Named claims and `task_next` alike are refused, carrying the reason,
+    /// and the dispatch hook stays quiet. Work already claimed is untouched —
+    /// leases run, check-ins and completions land — because a recess stops
+    /// the hand-out, not the work. Calling it again refreshes the reason.
+    Recess {
+        /// Why, in your words. Carried on every refused claim.
+        #[arg(default_value = "")]
+        reason: String,
+        /// Another project's queue instead of the one this directory is in.
+        #[arg(long, value_name = "PATH")]
+        project: Option<PathBuf>,
+    },
+    /// Lift the recess: claims resume at once, and the dispatch hook is
+    /// woken for everything that became claimable while the queue stood down.
+    Resume {
+        /// Another project's queue instead of the one this directory is in.
+        #[arg(long, value_name = "PATH")]
+        project: Option<PathBuf>,
     },
     /// Add or remove dependencies between tasks.
     #[command(subcommand)]
@@ -587,6 +609,17 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
             announce_claimable(herald.as_ref(), &db, &config, Cause::Answered, *seq);
             Ok(())
         }
+        Command::Recess {
+            reason,
+            project: explicit,
+        } => recess_cmd(&db, &named_project(explicit, &project), reason, out),
+        Command::Resume { project: explicit } => resume_cmd(
+            &db,
+            &config,
+            herald.as_ref(),
+            &named_project(explicit, &project),
+            out,
+        ),
         Command::Mem(cmd) => mem(&db, &project, &config, cmd, out),
         Command::Dep(cmd) => dep(&db, &config, herald.as_ref(), cmd, out),
         Command::Plan(cmd) => plan_cmd(&db, &project, &config, herald.as_ref(), cmd, out),
@@ -671,6 +704,87 @@ fn look(db: &Db, config: &Config, project: &str) {
 
 fn scope_of(project: &str, config: &Config, all_projects: bool) -> ProjectScope {
     ProjectScope::resolve(project, config.all_projects(Some(all_projects)))
+}
+
+/// The project a recess verb aims at: `--project` when given, else the one
+/// this directory resolves to.
+fn named_project(explicit: &Option<PathBuf>, resolved: &str) -> String {
+    match explicit {
+        Some(root) => identity::canonical_project(root),
+        None => resolved.to_string(),
+    }
+}
+
+/// `hird recess`: stand this project's queue down.
+fn recess_cmd(db: &Db, project: &str, reason: &str, out: &mut impl Write) -> anyhow::Result<()> {
+    match db.recesses().call(project, reason, ACTOR_CLI)? {
+        Called::Began(recess) => {
+            writeln!(
+                out,
+                "queue for {project} in recess{}",
+                recess.quoted_reason()
+            )?;
+            writeln!(
+                out,
+                "  nothing new is handed out; work already claimed continues"
+            )?;
+            writeln!(out, "  hird resume lifts it")?;
+        }
+        Called::AlreadyStanding {
+            recess,
+            reason_changed,
+        } => {
+            let note = if reason_changed {
+                "; reason updated"
+            } else {
+                ""
+            };
+            writeln!(
+                out,
+                "already in recess since {}{note}",
+                fmt::age_phrase(&recess.at, Utc::now())
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// `hird resume`: lift the recess and summon hands to what waited behind it.
+fn resume_cmd(
+    db: &Db,
+    config: &Config,
+    herald: Option<&Herald>,
+    project: &str,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
+    match db.recesses().lift(project)? {
+        None => writeln!(
+            out,
+            "the queue for {project} was not in recess; nothing to lift"
+        )?,
+        Some(_) => {
+            writeln!(out, "recess lifted for {project} — claims resume")?;
+            // Everything that became claimable while the queue stood down was
+            // deliberately never announced; announce it now, task by task, so
+            // the dispatch hook summons hands to the backlog. The claimable
+            // check inside `announce_claimable` keeps blocked and parked work
+            // quiet, exactly as it does everywhere else.
+            let scope = ProjectScope::Only(project.to_string());
+            for task in db.tasks().list(&scope, Some(Status::Open))? {
+                announce_claimable(herald, db, config, Cause::Resumed, task.seq);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The banner `hird ls` and `hird graph` open with while a recess stands.
+fn recess_banner(recess: &crate::model::Recess, now: chrono::DateTime<Utc>) -> String {
+    format!(
+        "in recess{} — called {}; nothing new is handed out, hird resume lifts it",
+        recess.quoted_reason(),
+        fmt::age_phrase(&recess.at, now)
+    )
 }
 
 /// `hird events`: the trail across tasks, as a log — and, with `--follow`,
@@ -1403,6 +1517,13 @@ fn graph(db: &Db, scope: &ProjectScope, out: &mut impl Write) -> anyhow::Result<
     let edges = db.deps().edges(scope)?;
     let waves = dispatch_waves(&tasks, &edges);
     let questions = db.questions().unanswered_map(scope)?;
+    // "Workable now" is not true while a recess stands, and this is the view
+    // that says it — so the recess speaks first.
+    if let ProjectScope::Only(project) = scope {
+        if let Some(recess) = db.recesses().current(project)? {
+            writeln!(out, "{}", recess_banner(&recess, Utc::now()))?;
+        }
+    }
     if waves.is_empty() {
         writeln!(out, "no unfinished tasks")?;
         return Ok(());
@@ -1562,6 +1683,14 @@ fn ls(
     let scope = ProjectScope::resolve(project, config.all_projects(Some(args.all_projects)));
     let tasks = db.tasks().list(&scope, status)?;
 
+    // The recess leads the listing, because every row below it is a row
+    // nobody is being handed. Only in the single-project view: a recess is
+    // per project, and the all-projects listing has no one queue to speak for.
+    if !scope.is_all() {
+        if let Some(recess) = db.recesses().current(project)? {
+            writeln!(out, "{}", recess_banner(&recess, Utc::now()))?;
+        }
+    }
     if tasks.is_empty() {
         writeln!(out, "no tasks")?;
         return Ok(());
@@ -2045,6 +2174,10 @@ fn why(db: &Db, seq: i64, config: &Config, out: &mut impl Write) -> anyhow::Resu
 
     // What refuses the claim outright, in gate order.
     let mut stoppers: Vec<String> = Vec::new();
+    let recess = db.recesses().current(&task.project)?;
+    if recess.is_some() {
+        stoppers.push("hird resume — the queue is in recess".to_string());
+    }
     if question.is_some() {
         stoppers.push("an answer".to_string());
     }
@@ -2110,6 +2243,14 @@ fn why(db: &Db, seq: i64, config: &Config, out: &mut impl Write) -> anyhow::Resu
     }
 
     // The evidence behind the verdict, one gate per line.
+    if let Some(recess) = &recess {
+        writeln!(
+            out,
+            "recess    the human stood this queue down{}, {}",
+            recess.quoted_reason(),
+            fmt::age_phrase(&recess.at, now)
+        )?;
+    }
     if let Some(question) = question {
         writeln!(out, "awaits    {}", question.question)?;
         writeln!(

@@ -673,6 +673,20 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc
         format!("· {ready} ready  "),
         Style::default().fg(theme::status_color(Status::Open)),
     ));
+    // A recess changes what every count above means — ready work nobody is
+    // being handed — so the bar says it in the colour of work that cannot
+    // move, reason and all.
+    if let Some(recess) = &app.recess {
+        let reason = if recess.reason.is_empty() {
+            String::new()
+        } else {
+            format!(" — {}", crate::fmt::truncate(&recess.reason, 28))
+        };
+        spans.push(Span::styled(
+            format!("· in recess{reason}  "),
+            theme::blocked_style(),
+        ));
+    }
     // A parked question is the one kind of stall nothing else will clear:
     // the queue deliberately does not summon an agent to it, so it waits on
     // somebody reading this bar. Shown only when there is one, in the colour
@@ -1897,6 +1911,22 @@ mod tests {
         // so the only thing that can unstick it is a human noticing. The
         // status bar is where they are already looking.
         assert!(out.contains("1 awaiting you"), "{out}");
+    }
+
+    /// A recess changes what every count in the bar means — ready work
+    /// nobody is being handed — so the bar wears it, reason and all.
+    #[test]
+    fn the_status_bar_wears_the_recess_while_one_stands() {
+        let db = Db::open_in_memory().unwrap();
+        db.tasks().create(PROJECT, "ready", "", 0, "cli").unwrap();
+        db.recesses().call(PROJECT, "rebasing main", "cli").unwrap();
+
+        let out = screen(&app_with(&db));
+        assert!(out.contains("in recess — rebasing main"), "{out}");
+
+        db.recesses().lift(PROJECT).unwrap();
+        let out = screen(&app_with(&db));
+        assert!(!out.contains("in recess"), "{out}");
     }
 
     /// A done card whose review has not concluded is provisionally done, and

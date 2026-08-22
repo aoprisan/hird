@@ -646,6 +646,63 @@ fn why_on_a_missing_task_fails_with_a_plain_sentence() {
 }
 
 #[test]
+fn a_recess_is_worn_by_the_board_and_lifted_by_resume() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["add", "port the loader"]);
+
+    let called = sandbox.run(&["recess", "rebasing main"]);
+    assert!(called.contains("in recess (\"rebasing main\")"), "{called}");
+    assert!(
+        called.contains("work already claimed continues"),
+        "{called}"
+    );
+    assert!(called.contains("hird resume lifts it"), "{called}");
+
+    // The listing leads with the recess, because every row below it is a row
+    // nobody is being handed. The graph says it over "workable now".
+    let listed = sandbox.run(&["ls"]);
+    assert!(
+        listed.starts_with("in recess (\"rebasing main\")"),
+        "{listed}"
+    );
+    let graphed = sandbox.run(&["graph"]);
+    assert!(graphed.starts_with("in recess"), "{graphed}");
+
+    // `why` treats it as the gate it is, evidence line and all.
+    let why = sandbox.run(&["why", "1"]);
+    assert!(
+        why.contains("claimable no — waiting on hird resume — the queue is in recess"),
+        "{why}"
+    );
+    assert!(
+        why.contains("recess    the human stood this queue down"),
+        "{why}"
+    );
+
+    // A claim through a real session is refused in the human's words.
+    let mut codex = McpSession::start(&sandbox, "codex");
+    let refused = codex
+        .call("task_claim", serde_json::json!({"seq": 1}))
+        .unwrap_err();
+    assert!(refused.contains("in recess"), "{refused}");
+    assert!(refused.contains("rebasing main"), "{refused}");
+    codex.shutdown();
+
+    // Calling again is idempotent; a new reason is taken and said so.
+    let again = sandbox.run(&["recess", "merging instead"]);
+    assert!(again.contains("already in recess"), "{again}");
+    assert!(again.contains("reason updated"), "{again}");
+
+    let resumed = sandbox.run(&["resume"]);
+    assert!(resumed.contains("claims resume"), "{resumed}");
+    assert!(!sandbox.run(&["ls"]).contains("in recess"));
+
+    // Lifting nothing is nothing, not an error.
+    let second = sandbox.run(&["resume"]);
+    assert!(second.contains("was not in recess"), "{second}");
+}
+
+#[test]
 fn recall_answers_with_what_earlier_work_in_the_same_files_learned() {
     let sandbox = Sandbox::new();
     sandbox.run(&["add", "Port the config loader", "--path", "src/config.rs"]);

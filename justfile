@@ -65,6 +65,7 @@ examples: build
     ./examples/review.sh
     ./examples/verdict.sh
     ./examples/dispatch-hook.sh
+    ./examples/recess.sh
     ./examples/events.sh
     ./examples/protocol.sh
 

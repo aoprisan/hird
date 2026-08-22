@@ -952,6 +952,43 @@ impl Recusal {
     }
 }
 
+/// A project's queue stood down by the human.
+///
+/// While this stands, nothing is handed out — named claims and `task_next`
+/// alike are refused, and the dispatch hook stays quiet. Work already claimed
+/// runs to its own end: a recess stops the hand-out, not the work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Recess {
+    pub project: String,
+    /// Why, in the human's words. May be empty.
+    pub reason: String,
+    /// The surface that called it — `cli` or `tui`.
+    pub actor: String,
+    /// When it was called. Updating the reason does not move this: the recess
+    /// began when it began.
+    pub at: String,
+}
+
+impl Recess {
+    /// One sentence, aimed at a model that has to relay it to a human.
+    pub fn describe(&self) -> String {
+        format!(
+            "the human stood this queue down{} — nothing is handed out until \
+             `hird resume` lifts it, though work already claimed continues",
+            self.quoted_reason()
+        )
+    }
+
+    /// ` ("rebasing main")`, or nothing when no reason was given.
+    pub fn quoted_reason(&self) -> String {
+        if self.reason.is_empty() {
+            String::new()
+        } else {
+            format!(" ({:?})", self.reason)
+        }
+    }
+}
+
 /// What a review concluded about the work it reviewed.
 ///
 /// A review's `result` is prose; the verdict is the one bit of it the queue

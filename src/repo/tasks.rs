@@ -80,6 +80,14 @@ pub struct Dispatch {
     /// review has not read it yet" points a human at a completely different
     /// fix than "the work has not happened".
     pub held: Vec<(i64, i64)>,
+    /// The recess the queried project stands under, when it does. The human
+    /// stood the queue down, so nothing was considered at all: every other
+    /// bucket is empty on purpose, because enumerating work during a recess
+    /// invites acting on it.
+    pub recess: Option<crate::model::Recess>,
+    /// Open tasks passed over because their own project is in recess — only
+    /// under an all-projects scope, where the rest of the queue stays live.
+    pub in_recess: Vec<i64>,
     /// Open tasks whose holder released them with a question: work that needs
     /// a human answer before any agent can continue it.
     ///
@@ -594,23 +602,42 @@ impl<'a> Tasks<'a> {
         let expires = fmt_ts(now + chrono::Duration::from_std(lease_ttl).unwrap_or_default());
 
         let tx = self.immediate_tx()?;
+        let mut dispatch = Dispatch::default();
+        // A recess covers the whole project, so when the asked-for scope is
+        // one project the answer is one sentence rather than a bucket per
+        // task: nothing below is even enumerated, because a list of work the
+        // human stood the queue down over is an invitation to work it.
+        if let ProjectScope::Only(project) = scope {
+            if let Some(standing) = super::recess::current_in(&tx, project)? {
+                dispatch.recess = Some(standing);
+                tx.commit()?;
+                return Ok(dispatch);
+            }
+        }
         let (project_clause, project_value) = scope.clause("project");
-        let candidates: Vec<(i64, String)> = {
+        let candidates: Vec<(i64, String, String)> = {
             let sql = format!(
-                "SELECT seq, id FROM tasks
+                "SELECT seq, id, project FROM tasks
                  WHERE {project_clause} AND status = 'open'
                  ORDER BY priority DESC, seq ASC"
             );
             let mut stmt = tx.prepare(&sql)?;
             let binds: Vec<&str> = project_value.into_iter().collect();
             let rows = stmt.query_map(rusqlite::params_from_iter(binds), |row| {
-                Ok((row.get(0)?, row.get(1)?))
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
 
-        let mut dispatch = Dispatch::default();
-        for (seq, id) in candidates {
+        for (seq, id, project) in candidates {
+            // Under an all-projects scope a recess still covers its own
+            // project's tasks; they go into their own bucket rather than
+            // vanishing, so the caller can say why the queue looks smaller
+            // than the board.
+            if scope.is_all() && super::recess::current_in(&tx, &project)?.is_some() {
+                dispatch.in_recess.push(seq);
+                continue;
+            }
             // Recorded, but not instead of the rest of why this task is not
             // workable. A task that is both blocked and awaiting an answer
             // would otherwise reach the human as "answer this and it moves",
@@ -1110,10 +1137,18 @@ fn claim_in_tx(
 ) -> Result<Claim> {
     let id = task_id_for_seq(tx, seq)?;
 
-    let status: String = tx.query_row("SELECT status FROM tasks WHERE id = ?1", [&id], |row| {
-        row.get(0)
-    })?;
+    let (status, project): (String, String) = tx.query_row(
+        "SELECT status, project FROM tasks WHERE id = ?1",
+        [&id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
     if status == Status::Open.as_str() {
+        // The recess is the first gate, and only on open tasks: a claim is a
+        // hand-out and the recess stops hand-outs, while a task already held
+        // is work in flight, which a recess deliberately leaves alone.
+        if let Some(recess) = super::recess::current_in(tx, &project)? {
+            return Err(Error::InRecess { seq, recess });
+        }
         if let Some(question) = questions::unanswered_in(tx, &id)? {
             return Err(Error::AwaitingAnswer {
                 seq,
@@ -2184,6 +2219,99 @@ mod tests {
             dispatch.incompatible,
             vec![(browser, vec!["browser".into()])]
         );
+    }
+
+    /// The recess stops the hand-out, not the work: a named claim on an open
+    /// task is refused in the human's words, while the task already held is
+    /// driven to done exactly as if nothing stood.
+    #[test]
+    fn a_recess_refuses_new_claims_but_leaves_work_in_flight_alone() {
+        let db = db();
+        let held = seed(&db, "already claimed");
+        let open = seed(&db, "still open");
+        db.tasks().claim(held, "codex:1", TTL).unwrap();
+
+        db.recesses().call(PROJECT, "rebasing main", "cli").unwrap();
+
+        let err = db
+            .tasks()
+            .claim(open, "claude-code:2", TTL)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.starts_with(&format!(
+                "task {open} is in recess: the human stood this queue down (\"rebasing main\")"
+            )),
+            "{err}"
+        );
+        assert!(err.contains("hird resume"), "{err}");
+        assert_eq!(db.tasks().get(open).unwrap().status, Status::Open);
+
+        db.tasks()
+            .update(held, "codex:1", true, "still going", TTL)
+            .unwrap();
+        let finished = db
+            .tasks()
+            .complete(held, "codex:1", "done during the recess")
+            .unwrap();
+        assert_eq!(finished.task.status, Status::Done);
+
+        db.recesses().lift(PROJECT).unwrap();
+        db.tasks().claim(open, "claude-code:2", TTL).unwrap();
+    }
+
+    /// `task_next` during a recess answers with the recess and nothing else:
+    /// no claim, and no buckets, because enumerating work the human stood the
+    /// queue down over invites acting on it.
+    #[test]
+    fn dispatch_during_a_recess_names_the_recess_and_enumerates_nothing() {
+        let db = db();
+        seed(&db, "ready");
+        db.recesses()
+            .call(PROJECT, "merging the PR", "cli")
+            .unwrap();
+
+        let dispatch = db
+            .tasks()
+            .claim_next("codex:1", TTL, &scope(), true, Clearance::Done)
+            .unwrap();
+        assert!(dispatch.claim.is_none());
+        assert_eq!(
+            dispatch.recess.as_ref().map(|r| r.reason.as_str()),
+            Some("merging the PR")
+        );
+        assert!(dispatch.blocked.is_empty());
+        assert!(dispatch.deferred.is_empty());
+        assert!(dispatch.awaiting_answer.is_empty());
+
+        db.recesses().lift(PROJECT).unwrap();
+        let dispatch = db
+            .tasks()
+            .claim_next("codex:1", TTL, &scope(), true, Clearance::Done)
+            .unwrap();
+        assert!(dispatch.recess.is_none());
+        assert_eq!(dispatch.claim.unwrap().task.seq, 1);
+    }
+
+    /// A recess is per project: under an all-projects scope the stood-down
+    /// project's tasks are skipped into their own bucket while every other
+    /// queue stays live.
+    #[test]
+    fn an_all_projects_dispatch_routes_around_a_recessed_project() {
+        let db = db();
+        let here = seed(&db, "here");
+        db.tasks()
+            .create("/tmp/elsewhere", "there", "", 0, "cli")
+            .unwrap();
+        db.recesses().call(PROJECT, "", "cli").unwrap();
+
+        let dispatch = db
+            .tasks()
+            .claim_next("codex:1", TTL, &ProjectScope::All, true, Clearance::Done)
+            .unwrap();
+        assert_eq!(dispatch.claim.unwrap().task.project, "/tmp/elsewhere");
+        assert_eq!(dispatch.in_recess, vec![here]);
+        assert!(dispatch.recess.is_none(), "no single queue was asked for");
     }
 
     #[test]

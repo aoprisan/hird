@@ -1236,6 +1236,10 @@ struct NextResult {
     /// One sentence explaining an empty-handed answer.
     #[serde(skip_serializing_if = "Option::is_none")]
     idle: Option<String>,
+    /// The queue is in recess: the human stood it down, and nothing is handed
+    /// out until they lift it. Not idle — standing by is the correct move.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recess: Option<String>,
     /// Open tasks that are waiting on unfinished dependencies.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     blocked: Vec<i64>,
@@ -1306,6 +1310,7 @@ impl NextResult {
                 .claim
                 .map(|claim| ClaimResult::new(claim, holder, heartbeat, recalled, previously)),
             idle,
+            recess: dispatch.recess.map(|r| r.describe()),
             blocked: dispatch.blocked,
             held: dispatch
                 .held
@@ -1347,6 +1352,16 @@ impl NextResult {
 
 /// Why the queue had nothing to hand out, in the terms the agent can act on.
 fn idle_reason(dispatch: &Dispatch) -> String {
+    // A recess outranks every other sentence, because it is the one answer
+    // under which nothing else was even considered: the human stood the queue
+    // down, and standing by — not retrying, not escalating — is the move.
+    if let Some(recess) = &dispatch.recess {
+        return format!(
+            "in recess, not idle: {}. Stand by rather than retrying; the human \
+             decides when claims resume",
+            recess.describe()
+        );
+    }
     let recused = dispatch.recused.len();
     let held = dispatch.held.len();
     let awaiting = dispatch.awaiting_answer.len();
@@ -1429,6 +1444,12 @@ fn idle_reason(dispatch: &Dispatch) -> String {
     if incompatible > 0 {
         tail.push_str(&format!(
             ", and {incompatible} requiring capabilities this session does not advertise"
+        ));
+    }
+    let standing_down = dispatch.in_recess.len();
+    if standing_down > 0 {
+        tail.push_str(&format!(
+            ", and {standing_down} in a project whose queue the human stood down"
         ));
     }
     match (blocked, deferred) {
@@ -3725,6 +3746,37 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("`questions`"));
+    }
+
+    /// During a recess the queue is standing, not idle — the reply says
+    /// which, names no other work, and a claim by number is refused in the
+    /// human's own words. Lifting it puts everything back exactly as it was.
+    #[tokio::test]
+    async fn a_recess_answers_task_next_with_standing_by_not_idle() {
+        let s = server();
+        let seq = seed(&s, "ready work", "");
+        s.with_db(|db| db.recesses().call(PROJECT, "rebasing main", "cli"))
+            .unwrap();
+
+        let out = parse(s.task_next(Parameters(next_args())).await);
+        assert!(out.get("claimed").is_none());
+        let recess = out["recess"].as_str().unwrap();
+        assert!(recess.contains("rebasing main"), "{recess}");
+        let idle = out["idle"].as_str().unwrap();
+        assert!(idle.starts_with("in recess, not idle"), "{idle}");
+        assert!(idle.contains("Stand by"), "{idle}");
+        assert!(
+            out.get("blocked").is_none() && out.get("deferred").is_none(),
+            "a recess enumerates nothing: {out}"
+        );
+
+        let refused = s.task_claim(Parameters(just(seq))).await.unwrap_err();
+        assert!(refused.contains("in recess"), "{refused}");
+        assert!(refused.contains("rebasing main"), "{refused}");
+
+        s.with_db(|db| db.recesses().lift(PROJECT)).unwrap();
+        let handed = parse(s.task_next(Parameters(next_args())).await);
+        assert_eq!(handed["claimed"]["claimed"], seq);
     }
 
     /// A parked question is not the whole story when the task is also waiting
