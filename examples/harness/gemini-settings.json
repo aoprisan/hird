@@ -1,0 +1,10 @@
+{
+  "//": "What `hird register gemini` writes. Register hird with the Gemini CLI. Merge this into .gemini/settings.json in the checkout — or ~/.gemini/settings.json, which every project reads and the project file merges over — and `gemini mcp add -e HIRD_HARNESS=gemini hird hird mcp` writes the same thing. HIRD_HARNESS is how the board tells this session apart (gemini:3c7d); leave it unset and the session is filed under the name its client gives, or `unknown`. stdio is inferred from `command`, which must be on the PATH the CLI inherits — if `task_*` tools do not appear, put the absolute path from `which hird` here.",
+  "mcpServers": {
+    "hird": {
+      "command": "hird",
+      "args": ["mcp"],
+      "env": { "HIRD_HARNESS": "gemini" }
+    }
+  }
+}

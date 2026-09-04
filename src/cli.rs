@@ -47,7 +47,8 @@ pub struct Cli {
     #[arg(long)]
     pub install: bool,
 
-    /// Install the hird skill for Codex, Claude Code, Copilot, and OpenCode.
+    /// Install the hird skill for Codex, Claude Code, Copilot, Gemini, and
+    /// OpenCode.
     #[arg(long)]
     pub install_skill: bool,
 
@@ -2678,6 +2679,7 @@ mod tests {
             ("codex", register::Harness::Codex),
             ("copilot", register::Harness::Copilot),
             ("copilot-cli", register::Harness::CopilotCli),
+            ("gemini", register::Harness::Gemini),
             ("opencode", register::Harness::OpenCode),
         ] {
             let cli = Cli::try_parse_from(["hird", "register", word]).unwrap();

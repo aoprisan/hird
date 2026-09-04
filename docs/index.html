@@ -123,8 +123,9 @@
 <p>
   Whichever way it arrived, <code>--install-skill</code> installs the bundled
   portable skill for Codex and OpenCode (<code>~/.agents/skills/hird</code>),
-  Claude Code (<code>~/.claude/skills/hird</code>), and GitHub Copilot
-  (<code>~/.copilot/skills/hird</code>). It is optional, can be run
+  Claude Code (<code>~/.claude/skills/hird</code>), GitHub Copilot
+  (<code>~/.copilot/skills/hird</code>), and the Gemini CLI
+  (<code>~/.gemini/skills/hird</code>). It is optional, can be run
   separately (<code>hird --install-skill</code>), and new agent sessions
   should be started after installing it.
 </p>
@@ -507,6 +508,7 @@ herdr agent prompt "$worker" "hird task $HIRD_TASK is ready; work the hird queue
 <span class="k">hird</span> register codex          <span class="c"># ~/.codex/config.toml</span>
 <span class="k">hird</span> register copilot        <span class="c"># ./.vscode/mcp.json — Copilot in VS Code</span>
 <span class="k">hird</span> register copilot-cli    <span class="c"># ~/.copilot/mcp-config.json</span>
+<span class="k">hird</span> register gemini         <span class="c"># ./.gemini/settings.json</span>
 <span class="k">hird</span> register opencode       <span class="c"># ~/.config/opencode/opencode.json</span></code></pre>
 
 <pre><code><span class="w">registered hird in /home/you/project/.vscode/mcp.json
@@ -594,6 +596,32 @@ env = { HIRD_HARNESS = <span class="s">"codex"</span> }</code></pre>
 
 <p>
   <code>/mcp add</code> inside a session writes the same file.
+</p>
+
+<h4>Gemini CLI</h4>
+<span class="filename">.gemini/settings.json</span>
+<pre><code>{
+  <span class="s">"mcpServers"</span>: {
+    <span class="s">"hird"</span>: {
+      <span class="s">"command"</span>: <span class="s">"/home/you/.cargo/bin/hird"</span>,
+      <span class="s">"args"</span>: [<span class="s">"mcp"</span>],
+      <span class="s">"env"</span>: { <span class="s">"HIRD_HARNESS"</span>: <span class="s">"gemini"</span> }
+    }
+  }
+}</code></pre>
+
+<p>
+  Project-scoped, the same scope <code>gemini mcp add</code> defaults to, and
+  there is no <code>type</code> to get wrong: the Gemini CLI reads a
+  <code>command</code> as stdio.
+  <code>gemini mcp add -e HIRD_HARNESS=gemini hird hird mcp</code> writes the
+  same entry — with the bare <code>hird</code> this command exists to avoid —
+  and its <code>--scope user</code> writes
+  <code>~/.gemini/settings.json</code> instead, which every project reads and
+  the project file merges over. The CLI tolerates comments in
+  <code>settings.json</code> and no JSON parser does, so a commented file is
+  left untouched and <code>--print</code> renders the block to merge by hand. Restart the Gemini CLI after registering, and
+  <code>gemini mcp list</code> confirms the connection.
 </p>
 
 <h4>OpenCode</h4>
