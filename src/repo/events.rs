@@ -110,6 +110,28 @@ impl<'a> Events<'a> {
         self.query(&sql, &binds)
     }
 
+    /// Every matching event at or after the instant `cutoff`, oldest first.
+    ///
+    /// The string comparison is exact for the same reason it is in
+    /// [`Events::board_at`]: timestamps are fixed-width, so a prefix reads as
+    /// the start of that instant.
+    pub fn after(
+        &self,
+        scope: &ProjectScope,
+        filter: &FeedFilter,
+        cutoff: &str,
+    ) -> Result<Vec<FeedEvent>> {
+        let (clauses, mut binds) = where_parts(scope, filter);
+        binds.push(cutoff);
+        let sql = format!(
+            "SELECT e.rowid, e.at, e.actor, e.kind, e.detail, t.seq, t.title, t.project
+             FROM task_events e JOIN tasks t ON t.id = e.task_id
+             WHERE {clauses} AND e.at >= ?
+             ORDER BY e.rowid ASC"
+        );
+        self.query(&sql, &binds)
+    }
+
     /// The board as it stood at `cutoff`, folded from the trail.
     ///
     /// The trail is append-only precisely so this question stays answerable:

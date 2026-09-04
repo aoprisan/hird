@@ -200,6 +200,29 @@ impl<'a> Footings<'a> {
         Ok(out)
     }
 
+    /// Every standing assertion in `project` anchored to exactly this path,
+    /// with the anchor it holds there. Oldest first.
+    pub fn anchored_to(&self, project: &str, path: &str) -> Result<Vec<(Assertion, Anchor)>> {
+        let sql = format!(
+            "SELECT {ASSERTION_COLUMNS}, f.path, f.hash, f.at
+             FROM assertion_footing f JOIN assertions a ON a.id = f.assertion_id
+             WHERE a.project = ?1 AND f.path = ?2 AND a.superseded_by IS NULL
+             ORDER BY a.created_at ASC, a.rowid ASC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![project, path], |row| {
+            Ok((
+                row_to_assertion(row)?,
+                Anchor {
+                    path: row.get(8)?,
+                    hash: row.get(9)?,
+                    at: row.get(10)?,
+                },
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// The files a fact learned while working task `seq` is a fact *about*.
     ///
     /// Two sources, and the union is deliberate. What the task declared covers
