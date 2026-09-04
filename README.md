@@ -113,7 +113,8 @@ script after upgrading the source.
 
 Whichever way it arrived, `--install-skill` installs the bundled,
 agent-portable skill for Codex and OpenCode (`~/.agents/skills/hird`), Claude
-Code (`~/.claude/skills/hird`), and GitHub Copilot (`~/.copilot/skills/hird`).
+Code (`~/.claude/skills/hird`), GitHub Copilot (`~/.copilot/skills/hird`), and
+the Gemini CLI (`~/.gemini/skills/hird`).
 It is optional, can be run separately (`hird --install-skill`), and new agent
 sessions should be started after installing it.
 
@@ -157,6 +158,7 @@ hird register claude-code    # ./.mcp.json
 hird register codex          # ~/.codex/config.toml
 hird register copilot        # ./.vscode/mcp.json — Copilot in VS Code
 hird register copilot-cli    # ~/.copilot/mcp-config.json
+hird register gemini         # ./.gemini/settings.json
 hird register opencode       # ~/.config/opencode/opencode.json
 ```
 
@@ -237,6 +239,30 @@ session also writes:
   }
 }
 ```
+
+**Gemini CLI** — `.gemini/settings.json`, project-scoped, the same scope
+`gemini mcp add` defaults to:
+
+```json
+{
+  "mcpServers": {
+    "hird": {
+      "command": "/home/you/.cargo/bin/hird",
+      "args": ["mcp"],
+      "env": { "HIRD_HARNESS": "gemini" }
+    }
+  }
+}
+```
+
+There is no `type` to get wrong: the Gemini CLI reads a `command` as stdio.
+`gemini mcp add -e HIRD_HARNESS=gemini hird hird mcp` writes the same entry —
+with the bare `hird` this command exists to avoid — and its `--scope user`
+writes `~/.gemini/settings.json` instead, which every project reads and the
+project file merges over. The CLI tolerates comments in `settings.json` and no
+JSON parser does, so a commented file is left untouched and `--print` renders
+the block to merge by hand. Restart the Gemini CLI after registering,
+and `gemini mcp list` confirms the connection.
 
 **OpenCode** — `${XDG_CONFIG_HOME:-~/.config}/opencode/opencode.json`:
 
@@ -1239,7 +1265,7 @@ hird mem standing [--shaky] [--all-projects]
 hird mem export [--path <glob>] [--firm]
 hird tui
 hird mcp
-hird register <claude-code|codex|copilot|copilot-cli|opencode> [--name <name>]
+hird register <claude-code|codex|copilot|copilot-cli|gemini|opencode> [--name <name>]
               [--capability <name>]… [--print] [--force]
 hird db-path
 ```

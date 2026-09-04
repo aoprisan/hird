@@ -32,6 +32,8 @@ pub enum Harness {
     Copilot,
     /// The Copilot CLI — in `~/.copilot/mcp-config.json`.
     CopilotCli,
+    /// The Gemini CLI — project-scoped, in `./.gemini/settings.json`.
+    Gemini,
     /// OpenCode — in `${XDG_CONFIG_HOME:-~/.config}/opencode/opencode.json`.
     #[value(name = "opencode")]
     OpenCode,
@@ -57,6 +59,7 @@ impl Harness {
             Harness::ClaudeCode => "claude-code",
             Harness::Codex => "codex",
             Harness::Copilot | Harness::CopilotCli => "copilot",
+            Harness::Gemini => "gemini",
             Harness::OpenCode => "opencode",
         }
     }
@@ -68,12 +71,13 @@ impl Harness {
             Harness::Codex => "the Codex CLI",
             Harness::Copilot => "Copilot in VS Code",
             Harness::CopilotCli => "the Copilot CLI",
+            Harness::Gemini => "the Gemini CLI",
             Harness::OpenCode => "OpenCode",
         }
     }
 
-    /// The one file this harness reads. Project-scoped for the two that have a
-    /// documented project scope, so registering does not reach outside the
+    /// The one file this harness reads. Project-scoped for the three that have
+    /// a documented project scope, so registering does not reach outside the
     /// checkout the human ran it in.
     pub fn config_path(self, cwd: &Path) -> PathBuf {
         match self {
@@ -81,6 +85,9 @@ impl Harness {
             Harness::Codex => identity::home().join(".codex").join("config.toml"),
             Harness::Copilot => cwd.join(".vscode").join("mcp.json"),
             Harness::CopilotCli => identity::home().join(".copilot").join("mcp-config.json"),
+            // `gemini mcp add` defaults to the same project scope, and the
+            // user-wide file is merged under it rather than replaced by it.
+            Harness::Gemini => cwd.join(".gemini").join("settings.json"),
             Harness::OpenCode => {
                 let dir = identity::config_dir().join("opencode");
                 let json = dir.join("opencode.json");
@@ -96,7 +103,7 @@ impl Harness {
 
     fn shape(self) -> Shape {
         match self {
-            Harness::ClaudeCode | Harness::CopilotCli => Shape::Json {
+            Harness::ClaudeCode | Harness::CopilotCli | Harness::Gemini => Shape::Json {
                 container: "mcpServers",
             },
             Harness::Copilot => Shape::Json {
@@ -119,6 +126,7 @@ impl Harness {
                  agent-mode tools picker"
             }
             Harness::CopilotCli => "restart the Copilot CLI; `/mcp` confirms it",
+            Harness::Gemini => "restart the Gemini CLI; `gemini mcp list` confirms it",
             Harness::OpenCode => "restart OpenCode; `opencode mcp list` confirms it",
         }
     }
@@ -495,6 +503,7 @@ mod tests {
         // bar has to see them as one harness.
         assert_eq!(Harness::Copilot.harness_name(), "copilot");
         assert_eq!(Harness::CopilotCli.harness_name(), "copilot");
+        assert_eq!(Harness::Gemini.harness_name(), "gemini");
         assert_eq!(Harness::OpenCode.harness_name(), "opencode");
     }
 
@@ -542,6 +551,15 @@ mod tests {
         let claude = reg("hird").as_json(Harness::ClaudeCode);
         assert!(claude.get("type").is_none());
 
+        // The Gemini CLI infers stdio from `command`; a `type` is not in its
+        // schema, and every tool is exposed unless one of the lists says less.
+        let gemini = reg("hird").as_json(Harness::Gemini);
+        assert!(gemini.get("type").is_none());
+        assert!(gemini.get("tools").is_none());
+        assert_eq!(gemini["command"], json!("/opt/bin/hird"));
+        assert_eq!(gemini["args"], json!(["mcp"]));
+        assert_eq!(gemini["env"], json!({ "HIRD_HARNESS": "codex" }));
+
         let opencode = reg("hird").as_json(Harness::OpenCode);
         assert_eq!(opencode["type"], json!("local"));
         assert_eq!(opencode["command"], json!(["/opt/bin/hird", "mcp"]));
@@ -572,6 +590,21 @@ mod tests {
         let written: Json = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
             written["servers"]["hird"]["command"],
+            json!("/opt/bin/hird")
+        );
+    }
+
+    /// The Gemini CLI merges the user-wide file under the project one, so
+    /// writing the project file is the registration that belongs to a checkout.
+    #[test]
+    fn the_gemini_registration_stays_inside_the_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, outcome) = apply(Harness::Gemini, &reg("hird"), dir.path(), false).unwrap();
+        assert_eq!(outcome, Outcome::Created);
+        assert_eq!(path, dir.path().join(".gemini").join("settings.json"));
+        let written: Json = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            written["mcpServers"]["hird"]["command"],
             json!("/opt/bin/hird")
         );
     }

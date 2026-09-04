@@ -313,6 +313,52 @@ fn help_and_version_work_without_a_database() {
 }
 
 #[test]
+fn register_gemini_writes_the_project_settings_file_and_is_idempotent() {
+    let sandbox = Sandbox::new();
+    let path = sandbox.project().join(".gemini/settings.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        r#"{"theme":"Default","mcpServers":{"other":{"command":"thing"}}}"#,
+    )
+    .unwrap();
+
+    let registered = sandbox.run(&["register", "gemini"]);
+    assert!(registered.contains("added hird"), "{registered}");
+    assert!(
+        registered.contains(&path.to_string_lossy().to_string()),
+        "{registered}"
+    );
+    assert!(registered.contains("HIRD_HARNESS=gemini"), "{registered}");
+    assert!(registered.contains("gemini mcp list"), "{registered}");
+
+    let settings: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(settings["theme"], serde_json::json!("Default"));
+    assert_eq!(
+        settings["mcpServers"]["other"]["command"],
+        serde_json::json!("thing")
+    );
+    // stdio is inferred from `command`, so the entry carries no `type`.
+    assert!(settings["mcpServers"]["hird"].get("type").is_none());
+    assert_eq!(
+        settings["mcpServers"]["hird"]["args"][0],
+        serde_json::json!("mcp")
+    );
+    assert!(settings["mcpServers"]["hird"]["command"]
+        .as_str()
+        .is_some_and(|command| std::path::Path::new(command).is_absolute()));
+    assert_eq!(
+        settings["mcpServers"]["hird"]["env"]["HIRD_HARNESS"],
+        serde_json::json!("gemini")
+    );
+    assert!(!sandbox.db().exists());
+
+    let repeated = sandbox.run(&["register", "gemini"]);
+    assert!(repeated.contains("already registered"), "{repeated}");
+}
+
+#[test]
 fn register_opencode_preserves_the_global_config_and_is_idempotent() {
     let sandbox = Sandbox::new();
     let path = sandbox.dir.path().join("config/opencode/opencode.json");
@@ -379,6 +425,7 @@ fn install_skill_writes_the_bundled_global_skill_without_opening_the_database() 
         ".agents/skills/hird/SKILL.md",
         ".claude/skills/hird/SKILL.md",
         ".copilot/skills/hird/SKILL.md",
+        ".gemini/skills/hird/SKILL.md",
     ] {
         let path = sandbox.dir.path().join(relative);
         assert!(

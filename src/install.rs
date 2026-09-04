@@ -85,7 +85,7 @@ fn path_contains(dir: &Path, path_var: Option<&std::ffi::OsStr>) -> bool {
         .is_some_and(|mut paths| paths.any(|path| path == dir))
 }
 
-fn skill_paths(home: &Path) -> [(&'static str, PathBuf); 3] {
+fn skill_paths(home: &Path) -> [(&'static str, PathBuf); 4] {
     [
         (
             "Codex and OpenCode",
@@ -93,6 +93,7 @@ fn skill_paths(home: &Path) -> [(&'static str, PathBuf); 3] {
         ),
         ("Claude Code", home.join(".claude/skills/hird/SKILL.md")),
         ("GitHub Copilot", home.join(".copilot/skills/hird/SKILL.md")),
+        ("the Gemini CLI", home.join(".gemini/skills/hird/SKILL.md")),
     ]
 }
 
@@ -190,7 +191,7 @@ mod tests {
     }
 
     #[test]
-    fn skill_targets_cover_codex_claude_code_copilot_and_opencode() {
+    fn skill_targets_cover_every_harness_that_reads_a_skill_directory() {
         let home = Path::new("/home/developer");
         assert_eq!(
             skill_paths(home),
@@ -201,6 +202,7 @@ mod tests {
                 ),
                 ("Claude Code", home.join(".claude/skills/hird/SKILL.md"),),
                 ("GitHub Copilot", home.join(".copilot/skills/hird/SKILL.md"),),
+                ("the Gemini CLI", home.join(".gemini/skills/hird/SKILL.md"),),
             ]
         );
     }

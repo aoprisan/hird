@@ -72,7 +72,7 @@ else
 # The agent name is what `herdr agent list` shows — the name the agent
 # was started under. The harness column is how hird knows the same
 # agent: what `hird agents` and `hird record` print, e.g. claude-code,
-# codex, copilot. It is what HIRD_RECUSED is matched against, so a
+# codex, copilot, gemini. It is what HIRD_RECUSED is matched against, so a
 # review of that agent's work is never routed back to its own door.
 # List every name the harness may report, comma-separated, no spaces.
 #

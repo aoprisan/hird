@@ -52,12 +52,12 @@ crates.io once the `CARGO_REGISTRY_TOKEN` secret is set. What remains is the
 human act: set the secret, tag `v0.1.0`, and confirm `get.sh` and
 `cargo install hird` both land a working binary.
 
-**More first-class registrations.** `hird register` knows five harnesses;
-`--print` covers the rest by hand. Every MCP-capable CLI that people actually
-run beside the current five — Gemini CLI is the obvious next — deserves an
-entry that writes the right file with the right absolute path, because the
-absolute path is the thing hand-written configs get wrong and the reason
-`register` exists.
+**More first-class registrations.** `hird register` knows six harnesses — the
+Gemini CLI is in, at the project scope `gemini mcp add` itself defaults to —
+and `--print` covers the rest by hand. Every MCP-capable CLI that people
+actually run beside those six deserves an entry that writes the right file
+with the right absolute path, because the absolute path is the thing
+hand-written configs get wrong and the reason `register` exists.
 
 ## Later
 
