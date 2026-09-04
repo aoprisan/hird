@@ -26,7 +26,7 @@ pub fn harness_color(harness: &str) -> Color {
         "claude-code" => Color::Rgb(217, 119, 87),
         "codex" => Color::Rgb(120, 180, 255),
         "copilot" => Color::Rgb(160, 140, 220),
-        "cli" | "tui" | "hird" => Color::DarkGray,
+        "cli" | "tui" | "web" | "hird" => Color::DarkGray,
         other => {
             const PALETTE: [Color; 6] = [
                 Color::LightGreen,
@@ -160,7 +160,7 @@ mod tests {
 
     #[test]
     fn human_actors_are_dimmed_rather_than_coloured() {
-        for actor in ["cli", "tui", "hird"] {
+        for actor in ["cli", "tui", "web", "hird"] {
             assert_eq!(harness_color(actor), Color::DarkGray);
         }
     }

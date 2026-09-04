@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-`hird` is a Rust 2021 binary and library. `src/main.rs` starts the application, while `src/lib.rs` exposes the main layers: domain types in `model.rs`, SQLite setup and migrations in `db.rs`, and typed data access in `repo/`. Keep SQL inside `src/repo/`; the CLI (`cli.rs`), MCP server (`mcp.rs`), and TUI (`tui/`) should call that layer instead. Shared formatting, identity, configuration, and error handling live in their named modules. Integration tests are in `tests/`, example configuration is in `examples/`, and `DESIGN.md` records architecture and state-machine decisions.
+`hird` is a Rust 2021 binary and library. `src/main.rs` starts the application, while `src/lib.rs` exposes the main layers: domain types in `model.rs`, SQLite setup and migrations in `db.rs`, and typed data access in `repo/`. Keep SQL inside `src/repo/`; the CLI (`cli.rs`), MCP server (`mcp.rs`), TUI (`tui/`) and browser viewer (`web.rs`, serving the page embedded from `src/web/index.html`) should call that layer instead. `graph.rs` builds the one snapshot every picture of the board is drawn from. Shared formatting, identity, configuration, and error handling live in their named modules. Integration tests are in `tests/`, example configuration is in `examples/`, and `DESIGN.md` records architecture and state-machine decisions.
 
 ## Build, Test, and Development Commands
 

@@ -210,6 +210,30 @@ impl<'a> Events<'a> {
         Ok(board.into_values().collect())
     }
 
+    /// Where the trail begins and how far it has got: the first event's
+    /// instant and the newest cursor, or `None` while nothing is recorded.
+    ///
+    /// A replay scrubber needs the one end and a follower resuming needs the
+    /// other, and both are one indexed read.
+    pub fn bounds(&self, scope: &ProjectScope) -> Result<Option<(String, i64)>> {
+        let (project_clause, project_value) = scope.clause("t.project");
+        let sql = format!(
+            "SELECT MIN(e.at), MAX(e.rowid)
+             FROM task_events e JOIN tasks t ON t.id = e.task_id
+             WHERE {project_clause}"
+        );
+        let binds: Vec<&str> = project_value.into_iter().collect();
+        let row: (Option<String>, Option<i64>) =
+            self.conn
+                .query_row(&sql, params_from_iter(binds.iter()), |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })?;
+        Ok(match row {
+            (Some(first), Some(cursor)) => Some((first, cursor)),
+            _ => None,
+        })
+    }
+
     /// Every harness that has ever acted on this board, in name order.
     ///
     /// Read from the actors the trail records: agents act as

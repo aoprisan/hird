@@ -17,9 +17,11 @@ builds on (v1.9), the exhibit — kept versions, `hird diff`, `hird salvage`
 (v2.0), tenures (v2.1), the dispatch hook (v2.2), the event feed (v2.3),
 routed summonses (v2.4), human question gates (v2.5), capability-aware
 dispatch (v2.6), the readings — `hird why`, `plan lint`, `replay`,
-`mem export` and the question hook (v2.7), and the recess — `hird recess` /
+`mem export` and the question hook (v2.7), the recess — `hird recess` /
 `hird resume`, the human standing a queue down without killing anything
-(v2.8). The herdr plugin packages the pairing.
+(v2.8) — and the picture: `hird graph --json`, the TUI's graph screen, and
+`hird web`, the board drawn live in a browser with a scrubber over the trail
+(v2.9). The herdr plugin packages the pairing.
 
 `DESIGN.md` records each of those decisions as it was made and stays the
 specification. This file is only about what is not built yet.
@@ -35,8 +37,13 @@ and a roadmap item that breaks one is a different project:
 - **Pull, not push.** `task_next` is a tool an agent chooses to call. The
   dispatch hook wakes workers; nothing assigns, routes or schedules. hird has
   no roster and chooses nobody.
-- **No daemon, no server, no accounts.** One binary, one SQLite file, one
-  process per session.
+- **No daemon, no accounts, and no server an agent depends on.** One binary,
+  one SQLite file, one process per session. `hird web` (v2.9) listens on a
+  socket, and it is worth being exact about why that is not a breach: it is a
+  loopback, read-only viewer with the TUI's posture — it dies with the
+  terminal and no agent ever talks to it. The line it draws is between a
+  *screen* and a *transport*, and a transport agents reach the queue through
+  is still the deferral below.
 - **Plans are data.** Nothing may appear in a plan file that is not already
   stored task state — no conditionals, loops, retries or schedules, ever.
 - **Reports, not verdicts.** The witness says what moved, not who typed;
@@ -74,7 +81,9 @@ it is the reason this is *later* rather than *next*.
 **A remote transport.** hird is a local queue in a local SQLite file, and the
 Copilot coding agent on github.com — or any cloud harness in an ephemeral
 container — has nothing to connect to. An HTTP mode for `hird mcp` would let
-a remote session reach a queue on your machine. It waits on demand and on the
+a remote session reach a queue on your machine. `hird web` is not that: it
+serves a human a picture and takes no writes, and the transport question
+stays open on its own merits. It waits on demand and on the
 sync design above, because a remote harness also has a remote working tree,
 and a queue that can see neither the files nor the fingerprints is serving
 that session with the witness, footing and exhibit all dark.

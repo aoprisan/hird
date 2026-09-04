@@ -16,10 +16,11 @@
 //! - [`footing`] — the second reader of it, on memory's behalf: what an
 //!   assertion was learned against, and whether that has moved since
 //! - [`plan`] — a dependency graph as a file, which [`repo`] turns into rows
+//! - [`graph`] — the board as one value, which every picture is drawn from
 //! - [`digest`] — the trail folded into news, for a human coming back to it
 //! - [`herald`] — the one push in a pull design: a configured command told
 //!   when a task becomes claimable, so idle agents can be summoned
-//! - [`mcp`], [`cli`], [`tui`] — the three front ends, which call [`repo`]
+//! - [`mcp`], [`cli`], [`tui`], [`web`] — the front ends, which call [`repo`]
 
 pub mod capability;
 pub mod cli;
@@ -31,6 +32,7 @@ pub mod exhibit;
 pub mod fmt;
 pub mod footing;
 pub mod glob;
+pub mod graph;
 pub mod hash;
 pub mod herald;
 pub mod identity;
@@ -41,6 +43,7 @@ pub mod plan;
 pub mod register;
 pub mod repo;
 pub mod tui;
+pub mod web;
 pub mod witness;
 
 pub use config::Config;
