@@ -1887,3 +1887,418 @@ fn an_unknown_event_kind_is_refused_with_the_word_it_choked_on() {
     let err = sandbox.run_failing(&["events", "--kind", "claimed,exploded"]);
     assert!(err.contains("exploded"), "{err}");
 }
+
+/// The queue is a plan with numbers instead of names; `plan export` is the
+/// direction `plan apply` does not go, and what it writes files.
+#[test]
+fn plan_export_round_trips_the_board_into_a_plan_that_applies() {
+    let sandbox = Sandbox::new();
+    sandbox.write_file("plan.toml", PLAN);
+    sandbox.run(&["plan", "apply", "plan.toml"]);
+    // A task filed by hand, waiting on a plan task, with a title that needs
+    // slugging.
+    sandbox.run(&[
+        "add",
+        "Ship it: v0.1!",
+        "--needs",
+        "5",
+        "--priority",
+        "2",
+        "--requires",
+        "network",
+        "--review",
+    ]);
+    // A finished task stays home unless asked for.
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex.claim(1);
+    codex
+        .call(
+            "task_complete",
+            serde_json::json!({"seq": 1, "result": "designed"}),
+        )
+        .unwrap();
+    codex.shutdown();
+
+    let exported = sandbox.run(&["plan", "export"]);
+    assert!(exported.contains("plan = \"project\""), "{exported}");
+    // Plan names survive; the hand-filed task is named from its title.
+    assert!(exported.contains("name = \"repos\""), "{exported}");
+    assert!(exported.contains("name = \"ship-it-v0-1\""), "{exported}");
+    assert!(exported.contains("#   ship-it-v0-1 was #6"), "{exported}");
+    assert!(exported.contains("needs = [\"notes\"]"), "{exported}");
+    assert!(exported.contains("requires = [\"network\"]"), "{exported}");
+    assert!(exported.contains("review = true"), "{exported}");
+    assert!(exported.contains("priority = 2"), "{exported}");
+    assert!(exported.contains("paths = [\"src/repo/**\"]"), "{exported}");
+    // #1 is done, so it is out — and the dependency on it is dropped out
+    // loud rather than left dangling.
+    assert!(!exported.contains("name = \"schema\""), "{exported}");
+    assert!(
+        exported.contains("# dropped: repos waited for #1"),
+        "{exported}"
+    );
+    assert!(
+        sandbox
+            .run(&["plan", "export", "--all"])
+            .contains("name = \"schema\""),
+        "--all brings the finished task back"
+    );
+
+    // Only one plan's tasks, under that plan's name.
+    let only = sandbox.run(&["plan", "export", "--plan", "serde-migration"]);
+    assert!(only.contains("plan = \"serde-migration\""), "{only}");
+    assert!(!only.contains("ship-it"), "{only}");
+
+    // The round trip: what came out goes back in, as a new plan, whole.
+    sandbox.write_file("again.toml", &exported);
+    let preview = sandbox.run(&["plan", "apply", "again.toml", "--dry-run"]);
+    assert!(preview.contains("5 tasks"), "{preview}");
+    let filed = sandbox.run(&["plan", "apply", "again.toml"]);
+    assert!(filed.contains("filed"), "{filed}");
+    let shown = sandbox.run(&["show", "11"]);
+    assert!(shown.contains("Ship it: v0.1!"), "{shown}");
+    assert!(shown.contains("requires  network"), "{shown}");
+
+    let empty = Sandbox::new();
+    assert!(
+        empty
+            .run(&["plan", "export"])
+            .contains("no unfinished tasks to export"),
+        "an empty board says so"
+    );
+}
+
+/// The dependency graph, drawn for a renderer: waves as clusters, edges
+/// pointing the way work flows, finished ground dashed in only where
+/// something live still stands on it.
+#[test]
+fn graph_renders_dot_and_mermaid_with_waves_and_edges() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["add", "design the schema"]);
+    sandbox.run(&["add", "port the repos", "--needs", "1"]);
+    sandbox.run(&["add", "write the notes", "--needs", "2"]);
+    sandbox.run(&["add", "old finished thing"]);
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex.claim(1);
+    codex
+        .call(
+            "task_complete",
+            serde_json::json!({"seq": 1, "result": "designed"}),
+        )
+        .unwrap();
+    codex.claim(4);
+    codex
+        .call(
+            "task_complete",
+            serde_json::json!({"seq": 4, "result": "done long ago"}),
+        )
+        .unwrap();
+    codex.claim(2);
+
+    let dot = sandbox.run(&["graph", "--dot"]);
+    assert!(dot.starts_with("digraph hird {"), "{dot}");
+    assert!(dot.contains("subgraph cluster_wave1 {"), "{dot}");
+    assert!(dot.contains("subgraph cluster_wave2 {"), "{dot}");
+    assert!(dot.contains("t1 -> t2;"), "{dot}");
+    assert!(dot.contains("t2 -> t3;"), "{dot}");
+    // The held task names its holder; the finished ground is dashed; the
+    // finished task nothing waits on is not drawn at all.
+    assert!(
+        dot.contains("#2 port the repos\\nclaimed · codex:"),
+        "{dot}"
+    );
+    assert!(
+        dot.contains("t1 [label=\"#1 design the schema\\ndone\""),
+        "{dot}"
+    );
+    assert!(dot.contains("dashed"), "{dot}");
+    assert!(!dot.contains("old finished thing"), "{dot}");
+
+    let mermaid = sandbox.run(&["graph", "--mermaid"]);
+    assert!(mermaid.starts_with("flowchart LR"), "{mermaid}");
+    assert!(mermaid.contains("subgraph wave1 [\"wave 1\"]"), "{mermaid}");
+    assert!(mermaid.contains("t1 --> t2"), "{mermaid}");
+    assert!(mermaid.contains("<br/>claimed · codex:"), "{mermaid}");
+    assert!(mermaid.contains("style t1 fill:"), "{mermaid}");
+
+    let err = sandbox.run_failing(&["graph", "--dot", "--mermaid"]);
+    assert!(err.contains("cannot be used with"), "{err}");
+    codex.shutdown();
+}
+
+/// A file's side of the story: who said they would be in it, whose hands the
+/// witness actually saw there — round by round — and what the memory says
+/// about it, with whether that still stands.
+#[test]
+fn blame_tells_a_files_story_across_rounds_and_memory() {
+    let sandbox = Sandbox::new();
+    sandbox.git_init();
+    sandbox.run(&["add", "port the loader", "--path", "src/config.rs"]);
+    sandbox.run(&["add", "audit everything", "--path", "src/**"]);
+
+    // Round one: codex writes, then hands the task back.
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex.claim(1);
+    sandbox.write_file("src/config.rs", "// codex started\n");
+    codex
+        .call(
+            "task_release",
+            serde_json::json!({"seq": 1, "reason": "out of time"}),
+        )
+        .unwrap();
+    codex.shutdown();
+
+    // Round two: claude finishes it, and records what it learned there.
+    let mut claude = McpSession::start(&sandbox, "claude-code");
+    claude.claim(1);
+    sandbox.write_file("src/config.rs", "// claude finished\n");
+    claude
+        .call(
+            "mem_store",
+            serde_json::json!({
+                "content": "the loader reads config.rs top to bottom",
+                "task": 1,
+                "paths": ["src/config.rs"]
+            }),
+        )
+        .unwrap();
+    claude
+        .call(
+            "task_complete",
+            serde_json::json!({"seq": 1, "result": "ported"}),
+        )
+        .unwrap();
+    claude.shutdown();
+
+    let blamed = sandbox.run(&["blame", "src/config.rs"]);
+    assert!(blamed.starts_with("src/config.rs\n"), "{blamed}");
+    assert!(blamed.contains("declared by"), "{blamed}");
+    assert!(blamed.contains("port the loader"), "{blamed}");
+    assert!(blamed.contains("via src/config.rs"), "{blamed}");
+    // A glob that covers the file counts as declaring it.
+    assert!(blamed.contains("audit everything"), "{blamed}");
+    assert!(blamed.contains("via src/**"), "{blamed}");
+    assert!(blamed.contains("changed under"), "{blamed}");
+    assert!(blamed.contains("round 1, codex:"), "{blamed}");
+    assert!(blamed.contains("modified"), "{blamed}");
+    assert!(blamed.contains("on record"), "{blamed}");
+    assert!(
+        blamed.contains("the loader reads config.rs top to bottom"),
+        "{blamed}"
+    );
+    assert!(blamed.contains("firm; claude-code:"), "{blamed}");
+
+    // The ground moves; the fact is now shaky, and blame says so.
+    sandbox.write_file("src/config.rs", "// rewritten by hand\n");
+    let again = sandbox.run(&["blame", "./src/config.rs"]);
+    assert!(again.contains("shaky; claude-code:"), "{again}");
+
+    let nothing = sandbox.run(&["blame", "docs/nowhere.md"]);
+    assert!(nothing.contains("nothing on record"), "{nothing}");
+}
+
+/// The trail, folded into what a person coming back wants to know — and a
+/// bookmark that moves when they read it, so the next digest starts here.
+#[test]
+fn digest_folds_the_trail_since_the_bookmark_and_moves_it() {
+    let sandbox = Sandbox::new();
+    sandbox.git_init();
+    sandbox.run(&[
+        "add",
+        "port the loader",
+        "--review",
+        "--path",
+        "src/config.rs",
+    ]);
+    sandbox.run(&["add", "pick a port"]);
+    sandbox.run(&["add", "sit there"]);
+
+    let first = sandbox.run(&["digest"]);
+    assert!(
+        first.contains("on 3 tasks since the board began"),
+        "{first}"
+    );
+    assert!(first.contains("filed\n  #1 port the loader"), "{first}");
+    // Read once, and the bookmark has moved.
+    let quiet = sandbox.run(&["digest"]);
+    assert!(
+        quiet.contains("nothing has happened since you last looked"),
+        "{quiet}"
+    );
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex.claim(1);
+    sandbox.write_file("src/config.rs", "// ported\n");
+    codex
+        .call(
+            "task_complete",
+            serde_json::json!({"seq": 1, "result": "ported the loader"}),
+        )
+        .unwrap();
+    codex.claim(2);
+    codex
+        .call(
+            "task_release",
+            serde_json::json!({
+                "seq": 2,
+                "reason": "cannot decide alone",
+                "question": "Which port should it bind?"
+            }),
+        )
+        .unwrap();
+    codex.shutdown();
+    let mut claude = McpSession::start(&sandbox, "claude-code");
+    claude.claim(4);
+    claude
+        .call(
+            "task_complete",
+            serde_json::json!({
+                "seq": 4,
+                "result": "misses the empty case",
+                "verdict": "sent_back"
+            }),
+        )
+        .unwrap();
+    claude.shutdown();
+
+    // A window, asked without moving the bookmark.
+    let peeked = sandbox.run(&["digest", "--peek"]);
+    assert!(peeked.contains("since you last looked"), "{peeked}");
+    assert!(
+        peeked.contains("sent back\n  #1 port the loader\n      misses the empty case"),
+        "{peeked}"
+    );
+    assert!(!peeked.contains("finished\n  #1"), "{peeked}");
+    assert!(
+        peeked.contains("finished\n  #4 Review: port the loader"),
+        "{peeked}"
+    );
+    assert!(
+        peeked.contains("waiting on you\n  #2 pick a port\n      Which port should it bind?\n      hird answer 2 <ANSWER>"),
+        "{peeked}"
+    );
+    assert!(!peeked.contains("sit there"), "{peeked}");
+    // --peek left the bookmark alone: the same digest reads again.
+    let read = sandbox.run(&["digest"]);
+    assert!(read.contains("sent back\n  #1 port the loader"), "{read}");
+    // And now it has moved.
+    assert!(
+        sandbox
+            .run(&["digest"])
+            .contains("nothing has happened since you last looked"),
+        "the read moved the bookmark"
+    );
+    // A window reads the past without touching the bookmark either.
+    let window = sandbox.run(&["digest", "--since", "1h"]);
+    assert!(window.contains("since"), "{window}");
+    assert!(
+        window.contains("waiting on you\n  #2 pick a port"),
+        "{window}"
+    );
+    assert!(
+        sandbox
+            .run(&["digest"])
+            .contains("nothing has happened since you last looked"),
+        "--since is a question, not a read"
+    );
+    let err = sandbox.run_failing(&["digest", "--since", "yesterday"]);
+    assert!(err.contains("wants a moment"), "{err}");
+}
+
+/// The claim brief on paper: for a session that cannot reach the queue.
+#[test]
+fn handoff_writes_the_claim_brief_as_markdown() {
+    let sandbox = Sandbox::new();
+    sandbox.git_init();
+    sandbox.run(&["add", "design the schema"]);
+    sandbox.run(&[
+        "add",
+        "port the loader",
+        "--needs",
+        "1",
+        "--path",
+        "src/config.rs",
+        "--priority",
+        "2",
+        "--requires",
+        "network",
+        "--body",
+        "Keep the env precedence.",
+    ]);
+    sandbox.run(&["add", "write the notes", "--needs", "2"]);
+    sandbox.run(&[
+        "mem",
+        "add",
+        "the loader reads config.rs top to bottom",
+        "--path",
+        "src/config.rs",
+    ]);
+
+    let mut codex = McpSession::start_capable(&sandbox, "codex", "network");
+    codex.claim(1);
+    codex
+        .call(
+            "task_complete",
+            serde_json::json!({"seq": 1, "result": "three tables, one index"}),
+        )
+        .unwrap();
+    codex.claim(2);
+    sandbox.write_file("src/config.rs", "// started\n");
+    codex
+        .call(
+            "task_release",
+            serde_json::json!({
+                "seq": 2,
+                "reason": "needs a decision",
+                "question": "Keep the legacy format?"
+            }),
+        )
+        .unwrap();
+    codex.shutdown();
+    sandbox.run(&["answer", "2", "Yes, keep it."]);
+
+    let brief = sandbox.run(&["handoff", "2"]);
+    assert!(brief.starts_with("# Task #2: port the loader\n"), "{brief}");
+    assert!(brief.contains("**status** open"), "{brief}");
+    assert!(brief.contains("**priority** 2"), "{brief}");
+    assert!(brief.contains("**requires** network"), "{brief}");
+    assert!(
+        brief.contains("## Instructions\n\nKeep the env precedence."),
+        "{brief}"
+    );
+    assert!(
+        brief.contains("## Builds on\n\n- **#1 design the schema**"),
+        "{brief}"
+    );
+    assert!(brief.contains("three tables, one index"), "{brief}");
+    assert!(
+        brief.contains("## Questions\n\n- **Q** Keep the legacy format?\n  **A** Yes, keep it."),
+        "{brief}"
+    );
+    assert!(
+        brief.contains("## Files\n\nDeclared:\n- `src/config.rs`"),
+        "{brief}"
+    );
+    assert!(brief.contains("Already moved under this task"), "{brief}");
+    assert!(brief.contains("- `src/config.rs` (modified)"), "{brief}");
+    assert!(
+        brief
+            .contains("## What earlier work learned\n\n- the loader reads config.rs top to bottom"),
+        "{brief}"
+    );
+    assert!(brief.contains("## Reporting back"), "{brief}");
+    assert!(brief.contains("`task_complete 2`"), "{brief}");
+    assert!(!brief.contains("## Still waiting for"), "{brief}");
+
+    // A blocked task says what it waits for, and an unanswered question how
+    // to answer it.
+    let blocked = sandbox.run(&["handoff", "3"]);
+    assert!(
+        blocked.contains("## Still waiting for\n\n- #2 port the loader (open)"),
+        "{blocked}"
+    );
+    assert!(blocked.contains("_No body beyond the title._"), "{blocked}");
+
+    let err = sandbox.run_failing(&["handoff", "42"]);
+    assert!(err.contains("task 42 not found"), "{err}");
+}

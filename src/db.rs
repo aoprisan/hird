@@ -10,8 +10,8 @@ use rusqlite::Connection;
 
 use crate::error::Result;
 use crate::repo::{
-    Deps, Events, Footings, Memory, Plans, Questions, Recall, Recesses, Recusals, Requirements,
-    Scopes, Tasks, Verdicts, Witnessed,
+    Bookmarks, Deps, Events, Footings, Memory, Plans, Questions, Recall, Recesses, Recusals,
+    Requirements, Scopes, Tasks, Verdicts, Witnessed,
 };
 
 /// Numbered migrations, applied in order and recorded in `meta.schema_version`.
@@ -354,6 +354,11 @@ impl Db {
     #[cfg(test)]
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn
+    }
+
+    /// Where a human reader last looked at the trail.
+    pub fn bookmarks(&self) -> Bookmarks<'_> {
+        Bookmarks::new(&self.conn)
     }
 
     /// Task and task-event repository.

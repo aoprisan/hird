@@ -17,6 +17,8 @@
 //! queue's version, and [`Applied::drifted`] says so rather than letting the
 //! difference pass unmentioned.
 
+use std::collections::BTreeMap;
+
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use super::deps::{dependency_path, id_for_seq};
@@ -227,6 +229,20 @@ impl<'a> Plans<'a> {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Every task in `project` that came from a plan, as seq → (plan, node).
+    /// One query, for readers that want to name a whole board.
+    pub fn origins(&self, project: &str) -> Result<BTreeMap<i64, (String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.seq, n.plan, n.node FROM task_plan_nodes n
+             JOIN tasks t ON t.id = n.task_id
+             WHERE n.project = ?1",
+        )?;
+        let rows = stmt.query_map([project], |row| {
+            Ok((row.get::<_, i64>(0)?, (row.get(1)?, row.get(2)?)))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<BTreeMap<_, _>>>()?)
     }
 
     /// The plan and node name a task was filed under, if it came from a plan.

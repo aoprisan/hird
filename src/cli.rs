@@ -74,6 +74,44 @@ pub enum Command {
     /// show` says everything about a task; this answers the one question a
     /// silent queue raises — why is nobody getting this handed to them?
     Why { seq: i64 },
+    /// The history of one file across the queue: who declared it, whose
+    /// hands the witness saw in it, and what the memory says about it.
+    ///
+    /// `hird show` answers for a task; this answers for a file — the question
+    /// a reader asks before editing something the swarm has been through.
+    /// Every line comes from what is already recorded: declared scopes,
+    /// witnessed changes across every round a task was held, and the
+    /// assertions anchored there, with whether they still stand.
+    Blame {
+        /// Project-relative path, as `hird show` lists it.
+        path: String,
+    },
+    /// What happened on the board since you last looked, folded into news.
+    ///
+    /// The trail says everything; this says the difference. Reading it moves
+    /// the bookmark, so the next digest starts where this one ended — unless
+    /// `--peek` says not to. `--since` reads a window instead, and leaves the
+    /// bookmark alone.
+    Digest {
+        /// From this moment instead of the bookmark: an RFC3339 UTC instant,
+        /// prefixes welcome ("2026-08-14"), or how long ago ("90m", "2h").
+        #[arg(long, value_name = "WHEN")]
+        since: Option<String>,
+        /// Read without moving the bookmark.
+        #[arg(long)]
+        peek: bool,
+        #[command(flatten)]
+        scope: ScopeFilterArgs,
+    },
+    /// A brief for one task as Markdown: everything a claim would hand an
+    /// agent, on paper, for a session that cannot reach the queue.
+    ///
+    /// Instructions, the ground it builds on, questions and their answers,
+    /// declared files, what has already moved under it, the findings it was
+    /// sent back with, and what earlier work learned about the same files.
+    /// Paste it into a cloud harness, a fresh clone, or a session with no
+    /// MCP at all.
+    Handoff { seq: i64 },
     /// The diff of what moved under a task, from the versions the witness kept.
     Diff {
         seq: i64,
@@ -154,7 +192,7 @@ pub enum Command {
     Plan(PlanCommand),
     /// Print the queue as dispatch waves: what can be worked now, and what
     /// each later wave is waiting for.
-    Graph(ScopeFilterArgs),
+    Graph(GraphArgs),
     /// Show or set the files a task is expected to touch.
     Scope(ScopeArgs),
     /// Show or set the capabilities a claimant must advertise.
@@ -322,6 +360,30 @@ pub enum PlanCommand {
         #[arg(long, value_name = "PATH")]
         project: Option<PathBuf>,
     },
+    /// Write the board back out as a plan file: the round trip.
+    ///
+    /// Everything the queue stores about its unfinished tasks — titles,
+    /// bodies, priorities, files, capabilities, review marks and the
+    /// dependencies between them — as the TOML `hird plan apply` reads.
+    /// Tasks filed from a plan keep the names that plan gave them; the rest
+    /// are named from their titles. A dependency on a task the export leaves
+    /// out is dropped and said so in a comment, so what comes out always
+    /// files.
+    Export {
+        /// Only the tasks one plan filed, under that plan's name.
+        #[arg(long, value_name = "NAME")]
+        plan: Option<String>,
+        /// What to call the exported plan. Defaults to `--plan`, or to the
+        /// project directory's name.
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+        /// Include finished, failed and cancelled tasks too.
+        #[arg(long)]
+        all: bool,
+        /// Project root to export. Defaults to the current project.
+        #[arg(long, value_name = "PATH")]
+        project: Option<PathBuf>,
+    },
     /// Read a plan for trouble before filing it, and write nothing.
     ///
     /// Parsing is already the hard gate — cycles, dangling needs, bad globs
@@ -402,6 +464,19 @@ pub struct ScopeFilterArgs {
     /// Span every project rather than just the current one.
     #[arg(long)]
     pub all_projects: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct GraphArgs {
+    #[command(flatten)]
+    pub scope: ScopeFilterArgs,
+    /// Render as Graphviz DOT instead of waves — pipe it into `dot -Tsvg`.
+    #[arg(long, conflicts_with = "mermaid")]
+    pub dot: bool,
+    /// Render as a Mermaid flowchart instead of waves — paste it into a
+    /// README or a pull request.
+    #[arg(long)]
+    pub mermaid: bool,
 }
 
 #[derive(Debug, Args)]
@@ -624,7 +699,32 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
         Command::Mem(cmd) => mem(&db, &project, &config, cmd, out),
         Command::Dep(cmd) => dep(&db, &config, herald.as_ref(), cmd, out),
         Command::Plan(cmd) => plan_cmd(&db, &project, &config, herald.as_ref(), cmd, out),
-        Command::Graph(args) => graph(&db, &scope_of(&project, &config, args.all_projects), out),
+        Command::Graph(args) => {
+            let scope = scope_of(&project, &config, args.scope.all_projects);
+            if args.dot || args.mermaid {
+                graph_render(&db, &scope, args.mermaid, out)
+            } else {
+                graph(&db, &scope, out)
+            }
+        }
+        Command::Blame { path } => {
+            look(&db, &config, &project);
+            blame(&db, &config, &project, path, out)
+        }
+        Command::Digest { since, peek, scope } => {
+            look(&db, &config, &project);
+            digest_cmd(
+                &db,
+                &scope_of(&project, &config, scope.all_projects),
+                since.as_deref(),
+                *peek,
+                out,
+            )
+        }
+        Command::Handoff { seq } => {
+            look(&db, &config, &project);
+            handoff(&db, &config, *seq, out)
+        }
         Command::Scope(args) => scope_cmd(&db, args, out),
         Command::Require(args) => require_cmd(&db, args, out),
         Command::Agents(args) => {
@@ -981,6 +1081,18 @@ fn plan_cmd(
         PlanCommand::Apply { file, project, .. } | PlanCommand::Lint { file, project } => {
             (file, project)
         }
+        PlanCommand::Export {
+            plan: only,
+            name,
+            all,
+            project: explicit,
+        } => {
+            let project = match explicit {
+                Some(root) => identity::canonical_project(root),
+                None => project.to_string(),
+            };
+            return plan_export(db, &project, only.as_deref(), name.as_deref(), *all, out);
+        }
     };
     let source = read_text(file)?;
     let parsed =
@@ -993,6 +1105,7 @@ fn plan_cmd(
     let dry_run = match cmd {
         PlanCommand::Lint { .. } => return lint(db, &project, &parsed, out),
         PlanCommand::Apply { dry_run, .. } => *dry_run,
+        PlanCommand::Export { .. } => unreachable!("handled above"),
     };
     if dry_run {
         return preview(db, &project, &parsed, out);
@@ -1234,6 +1347,600 @@ fn mem_export(
             writeln!(out, "  — {}", notes.join("; "))?;
         }
     }
+    Ok(())
+}
+
+/// `hird plan export`: the board, written back down as the file that would
+/// file it.
+///
+/// Plans are data, and the queue is the same data with numbers instead of
+/// names; this is the direction `plan apply` does not go. What comes out is
+/// re-parsed before it is printed, so it is a plan the queue has already
+/// agreed to take.
+fn plan_export(
+    db: &Db,
+    project: &str,
+    only: Option<&str>,
+    name: Option<&str>,
+    all: bool,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
+    let scope = ProjectScope::Only(project.to_string());
+    let origins = db.plans().origins(project)?;
+    let mut tasks: Vec<TaskSummary> = db
+        .tasks()
+        .list(&scope, None)?
+        .into_iter()
+        .filter(|t| all || !t.status.is_terminal())
+        .filter(|t| match only {
+            Some(plan) => origins.get(&t.seq).is_some_and(|(p, _)| p == plan),
+            None => true,
+        })
+        .collect();
+    tasks.sort_by_key(|t| t.seq);
+    if tasks.is_empty() {
+        match only {
+            Some(plan) => writeln!(out, "# plan {plan:?} has filed nothing here to export")?,
+            None if all => writeln!(out, "# nothing filed in this project to export")?,
+            None => writeln!(
+                out,
+                "# no unfinished tasks to export; --all includes the finished ones"
+            )?,
+        }
+        return Ok(());
+    }
+
+    // Names: what the plan called it, else what the title says, and never two
+    // the same — a name that resolves to the wrong task is worse than an ugly
+    // one, so a clash gets its queue number.
+    let mut taken: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut names: BTreeMap<i64, String> = BTreeMap::new();
+    for task in &tasks {
+        let wanted = match origins.get(&task.seq) {
+            Some((plan, node)) if only.is_none_or(|p| p == plan) => node.clone(),
+            _ => slug(&task.title),
+        };
+        let name = if taken.insert(wanted.clone()) {
+            wanted
+        } else {
+            let numbered = format!("{wanted}-{}", task.seq);
+            taken.insert(numbered.clone());
+            numbered
+        };
+        names.insert(task.seq, name);
+    }
+
+    let mut dropped: Vec<String> = Vec::new();
+    let mut needs: BTreeMap<i64, Vec<String>> = BTreeMap::new();
+    for (task, on) in db.deps().edges(&scope)? {
+        let Some(from) = names.get(&task) else {
+            continue;
+        };
+        match names.get(&on) {
+            Some(to) => needs.entry(task).or_default().push(to.clone()),
+            None => dropped.push(format!("{from} waited for #{on}")),
+        }
+    }
+
+    let plan_name = name
+        .map(str::to_string)
+        .or_else(|| only.map(str::to_string))
+        .unwrap_or_else(|| {
+            Path::new(project)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| "board".to_string())
+        });
+    let mut exported = plan::Plan {
+        plan: plan_name,
+        tasks: Vec::new(),
+    };
+    for summary in &tasks {
+        let task = db.tasks().get(summary.seq)?;
+        exported.tasks.push(plan::PlanTask {
+            name: names[&task.seq].clone(),
+            title: task.title.clone(),
+            body: task.body.trim().to_string(),
+            priority: task.priority,
+            paths: db.scopes().for_task(task.seq)?,
+            requires: db.requirements().for_task(task.seq)?,
+            needs: needs.remove(&task.seq).unwrap_or_default(),
+            review: task.review,
+        });
+    }
+    let toml = exported.to_toml();
+    // The one guarantee this command makes is that its output files; the
+    // cheapest way to keep it is to read it back the way `apply` will.
+    plan::parse(&toml).context("the exported plan does not read back; this is a bug in hird")?;
+
+    writeln!(
+        out,
+        "# hird plan export, {}: {} from {project}",
+        Utc::now().format("%Y-%m-%d"),
+        count(tasks.len(), "task")
+    )?;
+    for (seq, name) in &names {
+        writeln!(out, "#   {name} was #{seq}")?;
+    }
+    for line in &dropped {
+        writeln!(out, "# dropped: {line}, which is not in this export")?;
+    }
+    writeln!(out)?;
+    write!(out, "{toml}")?;
+    Ok(())
+}
+
+/// A plan-file name out of a title: lowercase words joined by hyphens, cut
+/// to something a `needs` line can hold.
+fn slug(title: &str) -> String {
+    let mut name = String::new();
+    let mut gap = false;
+    for c in title.chars() {
+        if c.is_ascii_alphanumeric() {
+            if gap && !name.is_empty() {
+                name.push('-');
+            }
+            name.push(c.to_ascii_lowercase());
+            gap = false;
+        } else {
+            gap = true;
+        }
+    }
+    let cut: String = name.chars().take(40).collect();
+    let cut = cut.trim_end_matches('-').to_string();
+    if cut.is_empty() {
+        "task".to_string()
+    } else {
+        cut
+    }
+}
+
+/// `hird graph --dot` / `--mermaid`: the dependency graph for a renderer.
+///
+/// Waves become ranks, statuses become colours, and every edge points the
+/// way the work flows — from what must finish to what waits for it. Finished
+/// tasks appear only where something unfinished still waits on them, so a
+/// long-lived board does not render its whole history every time.
+fn graph_render(
+    db: &Db,
+    scope: &ProjectScope,
+    mermaid: bool,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
+    let tasks = db.tasks().list(scope, None)?;
+    let edges = db.deps().edges(scope)?;
+    let waves = dispatch_waves(&tasks, &edges);
+    let by_seq: BTreeMap<i64, &TaskSummary> = tasks.iter().map(|t| (t.seq, t)).collect();
+    let pending: std::collections::BTreeSet<i64> = waves.iter().flatten().copied().collect();
+    // A finished task earns a node only as the ground under something live.
+    let shown: std::collections::BTreeSet<i64> = pending
+        .iter()
+        .copied()
+        .chain(
+            edges
+                .iter()
+                .filter(|(t, _)| pending.contains(t))
+                .map(|(_, on)| *on),
+        )
+        .collect();
+    let drawn: Vec<&(i64, i64)> = edges
+        .iter()
+        .filter(|(t, on)| shown.contains(t) && shown.contains(on))
+        .collect();
+
+    let label = |t: &TaskSummary| {
+        let title = fmt::truncate(&t.title, 40).replace('"', "'");
+        match &t.claimed_by {
+            Some(holder) => format!("#{} {title}\\n{} · {holder}", t.seq, t.status),
+            None => format!("#{} {title}\\n{}", t.seq, t.status),
+        }
+    };
+
+    if mermaid {
+        writeln!(out, "flowchart LR")?;
+        for (index, wave) in waves.iter().enumerate() {
+            writeln!(out, "  subgraph wave{} [\"wave {}\"]", index + 1, index + 1)?;
+            for seq in wave {
+                if let Some(t) = by_seq.get(seq) {
+                    writeln!(out, "    t{seq}[\"{}\"]", label(t).replace("\\n", "<br/>"))?;
+                }
+            }
+            writeln!(out, "  end")?;
+        }
+        for seq in shown.difference(&pending) {
+            if let Some(t) = by_seq.get(seq) {
+                writeln!(out, "  t{seq}([\"{}\"])", label(t).replace("\\n", "<br/>"))?;
+            }
+        }
+        for (task, on) in drawn {
+            writeln!(out, "  t{on} --> t{task}")?;
+        }
+        for seq in &shown {
+            if let Some(t) = by_seq.get(seq) {
+                writeln!(
+                    out,
+                    "  style t{seq} fill:{},stroke:#555",
+                    status_colour(t.status)
+                )?;
+            }
+        }
+        return Ok(());
+    }
+
+    writeln!(out, "digraph hird {{")?;
+    writeln!(out, "  rankdir=LR;")?;
+    writeln!(
+        out,
+        "  node [shape=box, style=\"rounded,filled\", fontname=\"Helvetica\"];"
+    )?;
+    for (index, wave) in waves.iter().enumerate() {
+        writeln!(out, "  subgraph cluster_wave{} {{", index + 1)?;
+        writeln!(out, "    label=\"wave {}\"; color=\"#999999\";", index + 1)?;
+        for seq in wave {
+            if let Some(t) = by_seq.get(seq) {
+                writeln!(
+                    out,
+                    "    t{seq} [label=\"{}\", fillcolor=\"{}\"];",
+                    label(t),
+                    status_colour(t.status)
+                )?;
+            }
+        }
+        writeln!(out, "  }}")?;
+    }
+    for seq in shown.difference(&pending) {
+        if let Some(t) = by_seq.get(seq) {
+            writeln!(
+                out,
+                "  t{seq} [label=\"{}\", fillcolor=\"{}\", style=\"rounded,filled,dashed\"];",
+                label(t),
+                status_colour(t.status)
+            )?;
+        }
+    }
+    for (task, on) in drawn {
+        writeln!(out, "  t{on} -> t{task};")?;
+    }
+    writeln!(out, "}}")?;
+    Ok(())
+}
+
+fn status_colour(status: Status) -> &'static str {
+    match status {
+        Status::Open => "#ffffff",
+        Status::Claimed => "#fff3b0",
+        Status::InProgress => "#ffe066",
+        Status::Done => "#c7f0c2",
+        Status::Failed => "#f5b7b1",
+        Status::Cancelled => "#dddddd",
+    }
+}
+
+/// `hird blame`: one file's history across the queue.
+fn blame(
+    db: &Db,
+    config: &Config,
+    project: &str,
+    raw: &str,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
+    let path = raw.trim().trim_start_matches("./").trim_end_matches('/');
+    if path.is_empty() {
+        anyhow::bail!("blame wants a project-relative path, as `hird show` lists them");
+    }
+    let now = Utc::now();
+    let scope = ProjectScope::Only(project.to_string());
+    let mut lines = 0usize;
+
+    writeln!(out, "{path}")?;
+
+    // Intent: every task that said it would be here, live ones first.
+    let declared: Vec<_> = db
+        .scopes()
+        .declared(&scope, false)?
+        .into_iter()
+        .filter_map(|task| {
+            let via: Vec<&str> = task
+                .patterns
+                .iter()
+                .filter(|p| glob::matches(p, path))
+                .map(String::as_str)
+                .collect();
+            (!via.is_empty()).then(|| {
+                let holder = task
+                    .holder
+                    .as_deref()
+                    .map(|h| format!(", {h}"))
+                    .unwrap_or_default();
+                format!(
+                    "  #{:<4} {:<12} {}{holder}   via {}",
+                    task.seq,
+                    task.status,
+                    fmt::truncate(&task.title, 40),
+                    via.join(", ")
+                )
+            })
+        })
+        .collect();
+    if !declared.is_empty() {
+        writeln!(out, "declared by")?;
+        for line in &declared {
+            writeln!(out, "{line}")?;
+        }
+        lines += declared.len();
+    }
+
+    // Reality: every hand the witness saw in it, oldest first.
+    let touches = db.witnessed().history_of(project, path)?;
+    if !touches.is_empty() {
+        writeln!(out, "changed under")?;
+        for touch in &touches {
+            let round = match touch.round {
+                Some(n) => format!(" round {n}"),
+                None => String::new(),
+            };
+            let holder = touch
+                .holder
+                .as_deref()
+                .map(|h| format!(", {h}"))
+                .unwrap_or_default();
+            writeln!(
+                out,
+                "  #{:<4} {:<12} {}{round}{holder}   {}, {}",
+                touch.seq,
+                touch.status,
+                fmt::truncate(&touch.title, 40),
+                touch.kind,
+                fmt::age_phrase(&touch.last_seen, now)
+            )?;
+        }
+        lines += touches.len();
+    }
+
+    // Memory: what was learned here, and whether the ground still holds it.
+    let anchored = db.footings().anchored_to(project, path)?;
+    if !anchored.is_empty() {
+        let discovered = config.witness(Path::new(project));
+        let ids: Vec<String> = anchored.iter().map(|(a, _)| a.id.clone()).collect();
+        let standings = footing::standings(db, config.footing(discovered.as_ref()), project, &ids);
+        writeln!(out, "on record")?;
+        for (fact, anchor) in &anchored {
+            let standing = standings
+                .get(&fact.id)
+                .map(|s| s.as_str())
+                .unwrap_or("unchecked");
+            writeln!(out, "  - {}", fmt::truncate(&fact.content, 88))?;
+            writeln!(
+                out,
+                "    {standing}; {} recorded it {}",
+                fact.actor,
+                fmt::age_phrase(&anchor.at, now)
+            )?;
+        }
+        lines += anchored.len();
+    }
+
+    if lines == 0 {
+        writeln!(
+            out,
+            "  nothing on record: no task declared it, the witness never saw it move, \
+             and no assertion is anchored to it"
+        )?;
+    }
+    Ok(())
+}
+
+/// `hird digest`: the trail since the bookmark, as news.
+fn digest_cmd(
+    db: &Db,
+    scope: &ProjectScope,
+    since: Option<&str>,
+    peek: bool,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
+    const BOOKMARK: &str = "digest";
+    let now = Utc::now();
+    let filter = crate::repo::FeedFilter::default();
+    // A bookmark is per project; the every-project view has none, and reads
+    // from a window or from the start.
+    let mark = match scope {
+        ProjectScope::Only(project) => Some(project.as_str()),
+        _ => None,
+    };
+    let (events, window) = match since {
+        Some(raw) => {
+            let cutoff = parse_when(raw, now)?;
+            let events = db.events().after(scope, &filter, &cutoff)?;
+            (events, format!("since {}", fmt::age_phrase(&cutoff, now)))
+        }
+        None => {
+            let cursor = match mark {
+                Some(project) => db.bookmarks().get(BOOKMARK, project)?,
+                None => None,
+            };
+            let events = db.events().since(scope, &filter, cursor.unwrap_or(0))?;
+            let window = match (cursor, events.first()) {
+                (Some(_), Some(first)) => {
+                    format!("since you last looked, {}", fmt::age_phrase(&first.at, now))
+                }
+                (Some(_), None) => "since you last looked".to_string(),
+                (None, _) => "since the board began".to_string(),
+            };
+            (events, window)
+        }
+    };
+
+    let digest = crate::digest::fold(&events);
+    if events.is_empty() {
+        writeln!(out, "nothing has happened {window}")?;
+    } else {
+        writeln!(
+            out,
+            "{} on {} {window}",
+            count(digest.events, "event"),
+            count(digest.tasks.len(), "task")
+        )?;
+        for section in digest.render(scope.is_all()) {
+            writeln!(out, "\n{section}")?;
+        }
+    }
+    // The bookmark moves on a plain read and stays put on a window or a
+    // peek, so `hird digest --since 2h` is a question and `hird digest` is
+    // the act of catching up.
+    if let (Some(project), None, false, Some(cursor)) = (mark, since, peek, digest.cursor) {
+        db.bookmarks().set(BOOKMARK, project, cursor)?;
+    }
+    Ok(())
+}
+
+/// `hird handoff`: the claim brief, as a document.
+fn handoff(db: &Db, config: &Config, seq: i64, out: &mut impl Write) -> anyhow::Result<()> {
+    let task = db.tasks().get(seq)?;
+    let now = Utc::now();
+    writeln!(out, "# Task #{}: {}", task.seq, task.title)?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "<!-- hird handoff, {}. Everything the queue would hand an agent on\n\
+         claiming this task. Report back through any harness registered with\n\
+         hird, or hand the result to whoever can. -->",
+        now.format("%Y-%m-%d")
+    )?;
+    writeln!(out)?;
+    let mut facts: Vec<String> = vec![format!("**status** {}", task.status)];
+    if let Some(holder) = &task.claimed_by {
+        facts.push(format!("**held by** {holder}"));
+    }
+    if task.priority != 0 {
+        facts.push(format!("**priority** {}", task.priority));
+    }
+    let requires = db.requirements().for_task(seq)?;
+    if !requires.is_empty() {
+        facts.push(format!("**requires** {}", requires.join(", ")));
+    }
+    if task.review {
+        facts.push("**review** on finishing, by another harness".to_string());
+    }
+    for recusal in db.recusals().for_task(seq)? {
+        facts.push(format!("**recused** {}", recusal.describe()));
+    }
+    writeln!(out, "{}", facts.join("  \n"))?;
+
+    writeln!(out, "\n## Instructions\n")?;
+    if task.body.trim().is_empty() {
+        writeln!(out, "_No body beyond the title._")?;
+    } else {
+        writeln!(out, "{}", task.body.trim())?;
+    }
+
+    let (blockers, _) = db.tasks().readiness(seq, config.clearance())?;
+    if !blockers.is_empty() {
+        writeln!(out, "\n## Still waiting for\n")?;
+        for b in &blockers {
+            match b.pending_review {
+                Some(review) if b.status == Status::Done => writeln!(
+                    out,
+                    "- #{} {} (done, under review {review})",
+                    b.seq, b.title
+                )?,
+                _ => writeln!(out, "- #{} {} ({})", b.seq, b.title, b.status)?,
+            }
+        }
+    }
+    let ground = db.deps().ground(seq)?;
+    if !ground.is_empty() {
+        writeln!(out, "\n## Builds on\n")?;
+        for g in &ground {
+            writeln!(
+                out,
+                "- **#{} {}** — {}",
+                g.seq,
+                g.title,
+                g.standing.describe()
+            )?;
+            if let Some(result) = g.result.as_deref().filter(|r| !r.trim().is_empty()) {
+                writeln!(out, "  {}", result.trim().replace('\n', "\n  "))?;
+            }
+        }
+    }
+
+    let questions = db.questions().for_task(seq)?;
+    if !questions.is_empty() {
+        writeln!(out, "\n## Questions\n")?;
+        for q in &questions {
+            writeln!(out, "- **Q** {}", q.question.trim())?;
+            match &q.answer {
+                Some(a) => writeln!(out, "  **A** {}", a.trim())?,
+                None => writeln!(out, "  _unanswered — `hird answer {seq} <ANSWER>`_")?,
+            }
+        }
+    }
+
+    let judged = db.verdicts().for_task(seq)?;
+    if let Some(latest) = judged.last() {
+        writeln!(out, "\n## Verdict\n")?;
+        writeln!(out, "{}", latest.describe())?;
+    }
+
+    let patterns = db.scopes().for_task(seq)?;
+    let touched = db.witnessed().touched(seq).unwrap_or_default();
+    if !patterns.is_empty() || !touched.is_empty() {
+        writeln!(out, "\n## Files\n")?;
+        if !patterns.is_empty() {
+            writeln!(out, "Declared:")?;
+            for p in &patterns {
+                writeln!(out, "- `{p}`")?;
+            }
+        }
+        if !touched.is_empty() {
+            let footprint = db.witnessed().footprint(seq).unwrap_or_default();
+            match footprint.describe(task.status.is_active()) {
+                Some(sentence) => writeln!(out, "\nAlready moved under this task ({sentence}):")?,
+                None => writeln!(out, "\nAlready moved under this task:")?,
+            }
+            for o in &touched {
+                writeln!(out, "- `{}` ({})", o.path, o.kind)?;
+            }
+        }
+        for c in db.witnessed().contention(seq).unwrap_or_default() {
+            writeln!(out, "\n> {}", c.describe())?;
+        }
+    }
+
+    let discovered = config.witness(Path::new(&task.project));
+    let recalled = footing::decorate(
+        db,
+        config.footing(discovered.as_ref()),
+        db.recall().for_task(seq, config.recall_limit())?,
+    );
+    if !recalled.is_empty() {
+        writeln!(out, "\n## What earlier work learned\n")?;
+        for item in &recalled {
+            writeln!(out, "- {}", item.assertion.content.trim())?;
+            let mut notes = vec![item.reason.describe()];
+            if let Some(why) = item
+                .standing
+                .as_ref()
+                .filter(|s| s.needs_checking())
+                .and_then(Standing::describe)
+            {
+                notes.push(format!("re-check: {why}"));
+            }
+            if let Some(voices) = &item.corroboration {
+                notes.push(voices.clone());
+            }
+            writeln!(out, "  — {}", notes.join("; "))?;
+        }
+    }
+
+    writeln!(out, "\n## Reporting back\n")?;
+    writeln!(
+        out,
+        "Through a harness that has hird: `task_claim {seq}`, then `task_complete {seq}` \
+         with a result, or `task_release {seq}` with a question. Facts worth keeping go in \
+         with `mem_store`, naming the files they were read off."
+    )?;
     Ok(())
 }
 

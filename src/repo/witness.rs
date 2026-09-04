@@ -33,6 +33,27 @@ use crate::glob;
 use crate::model::{now_ts, Contention, EventKind, Footprint, Observed, Status, WitnessedTask};
 use crate::witness::{Change, Tree};
 
+/// One hand that was in a file: a task, in one of its rounds, and what the
+/// witness saw it do there. What `hird blame` is made of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileTouch {
+    pub seq: i64,
+    pub title: String,
+    pub status: Status,
+    /// Who held the task while this was seen. For the current record, the
+    /// present holder (none once the task is finished); for an archived
+    /// round, whoever held that round.
+    pub holder: Option<String>,
+    /// `None` for the task's current record; `Some(n)` for archived round
+    /// `n`, as `hird show` numbers the rounds.
+    pub round: Option<i64>,
+    /// added, modified or deleted.
+    pub kind: String,
+    pub hash: String,
+    pub first_seen: String,
+    pub last_seen: String,
+}
+
 /// A live task and the tree it is measured against.
 #[derive(Debug, Clone)]
 pub struct Baseline {
@@ -579,6 +600,59 @@ impl<'a> Witnessed<'a> {
                 },
             )
             .optional()?)
+    }
+
+    /// Everything the witness ever saw happen to one file, across tasks and
+    /// across rounds: the current record of every task that touched it, and
+    /// every archived holding that did.
+    ///
+    /// This is the file's side of the story. `touched` answers "what did this
+    /// task change?"; this answers "who has been in this file?", which is the
+    /// question a reader asks before editing something the swarm has been
+    /// through. Newest last, so the bottom of the list is the latest hand.
+    pub fn history_of(&self, project: &str, path: &str) -> Result<Vec<FileTouch>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.seq, t.title, t.status, t.claimed_by, NULL, NULL,
+                    c.kind, c.hash, c.first_seen, c.last_seen
+             FROM task_changes c JOIN tasks t ON t.id = c.task_id
+             WHERE t.project = ?1 AND c.path = ?2
+             UNION ALL
+             SELECT t.seq, t.title, t.status, t.claimed_by, r.n, r.holder,
+                    c.kind, c.hash, c.first_seen, c.last_seen
+             FROM tenure_changes c
+             JOIN task_tenures r ON r.id = c.tenure_id
+             JOIN tasks t ON t.id = r.task_id
+             WHERE t.project = ?1 AND c.path = ?2
+             ORDER BY 10 ASC, 1 ASC",
+        )?;
+        let rows = stmt.query_map(params![project, path], |row| {
+            let raw: String = row.get(2)?;
+            let status: Status = raw.parse().map_err(|e: crate::model::UnknownStatus| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    2,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?;
+            let round: Option<i64> = row.get(4)?;
+            let archived_holder: Option<String> = row.get(5)?;
+            let current_holder: Option<String> = row.get(3)?;
+            Ok(FileTouch {
+                seq: row.get(0)?,
+                title: row.get(1)?,
+                status,
+                holder: match round {
+                    Some(_) => archived_holder.filter(|h| !h.is_empty()),
+                    None => current_holder,
+                },
+                round,
+                kind: row.get(6)?,
+                hash: row.get(7)?,
+                first_seen: row.get(8)?,
+                last_seen: row.get(9)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Every task in `scope` the witness has something on, newest first.

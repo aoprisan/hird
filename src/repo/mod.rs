@@ -3,6 +3,7 @@
 //! The MCP, CLI and TUI layers call these methods and never write SQL of their
 //! own — see the quality bar in DESIGN.md §11.
 
+mod bookmark;
 mod deps;
 mod events;
 pub(crate) mod footing;
@@ -18,6 +19,7 @@ mod tasks;
 mod verdict;
 mod witness;
 
+pub use bookmark::Bookmarks;
 pub use deps::{dispatch_waves, Claimable, Deps};
 pub use events::{Events, FeedEvent, FeedFilter, ReplayedTask};
 pub use footing::Footings;
@@ -31,7 +33,7 @@ pub use requirements::Requirements;
 pub use scope::{OnConflict, Scopes};
 pub use tasks::{Claim, Dispatch, Finished, Subtask, SweepOutcome, Tasks};
 pub use verdict::{Delivered, Verdicts};
-pub use witness::{Baseline, Witnessed};
+pub use witness::{Baseline, FileTouch, Witnessed};
 
 /// Pattern validation, shared with the plan format so a plan file is refused
 /// for exactly the reasons a declaration would be.
