@@ -1,7 +1,8 @@
-//! `hird` — one binary, three modes.
+//! `hird` — one binary, four modes.
 //!
 //! `hird mcp` speaks MCP on stdio for a harness, `hird tui` draws the board for
-//! a human, and everything else is a one-shot CLI command. Only `mcp` needs an
+//! a human, `hird web` draws it in a browser, and everything else is a one-shot
+//! CLI command. Only `mcp` needs an
 //! async runtime, and it builds a single-threaded one so process startup stays
 //! well inside the budget harnesses expect.
 
@@ -48,6 +49,19 @@ fn run() -> anyhow::Result<()> {
             let db_path = config::resolve_db_path(cli.db.as_deref());
             let db = Db::open(&db_path)?;
             hird::tui::run(db, config)
+        }
+        Command::Web(args) => {
+            let config = Config::load_default()?;
+            let db_path = config::resolve_db_path(cli.db.as_deref());
+            let options = hird::web::Options {
+                bind: args.bind.clone(),
+                port: args.port,
+                all_projects: args.scope.all_projects,
+            };
+            let server = hird::web::Server::bind(&db_path, config, &options)?;
+            let stdout = std::io::stdout();
+            let mut out = stdout.lock();
+            server.run(&mut out)
         }
         _ => {
             let stdout = std::io::stdout();

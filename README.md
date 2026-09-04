@@ -1249,7 +1249,7 @@ hird dep add <seq> --needs <seq>,…
 hird dep rm  <seq> --needs <seq>,…
 hird plan apply <file> [--dry-run] [--project <path>]
 hird plan lint <file> [--project <path>]
-hird graph [--all-projects]
+hird graph [--all-projects] [--plan <name>] [--dot | --mermaid | --json]
 hird scope <seq> [--path <glob>]… [--clear]
 hird require <seq> [--capability <name>]… [--clear]
 hird agents [--all-projects]
@@ -1264,6 +1264,7 @@ hird mem search [query] [--limit N] [--all-projects] [--include-superseded]
 hird mem standing [--shaky] [--all-projects]
 hird mem export [--path <glob>] [--firm]
 hird tui
+hird web [--port N] [--bind <addr>] [--all-projects]
 hird mcp
 hird register <claude-code|codex|copilot|copilot-cli|gemini|opencode> [--name <name>]
               [--capability <name>]… [--print] [--force]
@@ -1283,7 +1284,7 @@ declared — and say plainly when the answer is "nothing".
 hird tui
 ```
 
-Three screens, `Tab` between them (`Shift-Tab` goes back). The board polls every
+Four screens, `Tab` between them (`Shift-Tab` goes back). The board polls every
 500 ms, so claims from other harnesses appear as they happen.
 
 The **Swarm** screen is the one to watch while several agents are running: every
@@ -1324,6 +1325,20 @@ moving under them.
 |---|---|
 | `j` `k` | move between agents |
 | `Enter` | open the task that agent is holding |
+
+| Key | Graph |
+|---|---|
+| `j` `k` | move within a wave |
+| `h` `l` | previous / next wave |
+| `Enter` | open the selected task |
+
+The **Graph** screen is the plan laid out the way the queue will run it: one
+column per dispatch wave, with the finished work live tasks still build on in
+a column of its own on the left. Each card says what it needs and what it
+feeds, and selecting one lights up its neighbours — what it waits for to the
+left, what waits for it to the right. Edges are said rather than drawn: a
+terminal is a poor medium for a dozen crossing arrows, which is what
+[`hird web`](#seeing-the-graph-run) is for.
 
 Cards on the queue board carry a yellow `waits #1 #3` badge when a task looks
 open but nobody can actually claim it yet, `awaits answer` when its last holder
@@ -1380,6 +1395,50 @@ And because the trail is append-only, the past stays a board too: `hird
 replay 2h` (or a timestamp) folds the events back into the queue as it stood
 at that moment — who held what, which wave was live, what was parked on a
 question — for the post-mortem question `--follow` was too late for.
+
+## Seeing the graph run
+
+The TUI shows the board; it cannot show the shape of the plan. For that there
+is a picture, live, in a browser:
+
+```sh
+hird web
+# hird web: http://127.0.0.1:7473/
+```
+
+One column per dispatch wave, an arrow for every dependency, the finished
+ground on the left, and on each node its holder, lease countdown, what it
+waits for and what it requires. Nodes light up as harnesses claim them, and
+the trail streams underneath as it lands. Click a node and the panel beside
+the graph answers `hird why` and `hird show` for it. Narrow the picture to
+one plan from the header, and drag the **replay** slider to see the board as
+it stood at any moment since the trail began — the same fold `hird replay`
+prints, drawn.
+
+**A viewer, not a transport.** `hird web` has the TUI's posture and nothing
+more: it binds `127.0.0.1`, it is read-only — every route is a `GET`, and the
+page has no button that writes — and it dies with the terminal. No agent ever
+talks to it; harnesses reach the queue over MCP on stdio exactly as before,
+and the page reads the same SQLite file the TUI does. While it runs it sweeps
+expired leases at the board's cadence and announces them to the dispatch hook,
+so a board left open in a browser tab never swallows a summons. It has no
+accounts, no daemon and no dependencies beyond the standard library: `--port`
+picks another port (`0` lets the system choose and the banner reports it),
+`--bind` another address, `--all-projects` the whole database.
+
+The picture is drawn from data you can have as well:
+
+```sh
+hird graph --json            # nodes, edges, waves, holders, plan names — one object
+hird graph --plan serde-migration --mermaid
+```
+
+`--json` is what the page is served, and what anything else that wants to
+draw the board should read: every unfinished task with its wave, every
+finished one that live work still builds on, `waits_for` and `feeds` on each,
+the plan and node name it was filed under, and the recess if one stands.
+`--plan <name>` narrows any rendering — waves, DOT, Mermaid or JSON — to the
+tasks one plan filed and the dependencies between them.
 
 ## Projects
 

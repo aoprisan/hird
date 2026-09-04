@@ -22,6 +22,10 @@ pub const DB_ENV: &str = "HIRD_DB";
 pub const ACTOR_CLI: &str = "cli";
 /// Actor string recorded for TUI actions.
 pub const ACTOR_TUI: &str = "tui";
+/// Actor string recorded for what `hird web` does on the human's behalf —
+/// sweeping leases and looking at the tree, never anything a task would call
+/// a decision.
+pub const ACTOR_WEB: &str = "web";
 
 /// Longest harness name recorded in an actor string. A name is a badge in a
 /// TUI column, not a payload, and it arrives over the wire in the MCP case.

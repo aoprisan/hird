@@ -250,6 +250,13 @@ pub enum Command {
     Mem(MemCommand),
     /// Watch and drive the queue in a terminal UI.
     Tui,
+    /// Watch the queue as a picture in a browser: the dependency graph by
+    /// wave, who holds what, the feed as it lands, and a scrubber over the
+    /// trail.
+    ///
+    /// A viewer, not a transport: it listens on loopback, is read-only, and
+    /// dies with the terminal like `hird tui`. No agent talks to it.
+    Web(WebArgs),
     /// Serve the Model Context Protocol on stdio. Harnesses run this.
     Mcp,
     /// Write this binary's MCP registration into a harness's config file.
@@ -467,16 +474,39 @@ pub struct ScopeFilterArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct WebArgs {
+    /// Port to listen on; 0 lets the system pick one, which the banner
+    /// reports.
+    #[arg(long, default_value_t = 7473)]
+    pub port: u16,
+    /// Address to listen on. Loopback unless you know why not.
+    #[arg(long, default_value = "127.0.0.1", value_name = "ADDR")]
+    pub bind: String,
+    #[command(flatten)]
+    pub scope: ScopeFilterArgs,
+}
+
+#[derive(Debug, Args)]
 pub struct GraphArgs {
     #[command(flatten)]
     pub scope: ScopeFilterArgs,
     /// Render as Graphviz DOT instead of waves — pipe it into `dot -Tsvg`.
-    #[arg(long, conflicts_with = "mermaid")]
+    #[arg(long, conflicts_with_all = ["mermaid", "json"])]
     pub dot: bool,
     /// Render as a Mermaid flowchart instead of waves — paste it into a
     /// README or a pull request.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "json")]
     pub mermaid: bool,
+    /// The whole graph as one JSON object — tasks, edges, waves, holders,
+    /// what each task waits for and feeds — for anything that draws it.
+    ///
+    /// This is what `hird web` serves; finished tasks are included so a
+    /// picture can show how far a plan has got.
+    #[arg(long)]
+    pub json: bool,
+    /// Only the tasks one plan filed, and the dependencies between them.
+    #[arg(long, value_name = "NAME")]
+    pub plan: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -573,7 +603,7 @@ pub enum MemCommand {
 
 /// Run a parsed command, writing human-readable output to `out`.
 ///
-/// `Command::Tui` and `Command::Mcp` are handled by the binary, which owns the
+/// `Command::Tui`, `Command::Web` and `Command::Mcp` are handled by the binary, which owns the
 /// terminal and the async runtime; they are rejected here.
 pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
     // Registering is the one thing a human does before there is anything to
@@ -605,11 +635,12 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
         .context("a command or installer option is required")?
     {
         Command::DbPath | Command::Register(_) => unreachable!("handled above"),
-        Command::Tui | Command::Mcp => {
+        Command::Tui | Command::Mcp | Command::Web(_) => {
             anyhow::bail!(
                 "`hird {}` is served by the binary, not the command dispatcher",
                 match &cli.command {
                     Some(Command::Tui) => "tui",
+                    Some(Command::Web(_)) => "web",
                     _ => "mcp",
                 }
             )
@@ -701,10 +732,15 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
         Command::Plan(cmd) => plan_cmd(&db, &project, &config, herald.as_ref(), cmd, out),
         Command::Graph(args) => {
             let scope = scope_of(&project, &config, args.scope.all_projects);
-            if args.dot || args.mermaid {
-                graph_render(&db, &scope, args.mermaid, out)
+            let plan = args.plan.as_deref();
+            if args.json {
+                let snapshot = crate::graph::Snapshot::live(&db, &scope, plan)?;
+                writeln!(out, "{}", serde_json::to_string_pretty(&snapshot)?)?;
+                Ok(())
+            } else if args.dot || args.mermaid {
+                graph_render(&db, &scope, plan, args.mermaid, out)
             } else {
-                graph(&db, &scope, out)
+                graph(&db, &scope, plan, out)
             }
         }
         Command::Blame { path } => {
@@ -1505,11 +1541,11 @@ fn slug(title: &str) -> String {
 fn graph_render(
     db: &Db,
     scope: &ProjectScope,
+    plan: Option<&str>,
     mermaid: bool,
     out: &mut impl Write,
 ) -> anyhow::Result<()> {
-    let tasks = db.tasks().list(scope, None)?;
-    let edges = db.deps().edges(scope)?;
+    let (tasks, edges) = graph_inputs(db, scope, plan)?;
     let waves = dispatch_waves(&tasks, &edges);
     let by_seq: BTreeMap<i64, &TaskSummary> = tasks.iter().map(|t| (t.seq, t)).collect();
     let pending: std::collections::BTreeSet<i64> = waves.iter().flatten().copied().collect();
@@ -1984,7 +2020,7 @@ fn replay(db: &Db, scope: &ProjectScope, when: &str, out: &mut impl Write) -> an
 /// A moment from the command line: an age like `2h`, or an RFC3339 instant —
 /// a prefix of one included, since stored timestamps are fixed-width UTC and
 /// compare correctly as strings.
-fn parse_when(raw: &str, now: chrono::DateTime<Utc>) -> anyhow::Result<String> {
+pub(crate) fn parse_when(raw: &str, now: chrono::DateTime<Utc>) -> anyhow::Result<String> {
     let raw = raw.trim();
     if let Some(digits) = raw.strip_suffix(['s', 'm', 'h', 'd']) {
         if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
@@ -2220,9 +2256,49 @@ fn require_cmd(db: &Db, args: &RequireArgs, out: &mut impl Write) -> anyhow::Res
 /// A wave is everything that becomes workable once the previous wave is done,
 /// which is the shape a human actually wants to see: not "who points at whom"
 /// but "how much of this can run at once, and what is the critical path".
-fn graph(db: &Db, scope: &ProjectScope, out: &mut impl Write) -> anyhow::Result<()> {
-    let tasks = db.tasks().list(scope, None)?;
-    let edges = db.deps().edges(scope)?;
+/// Tasks, and the (task, waits-for) edges between them.
+type GraphInputs = (Vec<TaskSummary>, Vec<(i64, i64)>);
+
+/// The tasks and edges a graph is drawn from, narrowed to one plan's when
+/// asked. The waves are computed over the narrowed set, so a plan's task that
+/// waits for work outside the plan reads as workable here; `--json` keeps the
+/// queue's own waves, since it exists for readers that want the truth rather
+/// than the picture.
+fn graph_inputs(db: &Db, scope: &ProjectScope, plan: Option<&str>) -> anyhow::Result<GraphInputs> {
+    let mut tasks = db.tasks().list(scope, None)?;
+    let mut edges = db.deps().edges(scope)?;
+    if let Some(name) = plan {
+        let members: std::collections::BTreeSet<i64> = tasks
+            .iter()
+            .map(|t| t.project.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .map(|project| db.plans().origins(&project))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .filter(|(_, (p, _))| p == name)
+            .map(|(seq, _)| seq)
+            .collect();
+        if members.is_empty() {
+            anyhow::bail!(
+                "no task here was filed from plan {name:?}; `hird plan apply` records the \
+                 plan a task came from, and `hird plan export` lists the names in use"
+            );
+        }
+        tasks.retain(|t| members.contains(&t.seq));
+        edges.retain(|(t, on)| members.contains(t) && members.contains(on));
+    }
+    Ok((tasks, edges))
+}
+
+fn graph(
+    db: &Db,
+    scope: &ProjectScope,
+    plan: Option<&str>,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
+    let (tasks, edges) = graph_inputs(db, scope, plan)?;
     let waves = dispatch_waves(&tasks, &edges);
     let questions = db.questions().unanswered_map(scope)?;
     // "Workable now" is not true while a recess stands, and this is the view
@@ -2646,7 +2722,7 @@ fn salvage(
     Ok(())
 }
 
-fn show(db: &Db, seq: i64, config: &Config, out: &mut impl Write) -> anyhow::Result<()> {
+pub(crate) fn show(db: &Db, seq: i64, config: &Config, out: &mut impl Write) -> anyhow::Result<()> {
     let task = db.tasks().get(seq)?;
     let now = Utc::now();
 
@@ -2839,7 +2915,7 @@ fn show(db: &Db, seq: i64, config: &Config, out: &mut impl Write) -> anyhow::Res
 /// them, each reported rather than silently folded into an empty hand. The
 /// verdict comes first — a human asking *why* wants the answer before the
 /// evidence — and every line after it is one gate with something to say.
-fn why(db: &Db, seq: i64, config: &Config, out: &mut impl Write) -> anyhow::Result<()> {
+pub(crate) fn why(db: &Db, seq: i64, config: &Config, out: &mut impl Write) -> anyhow::Result<()> {
     // Readiness sweeps leases first, exactly as a claim would: a task whose
     // holder went quiet is open again by the time this answers.
     let (blockers, conflicts) = db.tasks().readiness(seq, config.clearance())?;

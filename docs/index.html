@@ -43,6 +43,7 @@
     <li><a href="#cli">Command line</a></li>
     <li><a href="#tui">The TUI</a></li>
     <li><a href="#events">The board as a log</a></li>
+    <li><a href="#web">Seeing the graph run</a></li>
     <li><a href="#mcp">MCP tools</a></li>
     <li><a href="#config">Configuration</a></li>
     <li><a href="#examples">Examples</a></li>
@@ -1608,7 +1609,7 @@ hird dep add &lt;seq&gt; --needs &lt;seq&gt;,…
 hird dep rm  &lt;seq&gt; --needs &lt;seq&gt;,…
 hird plan apply &lt;file&gt; [--dry-run] [--project &lt;path&gt;]
 hird plan lint &lt;file&gt; [--project &lt;path&gt;]
-hird graph [--all-projects]
+hird graph [--all-projects] [--plan &lt;name&gt;] [--dot | --mermaid | --json]
 hird scope &lt;seq&gt; [--path &lt;glob&gt;]… [--clear]
 hird agents [--all-projects]
 hird recuse &lt;seq&gt; --from &lt;seq&gt;,… [--reason &lt;text&gt;] | --clear
@@ -1622,6 +1623,7 @@ hird mem search [query] [--limit N] [--all-projects] [--include-superseded]
 hird mem standing [--shaky] [--all-projects]
 hird mem export [--path &lt;glob&gt;] [--firm]
 hird tui
+hird web [--port N] [--bind &lt;addr&gt;] [--all-projects]
 hird mcp
 hird db-path</code></pre>
 
@@ -1640,7 +1642,7 @@ hird db-path</code></pre>
     <tr><td><code>recess</code> / <code>resume</code></td><td>Stand this project's queue down and lift it again — <a href="#recess">the recess</a>. While it stands nothing is handed out and the dispatch hook is quiet; work already claimed continues. Resuming announces everything that waited.</td></tr>
     <tr><td><code>dep</code></td><td>Add or remove "must wait for" edges after the fact.</td></tr>
     <tr><td><code>plan</code></td><td>File a whole graph from a <a href="#plan-files">plan file</a>, in one transaction. <code>--dry-run</code> reads it out — waves, overlaps and all — and writes nothing. <code>lint</code> reads the same file for the trouble it can carry while still filing cleanly: unordered tasks on the same files, tasks the collision radar cannot see, reviews that will never be filed or that nobody present could claim.</td></tr>
-    <tr><td><code>graph</code></td><td>The plan as dispatch waves: workable now, and what each later wave waits for.</td></tr>
+    <tr><td><code>graph</code></td><td>The plan as dispatch waves: workable now, and what each later wave waits for. <code>--dot</code> and <code>--mermaid</code> draw it; <code>--json</code> is the board as one object, for anything that draws it; <code>--plan</code> narrows any of them to one plan's tasks.</td></tr>
     <tr><td><code>scope</code></td><td>Show or set the files a task is expected to touch. Warns about overlaps.</td></tr>
     <tr><td><code>agents</code></td><td>Who is working what, what has moved under each of them, and a <code>!!</code> line wherever two agents are in the same files.</td></tr>
     <tr><td><code>record</code></td><td>Each harness's track record under <a href="#verdict">review</a>: work upheld, work sent back, first-pass rate, and the verdicts it has handed out.</td></tr>
@@ -1649,6 +1651,7 @@ hird db-path</code></pre>
     <tr><td><code>recall</code></td><td>What earlier work already learned about a task, and why it is relevant — the same thing an agent is handed when it claims it.</td></tr>
     <tr><td><code>mem</code></td><td>Record and search assertions. <code>export</code> writes the project's current facts as Markdown for a CLAUDE.md or AGENTS.md — footing-aware, so a fact whose ground has been rewritten goes out marked for a re-read.</td></tr>
     <tr><td><code>tui</code></td><td>The live board.</td></tr>
+    <tr><td><code>web</code></td><td>The live board as a picture in a browser — <a href="#web">the graph, running</a>. Loopback, read-only, gone when the terminal is.</td></tr>
     <tr><td><code>mcp</code></td><td>Serve MCP on stdio. Harnesses run this, you generally do not.</td></tr>
     <tr><td><code>db-path</code></td><td>Print the database path this invocation would use.</td></tr>
   </tbody>
@@ -1672,7 +1675,7 @@ hird db-path</code></pre>
 <pre><code><span class="k">hird</span> tui</code></pre>
 
 <p>
-  Three screens, <kbd>Tab</kbd> between them (<kbd>Shift-Tab</kbd> goes back).
+  Four screens, <kbd>Tab</kbd> between them (<kbd>Shift-Tab</kbd> goes back).
   The board polls every 500&nbsp;ms, so claims from other harnesses appear as
   they happen.
 </p>
@@ -1727,7 +1730,25 @@ hird db-path</code></pre>
 <tr><td><kbd>Enter</kbd></td><td>open the task that agent is holding</td></tr>
 </tbody></table></div>
 </div>
+
+<div class="card">
+<h4>Graph</h4>
+<div class="table-wrap"><table><tbody>
+<tr><td><kbd>j</kbd> <kbd>k</kbd></td><td>move within a wave</td></tr>
+<tr><td><kbd>h</kbd> <kbd>l</kbd></td><td>previous / next wave</td></tr>
+<tr><td><kbd>Enter</kbd></td><td>open the selected task</td></tr>
+</tbody></table></div>
 </div>
+</div>
+
+<p>
+  The <strong>Graph</strong> screen is the plan laid out the way the queue will
+  run it: one column per dispatch wave, with the finished work live tasks still
+  build on in a column of its own on the left. Each card says what it needs and
+  what it feeds, and selecting one lights up its neighbours. Edges are said
+  rather than drawn — a terminal is a poor medium for a dozen crossing arrows,
+  which is what <a href="#web"><code>hird web</code></a> is for.
+</p>
 
 <p>
   Cards on the queue board carry a yellow <code>waits #1 #3</code> badge when a
@@ -1789,6 +1810,54 @@ hird db-path</code></pre>
   <a href="#dispatch-hook">dispatch hook</a> answers <em>wake somebody when
   work appears</em>; the feed answers everything after that — what the swarm
   did, as it does it, in a form both halves of your tooling can read.
+</p>
+</section>
+
+<section id="web">
+<h2>Seeing the graph run</h2>
+
+<p>
+  The TUI shows the board; it cannot show the shape of the plan. For that
+  there is a picture, live, in a browser:
+</p>
+
+<pre><code>$ <span class="k">hird</span> web
+hird web: http://127.0.0.1:7473/</code></pre>
+
+<p>
+  One column per dispatch wave, an arrow for every dependency, the finished
+  ground on the left, and on each node its holder, lease countdown, what it
+  waits for and what it requires. Nodes light up as harnesses claim them, and
+  the trail streams underneath as it lands. Click a node and the panel beside
+  the graph answers <code>hird why</code> and <code>hird show</code> for it.
+  Narrow the picture to one plan from the header, and drag the
+  <strong>replay</strong> slider to see the board as it stood at any moment
+  since the trail began — the same fold <code>hird replay</code> prints, drawn.
+</p>
+
+<p>
+  <strong>A viewer, not a transport.</strong> <code>hird web</code> has the
+  TUI's posture and nothing more: it binds <code>127.0.0.1</code>, it is
+  read-only — every route is a <code>GET</code>, and the page has no button
+  that writes — and it dies with the terminal. No agent ever talks to it;
+  harnesses reach the queue over MCP on stdio exactly as before, and the page
+  reads the same SQLite file the TUI does. While it runs it sweeps expired
+  leases at the board's cadence and announces them to the
+  <a href="#dispatch-hook">dispatch hook</a>, so a board left open in a browser
+  tab never swallows a summons. <code>--port</code> picks another port
+  (<code>0</code> lets the system choose and the banner reports it),
+  <code>--bind</code> another address, <code>--all-projects</code> the whole
+  database.
+</p>
+
+<p>
+  The picture is drawn from data you can have as well: <code>hird graph
+  --json</code> prints the board as one object — every unfinished task with
+  its wave, every finished one that live work still builds on,
+  <code>waits_for</code> and <code>feeds</code> on each, the plan and node
+  name it was filed under, and the recess if one stands — and <code>hird
+  graph --plan &lt;name&gt;</code> narrows any rendering, waves, DOT, Mermaid
+  or JSON, to the tasks one plan filed and the dependencies between them.
 </p>
 </section>
 
@@ -2111,7 +2180,10 @@ question_hook = <span class="s">""</span></code></pre>
 <p>
   No. Every front end opens the same SQLite file in WAL mode. Start a harness
   and it spawns its own short-lived <code>hird mcp</code>; close it and nothing
-  is left behind but the database.
+  is left behind but the database. <a href="#web"><code>hird web</code></a>
+  listens on loopback while you have it open, exactly as <code>hird tui</code>
+  holds the terminal — it is a screen, not a service, and nothing depends on
+  it being up.
 </p>
 
 <h3>How do I start over?</h3>

@@ -28,6 +28,7 @@ pub fn render(frame: &mut Frame, app: &App, now: DateTime<Utc>) {
         Screen::Queue => render_queue(frame, body, app, now),
         Screen::Memory => render_memory(frame, body, app, now),
         Screen::Swarm => render_swarm(frame, body, app, now),
+        Screen::Graph => render_graph(frame, body, app, now),
     }
     render_status_bar(frame, status, app, now);
 
@@ -65,6 +66,7 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
         tab("Queue", app.screen == Screen::Queue),
         tab("Memory", app.screen == Screen::Memory),
         tab("Swarm", app.screen == Screen::Swarm),
+        tab("Graph", app.screen == Screen::Graph),
         Span::styled("  Tab switches · ? help · q quit", theme::dim_style()),
     ]);
     frame.render_widget(Paragraph::new(line), area);
@@ -508,6 +510,169 @@ fn render_pipeline(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+// ------------------------------------------------------------------- graph
+
+/// The dependency graph, laid out by wave.
+///
+/// One column per wave, with the finished ground live work still builds on
+/// in a column of its own on the left, and the selected task's neighbours lit
+/// up around it: what it waits for to the left, what waits for it to the
+/// right. Edges are said on each card and shown by the lighting rather than
+/// drawn as lines — a terminal is a poor medium for a dozen crossing arrows,
+/// and `hird web` exists for the picture.
+fn render_graph(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>) {
+    let columns = app.graph_columns();
+    if columns.is_empty() {
+        let hint = if app.tasks.is_empty() {
+            "nothing filed yet — hird add or hird plan apply puts work here"
+        } else {
+            "no unfinished tasks; the graph has run its course"
+        };
+        frame.render_widget(
+            Paragraph::new(hint).style(theme::dim_style()).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(theme::dim_style())
+                    .title(Span::styled(" Graph ", theme::focus_style())),
+            ),
+            area,
+        );
+        return;
+    }
+
+    let selected = app.graph_selected();
+    let needs: std::collections::BTreeSet<i64> = selected
+        .map(|seq| app.needs_of(seq))
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    let feeds: std::collections::BTreeSet<i64> = selected
+        .map(|seq| app.feeds_of(seq))
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+
+    // A column narrower than a card is not worth drawing, so when more waves
+    // exist than fit, the window slides to keep the selected one on screen.
+    const MIN_COLUMN: u16 = 26;
+    let visible = (usize::from(area.width / MIN_COLUMN).max(1)).min(columns.len());
+    let first = app
+        .graph_column
+        .saturating_sub(visible - 1)
+        .min(columns.len() - visible);
+    let areas = Layout::horizontal(vec![Constraint::Fill(1); visible]).split(area);
+
+    for (slot, index) in (first..first + visible).enumerate() {
+        let column = &columns[index];
+        let focused = index == app.graph_column;
+        let mut title = vec![Span::styled(
+            format!(" {} ", column.title),
+            theme::focus_style(),
+        )];
+        if slot == 0 && first > 0 {
+            title.insert(0, Span::styled(" ◀", theme::dim_style()));
+        }
+        if slot + 1 == visible && first + visible < columns.len() {
+            title.push(Span::styled(
+                format!("▶ {} more ", columns.len() - first - visible),
+                theme::dim_style(),
+            ));
+        }
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(if focused {
+                theme::focus_style()
+            } else {
+                theme::dim_style()
+            })
+            .title(Line::from(title));
+
+        let rect = areas[slot];
+        let width = rect.width.saturating_sub(4) as usize;
+        let items: Vec<ListItem> = column
+            .seqs
+            .iter()
+            .filter_map(|seq| app.tasks.iter().find(|t| t.seq == *seq))
+            .map(|task| ListItem::new(graph_card(task, width, now, app, &needs, &feeds)))
+            .collect();
+        let mut state = ListState::default();
+        if focused && !items.is_empty() {
+            state.select(Some(app.graph_row.min(items.len() - 1)));
+        }
+        frame.render_stateful_widget(
+            List::new(items)
+                .block(block)
+                .highlight_style(theme::selection_style()),
+            rect,
+            &mut state,
+        );
+    }
+}
+
+/// A queue card with one more line: the edges, in words — and, for a
+/// neighbour of the selected task, which side of it this card is on.
+fn graph_card(
+    task: &TaskSummary,
+    width: usize,
+    now: DateTime<Utc>,
+    app: &App,
+    needs: &std::collections::BTreeSet<i64>,
+    feeds: &std::collections::BTreeSet<i64>,
+) -> Text<'static> {
+    let mut text = task_card(
+        task,
+        width,
+        now,
+        app.blocked_by(task.seq),
+        app.questions.get(&task.seq).map(|q| q.question.as_str()),
+        app.reviews.get(&task.seq).copied(),
+        app.under_review.get(&task.seq).copied(),
+        app.verdicts.get(&task.seq).copied(),
+        app.footprints.get(&task.seq).copied().unwrap_or_default(),
+    );
+    let list = |seqs: &[i64]| {
+        seqs.iter()
+            .map(|s| format!("#{s}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    if needs.contains(&task.seq) {
+        spans.push(Span::styled(
+            "▶ the selected task waits for this",
+            theme::focus_style().cyan(),
+        ));
+    } else if feeds.contains(&task.seq) {
+        spans.push(Span::styled(
+            "◀ waits for the selected task",
+            theme::focus_style().cyan(),
+        ));
+    } else {
+        let upstream = app.needs_of(task.seq);
+        let downstream = app.feeds_of(task.seq);
+        if !upstream.is_empty() {
+            spans.push(Span::styled(
+                format!("needs {}", list(&upstream)),
+                theme::dim_style(),
+            ));
+        }
+        if !downstream.is_empty() {
+            if !spans.is_empty() {
+                spans.push(Span::styled(" · ", theme::dim_style()));
+            }
+            spans.push(Span::styled(
+                format!("feeds {}", list(&downstream)),
+                theme::dim_style(),
+            ));
+        }
+    }
+    if !spans.is_empty() {
+        spans.insert(0, Span::raw("   "));
+        text.lines.push(Line::from(spans));
+    }
+    text
+}
+
 // --------------------------------------------------------------- memory browser
 
 fn render_memory(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>) {
@@ -743,8 +908,7 @@ fn render_help(frame: &mut Frame, app: &App) {
         ("Enter", "open the task, its history and what was learned"),
         ("a", "add a task (Tab for the body, Enter to save)"),
         ("A", "answer the selected task's question"),
-        ("c", "cancel the selected task"),
-        ("r", "reopen the selected task"),
+        ("c / r", "cancel / reopen the selected task"),
     ];
     let memory: &[(&str, &str)] = &[
         ("j / k", "move down / up"),
@@ -753,9 +917,13 @@ fn render_help(frame: &mut Frame, app: &App) {
         ("s", "show or hide superseded assertions"),
         ("f", "only the ones whose files have moved since"),
     ];
+    // One section for the two screens that share their keys: the swarm's
+    // list of agents and the graph's columns of waves are both walked with
+    // j/k, and the graph adds h/l to step between waves.
     let swarm: &[(&str, &str)] = &[
-        ("j / k", "move between agents"),
-        ("Enter", "open the task that agent is holding"),
+        ("j / k", "move between agents, or within a wave"),
+        ("h / l", "previous / next wave (Graph)"),
+        ("Enter", "open the task under the cursor"),
     ];
 
     let mut lines = Vec::new();
@@ -781,7 +949,7 @@ fn render_help(frame: &mut Frame, app: &App) {
     section("Anywhere", common, &mut lines);
     section("Queue board", queue, &mut lines);
     section("Memory browser", memory, &mut lines);
-    section("Swarm", swarm, &mut lines);
+    section("Swarm · Graph", swarm, &mut lines);
     // No separator before the note: it is dim and reads as a footer already,
     // and the row it would cost is a row the box does not have on a short
     // terminal.
@@ -1574,7 +1742,13 @@ mod tests {
         );
         // How to close it lives in the title, which clipping cannot reach.
         assert!(out.contains("any key closes"), "{out}");
-        for section in ["Anywhere", "Queue board", "Memory browser", "Swarm"] {
+        for section in [
+            "Anywhere",
+            "Queue board",
+            "Memory browser",
+            "Swarm",
+            "Graph",
+        ] {
             assert!(out.contains(section), "help omits {section:?}:\n{out}");
         }
     }
@@ -1971,5 +2145,79 @@ mod tests {
         let out = screen(&app_with(&db));
         assert!(!out.contains("under review #2"), "{out}");
         assert!(out.contains("upheld"), "{out}");
+    }
+
+    fn graphed(db: &Db) -> App {
+        let schema = db
+            .tasks()
+            .create(PROJECT, "Design the schema", "", 0, "cli")
+            .unwrap()
+            .seq;
+        let repos = db
+            .tasks()
+            .create(PROJECT, "Port the repos", "", 0, "cli")
+            .unwrap()
+            .seq;
+        let notes = db
+            .tasks()
+            .create(PROJECT, "Write the notes", "", 0, "cli")
+            .unwrap()
+            .seq;
+        db.deps().add(repos, schema, "cli").unwrap();
+        db.deps().add(notes, repos, "cli").unwrap();
+        db.tasks()
+            .claim(schema, "codex:1", std::time::Duration::from_secs(900))
+            .unwrap();
+        db.tasks().complete(schema, "codex:1", "done").unwrap();
+        let mut app = app_with(db);
+        app.screen = Screen::Graph;
+        app.refresh(db).unwrap();
+        app
+    }
+
+    #[test]
+    fn the_graph_screen_lays_the_waves_out_as_columns_after_the_ground() {
+        let db = Db::open_in_memory().unwrap();
+        let app = graphed(&db);
+        let out = screen(&app);
+        assert!(out.contains("done · the ground"), "{out}");
+        assert!(out.contains("wave 1 · workable now"), "{out}");
+        assert!(out.contains("wave 2 · after wave 1"), "{out}");
+        assert!(out.contains("Design the schema"), "{out}");
+        assert!(out.contains("feeds #2"), "{out}");
+        assert!(out.contains("needs #2"), "{out}");
+    }
+
+    #[test]
+    fn the_graph_screen_lights_up_what_the_selection_waits_for_and_feeds() {
+        let db = Db::open_in_memory().unwrap();
+        let mut app = graphed(&db);
+        // Select "Port the repos", in the first wave.
+        app.graph_column = 1;
+        app.graph_row = 0;
+        let out = screen(&app);
+        assert!(out.contains("the selected task waits for this"), "{out}");
+        assert!(out.contains("waits for the selected task"), "{out}");
+    }
+
+    #[test]
+    fn an_empty_graph_says_so_instead_of_drawing_nothing() {
+        let db = Db::open_in_memory().unwrap();
+        let mut app = app_with(&db);
+        app.screen = Screen::Graph;
+        let out = screen(&app);
+        assert!(out.contains("nothing filed yet"), "{out}");
+    }
+
+    #[test]
+    fn the_graph_screen_slides_to_keep_the_selected_wave_on_a_narrow_terminal() {
+        let db = Db::open_in_memory().unwrap();
+        let mut app = graphed(&db);
+        // Three columns at 26 cells each do not fit in 60; the selected
+        // (last) column must still be drawn, with a hint that more sit left.
+        app.graph_column = 2;
+        let out = screen_at(&app, 60);
+        assert!(out.contains("wave 2"), "{out}");
+        assert!(out.contains("◀"), "{out}");
     }
 }

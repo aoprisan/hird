@@ -2302,3 +2302,58 @@ fn handoff_writes_the_claim_brief_as_markdown() {
     let err = sandbox.run_failing(&["handoff", "42"]);
     assert!(err.contains("task 42 not found"), "{err}");
 }
+
+#[test]
+fn graph_json_is_the_board_as_one_value_and_plan_narrows_it() {
+    let sandbox = Sandbox::new();
+    let plan = sandbox.dir.path().join("plan.toml");
+    std::fs::write(
+        &plan,
+        r#"
+plan = "p"
+[[task]]
+name = "schema"
+title = "Design the schema"
+[[task]]
+name = "repos"
+title = "Port the repos"
+needs = ["schema"]
+requires = ["browser"]
+"#,
+    )
+    .unwrap();
+    sandbox.run(&["plan", "apply", plan.to_str().unwrap()]);
+    sandbox.run(&["add", "Loose end"]);
+
+    let json: serde_json::Value =
+        serde_json::from_str(&sandbox.run(&["graph", "--json"])).expect("json");
+    assert_eq!(json["live"], true);
+    assert_eq!(json["plans"], serde_json::json!(["p"]));
+    assert_eq!(json["waves"], serde_json::json!([[1, 3], [2]]));
+    assert_eq!(json["edges"], serde_json::json!([{ "from": 1, "to": 2 }]));
+    let repos = &json["tasks"][1];
+    assert_eq!(repos["seq"], 2);
+    assert_eq!(repos["node"], "repos");
+    assert_eq!(repos["waits_for"], serde_json::json!([1]));
+    assert_eq!(repos["requires"], serde_json::json!(["browser"]));
+    assert_eq!(json["tasks"][0]["feeds"], serde_json::json!([2]));
+
+    let narrowed: serde_json::Value =
+        serde_json::from_str(&sandbox.run(&["graph", "--json", "--plan", "p"])).expect("json");
+    assert_eq!(narrowed["plan"], "p");
+    assert_eq!(narrowed["tasks"].as_array().unwrap().len(), 2);
+    assert_eq!(narrowed["waves"], serde_json::json!([[1], [2]]));
+
+    // The text and picture renderers narrow the same way.
+    let text = sandbox.run(&["graph", "--plan", "p"]);
+    assert!(text.contains("#1"), "{text}");
+    assert!(!text.contains("Loose end"), "{text}");
+    let mermaid = sandbox.run(&["graph", "--mermaid", "--plan", "p"]);
+    assert!(!mermaid.contains("Loose end"), "{mermaid}");
+
+    let refused = sandbox.run_failing(&["graph", "--plan", "nope"]);
+    assert!(
+        refused.contains("no task here was filed from plan \"nope\""),
+        "{refused}"
+    );
+}

@@ -1,0 +1,545 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hird</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f7f7f5; --panel: #ffffff; --ink: #1c1c1a; --muted: #6b6b66; --line: #d8d8d2;
+    --open: #ffffff; --open-ink: #1c1c1a; --claimed: #fff3b0; --progress: #ffe066;
+    --done: #c7f0c2; --failed: #f5b7b1; --cancelled: #e2e2dd;
+    --edge: #a8a8a0; --edge-hot: #1c1c1a; --accent: #0b6e99; --warn: #b7791f; --review: #8e44ad;
+    --select: #0b6e99;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161614; --panel: #1f1f1c; --ink: #ecebe6; --muted: #9a9a92; --line: #3a3a35;
+      --open: #2a2a26; --open-ink: #ecebe6; --claimed: #5a4a10; --progress: #6e5a00;
+      --done: #1f4d2a; --failed: #5c2222; --cancelled: #2e2e2a;
+      --edge: #55554f; --edge-hot: #ecebe6; --accent: #5fb3e0; --warn: #e2b04a; --review: #c58ae0;
+      --select: #5fb3e0;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font: 14px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: grid; grid-template-rows: auto auto 1fr auto; height: 100vh;
+  }
+  header { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; padding: 8px 14px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header .brand { font-weight: 700; letter-spacing: .02em; }
+  header .project { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  header .counts span { margin-right: 10px; color: var(--muted); }
+  header .counts b { color: var(--ink); font-weight: 600; }
+  header label { color: var(--muted); font-size: 13px; }
+  header select { font: inherit; font-size: 13px; background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 4px; padding: 2px 6px; }
+  #live { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
+  #live .dot { width: 9px; height: 9px; border-radius: 50%; background: #3cb371; box-shadow: 0 0 0 2px rgba(60,179,113,.25); }
+  #live.replay .dot { background: var(--warn); box-shadow: none; }
+  #live.lost .dot { background: #c0392b; }
+  #recess { display: none; width: 100%; padding: 6px 10px; border-radius: 6px; background: var(--claimed); color: var(--open-ink); font-size: 13px; }
+  #recess.on { display: block; }
+  #scrub { display: flex; gap: 12px; align-items: center; padding: 6px 14px; border-bottom: 1px solid var(--line); background: var(--panel); font-size: 13px; color: var(--muted); }
+  #scrub input[type=range] { flex: 1; accent-color: var(--accent); }
+  #scrub button { font: inherit; font-size: 12px; padding: 2px 10px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--ink); cursor: pointer; }
+  #scrub button:disabled { opacity: .5; cursor: default; }
+  #scrub .asof { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; min-width: 22ch; }
+  main { display: grid; grid-template-columns: 1fr 0; min-height: 0; transition: grid-template-columns .15s ease; }
+  main.open { grid-template-columns: 1fr minmax(320px, 38%); }
+  #canvas { overflow: auto; position: relative; }
+  #empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); }
+  svg { display: block; }
+  .edge { fill: none; stroke: var(--edge); stroke-width: 1.5; }
+  .edge.waiting { stroke-dasharray: 5 4; }
+  .edge.hot { stroke: var(--edge-hot); stroke-width: 2.5; }
+  .edge.dim { opacity: .25; }
+  .node { cursor: pointer; }
+  .node rect { stroke: var(--line); stroke-width: 1; rx: 8; }
+  .node.st-open rect { fill: var(--open); }
+  .node.st-claimed rect { fill: var(--claimed); }
+  .node.st-in_progress rect { fill: var(--progress); }
+  .node.st-done rect { fill: var(--done); }
+  .node.st-failed rect { fill: var(--failed); }
+  .node.st-cancelled rect { fill: var(--cancelled); }
+  .node.selected rect { stroke: var(--select); stroke-width: 2.5; }
+  .node.related rect { stroke: var(--select); stroke-width: 1.5; stroke-dasharray: 4 3; }
+  .node.dim { opacity: .35; }
+  .node.review rect { stroke: var(--review); }
+  .node text { fill: var(--open-ink); font-size: 12.5px; pointer-events: none; }
+  .node .seq { font-weight: 700; }
+  .node .sub { fill: var(--muted); font-size: 11.5px; }
+  .node .badge { font-size: 11px; fill: var(--warn); }
+  .node .badge.review { fill: var(--review); }
+  .node .badge.ok { fill: #2e7d32; }
+  .node .badge.req { fill: var(--accent); }
+  .wave-label { fill: var(--muted); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; }
+  .wave-line { stroke: var(--line); stroke-dasharray: 2 4; }
+  aside { border-left: 1px solid var(--line); background: var(--panel); overflow: auto; display: none; }
+  main.open aside { display: block; }
+  aside .bar { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--panel); }
+  aside .bar button { font: inherit; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 18px; line-height: 1; }
+  aside h3 { margin: 12px 12px 4px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  aside pre { margin: 0 12px 12px; padding: 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; white-space: pre-wrap; word-break: break-word; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  footer { border-top: 1px solid var(--line); background: var(--panel); height: 160px; display: grid; grid-template-rows: auto 1fr; }
+  footer .bar { display: flex; justify-content: space-between; padding: 4px 14px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+  #feed { overflow: auto; margin: 0; padding: 0 14px 8px; list-style: none; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  #feed li { display: grid; grid-template-columns: 9ch 5ch 15ch 20ch 1fr; gap: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+  #feed li:hover { color: var(--accent); }
+  #feed .k { color: var(--muted); }
+  #feed .k.claimed, #feed .k.completed { color: var(--ink); }
+  #feed .k.failed, #feed .k.lease_expired, #feed .k.ground_shifted { color: #c0392b; }
+  #feed .k.reviewed, #feed .k.recused { color: var(--review); }
+  #feed .actor { color: var(--accent); }
+  .legend { display: flex; gap: 10px; font-size: 12px; color: var(--muted); margin-left: auto; }
+  .legend i { display: inline-block; width: 11px; height: 11px; border-radius: 3px; border: 1px solid var(--line); vertical-align: -1px; margin-right: 4px; }
+</style>
+</head>
+<body>
+<header>
+  <span class="brand">hird</span>
+  <span class="project" id="project"></span>
+  <span id="live" title="the page follows the trail as it lands"><span class="dot"></span><span id="livetext">live</span></span>
+  <span class="counts" id="counts"></span>
+  <label>plan <select id="plan"><option value="">all tasks</option></select></label>
+  <label>finished <select id="finished"><option value="related">the ground</option><option value="all">all</option><option value="none">none</option></select></label>
+  <span class="legend">
+    <span><i style="background:var(--open)"></i>open</span>
+    <span><i style="background:var(--claimed)"></i>claimed</span>
+    <span><i style="background:var(--progress)"></i>in progress</span>
+    <span><i style="background:var(--done)"></i>done</span>
+    <span><i style="background:var(--failed)"></i>failed</span>
+  </span>
+  <div id="recess"></div>
+</header>
+<div id="scrub">
+  <span>replay</span>
+  <input type="range" id="when" min="0" max="1000" value="1000" step="1" title="drag to see the board as it stood">
+  <span class="asof" id="asof"></span>
+  <button id="golive" disabled>live</button>
+</div>
+<main id="main">
+  <div id="canvas"><div id="empty"></div><svg id="svg" xmlns="http://www.w3.org/2000/svg"></svg></div>
+  <aside id="aside">
+    <div class="bar"><strong id="aside-title"></strong><button id="close" title="close (Esc)">×</button></div>
+    <h3>why</h3><pre id="why"></pre>
+    <h3>show</h3><pre id="show"></pre>
+  </aside>
+</main>
+<footer>
+  <div class="bar"><span>the trail</span><span id="feedcount"></span></div>
+  <ul id="feed"></ul>
+</footer>
+<script>
+(() => {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const params = new URLSearchParams(location.search);
+  const ALL = params.get('all') === '1';
+
+  const state = {
+    snap: null, selected: null, hover: null,
+    live: true, at: null, plan: params.get('plan') || '', finished: 'related',
+    cursor: 0, feed: [], source: null, loadTimer: null,
+  };
+
+  // ------------------------------------------------------------ fetching
+
+  function graphUrl() {
+    const q = new URLSearchParams();
+    if (ALL) q.set('all', '1');
+    if (state.plan) q.set('plan', state.plan);
+    if (!state.live && state.at) q.set('at', state.at);
+    return '/api/graph?' + q.toString();
+  }
+
+  async function load() {
+    try {
+      const r = await fetch(graphUrl());
+      const snap = await r.json();
+      if (snap.error) { showEmpty(snap.error); return; }
+      state.snap = snap;
+      state.cursor = Math.max(state.cursor, snap.cursor || 0);
+      render();
+    } catch (e) {
+      showEmpty('hird web is not answering — was it stopped?');
+      $('live').className = 'lost';
+    }
+  }
+
+  function scheduleLoad() {
+    clearTimeout(state.loadTimer);
+    state.loadTimer = setTimeout(load, 150);
+  }
+
+  async function loadFeed() {
+    const q = new URLSearchParams({ limit: '80' });
+    if (ALL) q.set('all', '1');
+    const r = await fetch('/api/events?' + q.toString());
+    state.feed = await r.json();
+    for (const e of state.feed) state.cursor = Math.max(state.cursor, e.cursor);
+    renderFeed();
+  }
+
+  function follow() {
+    if (state.source) state.source.close();
+    const q = new URLSearchParams({ after: String(state.cursor) });
+    if (ALL) q.set('all', '1');
+    const source = new EventSource('/api/feed?' + q.toString());
+    state.source = source;
+    source.onmessage = (m) => {
+      let e; try { e = JSON.parse(m.data); } catch (_) { return; }
+      state.cursor = Math.max(state.cursor, e.cursor);
+      state.feed.push(e);
+      if (state.feed.length > 200) state.feed.splice(0, state.feed.length - 200);
+      renderFeed();
+      if (state.live) scheduleLoad();
+    };
+    source.onopen = () => { if (state.live) $('live').className = ''; };
+    source.onerror = () => { $('live').className = 'lost'; $('livetext').textContent = 'reconnecting'; };
+  }
+
+  // ------------------------------------------------------------- layout
+
+  const NODE_W = 236, NODE_H = 64, COL_GAP = 84, ROW_GAP = 18, PAD = 28, LABEL = 22;
+
+  function shownTasks(snap) {
+    const pending = new Set(snap.tasks.filter(t => !terminal(t.status)).map(t => t.seq));
+    const feedsPending = new Set();
+    for (const e of snap.edges) if (pending.has(e.to)) feedsPending.add(e.from);
+    return snap.tasks.filter(t => {
+      if (!terminal(t.status)) return true;
+      if (state.finished === 'none') return false;
+      if (state.finished === 'all') return true;
+      return feedsPending.has(t.seq);
+    });
+  }
+
+  function terminal(status) { return status === 'done' || status === 'failed' || status === 'cancelled'; }
+
+  function layout(snap) {
+    const tasks = shownTasks(snap);
+    const shown = new Set(tasks.map(t => t.seq));
+    const edges = snap.edges.filter(e => shown.has(e.from) && shown.has(e.to));
+    const by = new Map(tasks.map(t => [t.seq, t]));
+
+    // Finished tasks get columns of their own to the left, ordered by the
+    // longest chain of finished work behind them, so a done plan still reads
+    // left to right. Live tasks sit in the waves the queue computed.
+    const finished = tasks.filter(t => terminal(t.status));
+    const depth = new Map(finished.map(t => [t.seq, 0]));
+    for (let i = 0; i <= finished.length; i++) {
+      let changed = false;
+      for (const e of edges) {
+        if (!depth.has(e.from) || !depth.has(e.to)) continue;
+        const want = depth.get(e.from) + 1;
+        if (depth.get(e.to) < want) { depth.set(e.to, want); changed = true; }
+      }
+      if (!changed) break;
+    }
+    const doneCols = finished.length ? Math.max(...depth.values()) + 1 : 0;
+    const columns = [];
+    for (let i = 0; i < doneCols; i++) columns.push({ label: i === doneCols - 1 ? 'done' : 'done', seqs: [] });
+    for (const [seq, d] of depth) columns[d].seqs.push(seq);
+    const waves = snap.waves.map(w => w.filter(s => shown.has(s))).filter(w => w.length);
+    waves.forEach((w, i) => columns.push({ label: i === 0 ? 'wave 1 · workable now' : 'wave ' + (i + 1), seqs: w.slice() }));
+
+    // Order within a column by where the things it waits for sit, so
+    // arrows mostly go straight across; one pass is enough for a plan.
+    const pos = new Map();
+    const preds = new Map();
+    for (const e of edges) { if (!preds.has(e.to)) preds.set(e.to, []); preds.get(e.to).push(e.from); }
+    columns.forEach((col, ci) => {
+      col.seqs.sort((a, b) => {
+        const ka = key(a), kb = key(b);
+        return ka - kb || a - b;
+      });
+      col.seqs.forEach((seq, ri) => pos.set(seq, { col: ci, row: ri }));
+      function key(seq) {
+        const p = (preds.get(seq) || []).filter(s => pos.has(s));
+        if (!p.length) return 1e6 + seq;
+        return p.reduce((acc, s) => acc + pos.get(s).row, 0) / p.length;
+      }
+    });
+
+    const nodes = [];
+    for (const [seq, p] of pos) {
+      nodes.push({
+        task: by.get(seq),
+        x: PAD + p.col * (NODE_W + COL_GAP),
+        y: PAD + LABEL + p.row * (NODE_H + ROW_GAP),
+      });
+    }
+    const width = PAD * 2 + columns.length * NODE_W + Math.max(0, columns.length - 1) * COL_GAP;
+    const rows = Math.max(1, ...columns.map(c => c.seqs.length));
+    const height = PAD * 2 + LABEL + rows * NODE_H + (rows - 1) * ROW_GAP;
+    return { nodes, edges, columns, width, height, at: new Map(nodes.map(n => [n.task.seq, n])) };
+  }
+
+  // ------------------------------------------------------------ rendering
+
+  function el(name, attrs, parent) {
+    const node = document.createElementNS(svgNS, name);
+    for (const [k, v] of Object.entries(attrs || {})) node.setAttribute(k, v);
+    if (parent) parent.appendChild(node);
+    return node;
+  }
+  function text(parent, x, y, content, cls) {
+    const t = el('text', { x, y, class: cls || '' }, parent);
+    t.textContent = content;
+    return t;
+  }
+  function clip(s, n) { return s.length > n ? s.slice(0, n - 1) + '…' : s; }
+  function harness(actor) { return actor ? actor.split(':')[0] : ''; }
+
+  function showEmpty(message) {
+    $('empty').textContent = message;
+    $('empty').style.display = message ? 'grid' : 'none';
+  }
+
+  function render() {
+    const snap = state.snap;
+    if (!snap) return;
+    $('project').textContent = snap.project || 'every project';
+    $('project').title = snap.project || '';
+    renderCounts(snap);
+    renderPlans(snap);
+    renderRecess(snap);
+    renderScrub(snap);
+    $('livetext').textContent = snap.live ? 'live' : 'as of ' + snap.as_of;
+    $('live').className = snap.live ? '' : 'replay';
+
+    const svg = $('svg');
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    const { nodes, edges, columns, width, height, at } = layout(snap);
+    if (!nodes.length) {
+      showEmpty(snap.tasks.length ? 'no unfinished tasks; the graph has run its course' : 'nothing filed yet — hird add or hird plan apply puts work here');
+      svg.setAttribute('width', 0); svg.setAttribute('height', 0);
+      return;
+    }
+    showEmpty('');
+    svg.setAttribute('width', width); svg.setAttribute('height', height);
+    svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+
+    const defs = el('defs', {}, svg);
+    for (const [id, cls] of [['arrow', 'edge'], ['arrow-hot', 'edge hot']]) {
+      const m = el('marker', { id, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 8, markerHeight: 8, orient: 'auto-start-reverse' }, defs);
+      const p = el('path', { d: 'M 0 0 L 10 5 L 0 10 z', class: cls }, m);
+      p.style.fill = cls.includes('hot') ? 'var(--edge-hot)' : 'var(--edge)';
+      p.style.stroke = 'none';
+    }
+
+    columns.forEach((col, i) => {
+      const x = PAD + i * (NODE_W + COL_GAP);
+      text(svg, x, PAD + 4, col.label, 'wave-label');
+      if (i) el('line', { x1: x - COL_GAP / 2, y1: PAD - 8, x2: x - COL_GAP / 2, y2: height - PAD / 2, class: 'wave-line' }, svg);
+    });
+
+    const focus = state.hover ?? state.selected;
+    const related = new Set();
+    if (focus != null) {
+      related.add(focus);
+      for (const e of edges) { if (e.from === focus) related.add(e.to); if (e.to === focus) related.add(e.from); }
+    }
+
+    const edgeLayer = el('g', {}, svg);
+    for (const e of edges) {
+      const a = at.get(e.from), b = at.get(e.to);
+      if (!a || !b) continue;
+      const x1 = a.x + NODE_W, y1 = a.y + NODE_H / 2, x2 = b.x, y2 = b.y + NODE_H / 2;
+      const dx = Math.max(30, (x2 - x1) / 2);
+      const hot = focus != null && (e.from === focus || e.to === focus);
+      const waiting = !terminal(a.task.status);
+      const cls = 'edge' + (waiting ? ' waiting' : '') + (hot ? ' hot' : (focus != null ? ' dim' : ''));
+      el('path', { d: `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`, class: cls, 'marker-end': hot ? 'url(#arrow-hot)' : 'url(#arrow)' }, edgeLayer);
+    }
+
+    const nodeLayer = el('g', {}, svg);
+    for (const n of nodes) {
+      const t = n.task;
+      let cls = 'node st-' + t.status;
+      if (t.review_of != null) cls += ' review';
+      if (state.selected === t.seq) cls += ' selected';
+      else if (related.has(t.seq)) cls += ' related';
+      else if (focus != null) cls += ' dim';
+      const g = el('g', { class: cls, transform: `translate(${n.x},${n.y})`, 'data-seq': t.seq }, nodeLayer);
+      el('rect', { width: NODE_W, height: NODE_H, rx: 8 }, g);
+      const title = el('title', {}, g);
+      title.textContent = `#${t.seq} ${t.title}\n${t.status}${t.holder ? ' · ' + t.holder : ''}`;
+      const line1 = text(g, 12, 21, '', '');
+      const seq = document.createElementNS(svgNS, 'tspan'); seq.setAttribute('class', 'seq'); seq.textContent = `#${t.seq} `;
+      const ttl = document.createElementNS(svgNS, 'tspan'); ttl.textContent = clip(t.title, 30);
+      line1.appendChild(seq); line1.appendChild(ttl);
+
+      let sub = t.status.replace('_', ' ');
+      if (t.holder) sub += ' · ' + harness(t.holder);
+      const line2 = text(g, 12, 39, sub, 'sub');
+      if (t.lease_expires_at) {
+        const lease = document.createElementNS(svgNS, 'tspan');
+        lease.setAttribute('class', 'lease'); lease.setAttribute('data-expires', t.lease_expires_at);
+        lease.textContent = ' · ' + remaining(t.lease_expires_at);
+        line2.appendChild(lease);
+      }
+
+      const badges = [];
+      if (t.waits_for.length) badges.push(['waits ' + t.waits_for.map(s => '#' + s).join(' '), 'badge']);
+      if (t.awaits_answer) badges.push(['awaits answer', 'badge']);
+      if (t.requires.length) badges.push(['requires ' + t.requires.join(','), 'badge req']);
+      if (t.review_of != null) badges.push(['reviews #' + t.review_of, 'badge review']);
+      if (t.under_review != null && t.status === 'done') badges.push(['under review #' + t.under_review, 'badge review']);
+      if (t.verdict === 'upheld' && t.status === 'done') badges.push(['upheld', 'badge ok']);
+      if (t.verdict === 'sent_back' && t.status === 'open') badges.push(['sent back', 'badge']);
+      if (t.priority) badges.push([(t.priority > 0 ? '▲' : '▼') + Math.abs(t.priority), 'sub']);
+      let x = 12;
+      const line3 = text(g, 12, 56, '', '');
+      for (const [label, c] of badges) {
+        const span = document.createElementNS(svgNS, 'tspan');
+        span.setAttribute('class', c); span.textContent = label + '  ';
+        line3.appendChild(span);
+        x += label.length * 6.6 + 12;
+        if (x > NODE_W - 20) break;
+      }
+
+      g.addEventListener('click', () => select(t.seq));
+      g.addEventListener('mouseenter', () => { state.hover = t.seq; render(); });
+      g.addEventListener('mouseleave', () => { state.hover = null; render(); });
+    }
+  }
+
+  function renderCounts(snap) {
+    const c = {};
+    for (const t of snap.tasks) c[t.status] = (c[t.status] || 0) + 1;
+    const order = ['open', 'claimed', 'in_progress', 'done', 'failed', 'cancelled'];
+    const box = $('counts');
+    box.textContent = '';
+    for (const s of order) {
+      if (!c[s]) continue;
+      const span = document.createElement('span');
+      const b = document.createElement('b'); b.textContent = c[s];
+      span.appendChild(b); span.appendChild(document.createTextNode(' ' + s.replace('_', ' ')));
+      box.appendChild(span);
+    }
+  }
+
+  function renderPlans(snap) {
+    const sel = $('plan');
+    const have = new Set([...sel.options].map(o => o.value));
+    for (const p of snap.plans) {
+      if (have.has(p)) continue;
+      const o = document.createElement('option'); o.value = p; o.textContent = p; sel.appendChild(o);
+    }
+    sel.value = state.plan;
+  }
+
+  function renderRecess(snap) {
+    const box = $('recess');
+    if (snap.recess) {
+      box.textContent = 'in recess' + (snap.recess.reason ? ' — "' + snap.recess.reason + '"' : '') + ' · called ' + snap.recess.at + ' · nothing new is handed out; hird resume lifts it';
+      box.className = 'on';
+    } else {
+      box.className = '';
+    }
+  }
+
+  // ----------------------------------------------------------- the scrubber
+
+  let scrubMin = 0, scrubMax = 0;
+  function renderScrub(snap) {
+    const range = $('when');
+    if (!snap.first_at) { range.disabled = true; $('asof').textContent = 'no trail yet'; return; }
+    range.disabled = false;
+    scrubMin = Date.parse(snap.first_at);
+    scrubMax = Date.now();
+    if (state.live) {
+      range.value = 1000;
+      $('asof').textContent = 'now';
+      $('golive').disabled = true;
+    } else {
+      $('asof').textContent = snap.as_of;
+      $('golive').disabled = false;
+    }
+  }
+
+  $('when').addEventListener('input', () => {
+    const f = Number($('when').value) / 1000;
+    if (f >= 1) { goLive(); return; }
+    const at = new Date(scrubMin + (scrubMax - scrubMin) * f);
+    state.live = false;
+    state.at = at.toISOString().replace(/\.\d{3}Z$/, '.999Z');
+    $('asof').textContent = state.at;
+    $('golive').disabled = false;
+    scheduleLoad();
+  });
+  function goLive() { state.live = true; state.at = null; load(); }
+  $('golive').addEventListener('click', goLive);
+
+  // -------------------------------------------------------------- the panel
+
+  async function select(seq) {
+    state.selected = seq;
+    render();
+    $('main').className = 'open';
+    $('aside-title').textContent = '#' + seq;
+    $('why').textContent = '…'; $('show').textContent = '';
+    try {
+      const r = await fetch('/api/task/' + seq);
+      const d = await r.json();
+      if (d.error) { $('why').textContent = d.error; return; }
+      $('why').textContent = d.why.trim();
+      $('show').textContent = d.show.trim();
+      const first = d.show.split('\n')[0];
+      $('aside-title').textContent = first;
+    } catch (e) {
+      $('why').textContent = 'could not read the task';
+    }
+  }
+  function closePanel() { state.selected = null; $('main').className = ''; render(); }
+  $('close').addEventListener('click', closePanel);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closePanel(); });
+
+  // ---------------------------------------------------------------- the feed
+
+  function renderFeed() {
+    const ul = $('feed');
+    ul.textContent = '';
+    for (const e of state.feed) {
+      const li = document.createElement('li');
+      const clock = (e.at || '').slice(11, 19);
+      const cells = [
+        [clock, 'clock'], ['#' + e.task, 'seq'], [e.kind, 'k ' + e.kind], [e.actor, 'actor'],
+        [e.detail || e.title, 'detail'],
+      ];
+      for (const [v, c] of cells) { const s = document.createElement('span'); s.className = c; s.textContent = v; li.appendChild(s); }
+      li.title = `#${e.task} ${e.title}`;
+      li.addEventListener('click', () => select(e.task));
+      ul.appendChild(li);
+    }
+    $('feedcount').textContent = state.feed.length ? 'cursor ' + state.cursor : 'nothing on the record yet';
+    ul.scrollTop = ul.scrollHeight;
+  }
+
+  // ------------------------------------------------------------- the clock
+
+  function remaining(expires) {
+    const ms = Date.parse(expires) - Date.now();
+    if (isNaN(ms)) return '';
+    if (ms <= 0) return 'overdue';
+    const m = Math.floor(ms / 60000), s = Math.floor((ms % 60000) / 1000);
+    return m ? `${m}m left` : `${s}s left`;
+  }
+  setInterval(() => {
+    for (const span of document.querySelectorAll('.lease')) span.textContent = ' · ' + remaining(span.getAttribute('data-expires'));
+  }, 1000);
+
+  $('plan').addEventListener('change', () => { state.plan = $('plan').value; load(); });
+  $('finished').addEventListener('change', () => { state.finished = $('finished').value; render(); });
+
+  loadFeed().then(follow).catch(follow);
+  load();
+})();
+</script>
+</body>
+</html>

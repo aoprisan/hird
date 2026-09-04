@@ -31,13 +31,16 @@ pub const WITNESS_INTERVAL: chrono::Duration = chrono::Duration::milliseconds(2_
 /// Upper bound on rows pulled into the memory browser at once.
 const MEMORY_PAGE: usize = 200;
 
-/// The three screens, cycled with `Tab`.
+/// The four screens, cycled with `Tab`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
     Queue,
     Memory,
     /// Who is working what, where they overlap, and what is workable next.
     Swarm,
+    /// The dependency graph laid out by wave, with what the selected task
+    /// waits for and feeds lit up around it.
+    Graph,
 }
 
 impl Screen {
@@ -45,17 +48,27 @@ impl Screen {
         match self {
             Screen::Queue => Screen::Memory,
             Screen::Memory => Screen::Swarm,
-            Screen::Swarm => Screen::Queue,
+            Screen::Swarm => Screen::Graph,
+            Screen::Graph => Screen::Queue,
         }
     }
 
     fn previous(self) -> Screen {
         match self {
-            Screen::Queue => Screen::Swarm,
+            Screen::Queue => Screen::Graph,
             Screen::Memory => Screen::Queue,
             Screen::Swarm => Screen::Memory,
+            Screen::Graph => Screen::Swarm,
         }
     }
+}
+
+/// One column of the graph screen: the finished ground live work builds on,
+/// or one dispatch wave.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphColumn {
+    pub title: String,
+    pub seqs: Vec<i64>,
 }
 
 /// One live agent, as the swarm screen shows it.
@@ -275,6 +288,13 @@ pub struct App {
     pub waves: Vec<Vec<i64>>,
     pub swarm_selected: usize,
 
+    // Graph screen.
+    /// Every dependency edge in scope, as (task, what it waits for).
+    pub edges: Vec<(i64, i64)>,
+    /// The selected column and the row within it.
+    pub graph_column: usize,
+    pub graph_row: usize,
+
     // Memory screen.
     pub assertions: Vec<Assertion>,
     pub memory_total: i64,
@@ -335,6 +355,9 @@ impl App {
             agents: Vec::new(),
             waves: Vec::new(),
             swarm_selected: 0,
+            edges: Vec::new(),
+            graph_column: 0,
+            graph_row: 0,
             assertions: Vec::new(),
             memory_total: 0,
             query: String::new(),
@@ -461,7 +484,8 @@ impl App {
         } else {
             db.recesses().current(&self.project)?
         };
-        self.waves = dispatch_waves(&self.tasks, &db.deps().edges(&scope)?);
+        self.edges = db.deps().edges(&scope)?;
+        self.waves = dispatch_waves(&self.tasks, &self.edges);
         self.look(db);
         self.agents = agent_rows(
             &self.tasks,
@@ -566,8 +590,79 @@ impl App {
             .collect()
     }
 
+    // ------------------------------------------------------------- the graph
+
+    /// The graph screen's columns: finished tasks that unfinished work still
+    /// builds on, then one column per dispatch wave.
+    ///
+    /// Only the ground that matters is shown — a finished task nobody waits
+    /// for is history, and the Done column of the board already has it.
+    pub fn graph_columns(&self) -> Vec<GraphColumn> {
+        let pending: std::collections::BTreeSet<i64> =
+            self.waves.iter().flatten().copied().collect();
+        let mut ground: Vec<i64> = self
+            .edges
+            .iter()
+            .filter(|(task, on)| pending.contains(task) && !pending.contains(on))
+            .map(|(_, on)| *on)
+            .collect();
+        ground.sort_unstable();
+        ground.dedup();
+        let mut columns = Vec::new();
+        if !ground.is_empty() {
+            columns.push(GraphColumn {
+                title: "done · the ground".to_string(),
+                seqs: ground,
+            });
+        }
+        for (index, wave) in self.waves.iter().enumerate() {
+            columns.push(GraphColumn {
+                title: match index {
+                    0 => "wave 1 · workable now".to_string(),
+                    n => format!("wave {} · after wave {n}", n + 1),
+                },
+                seqs: wave.clone(),
+            });
+        }
+        columns
+    }
+
+    /// The task under the graph cursor.
+    pub fn graph_selected(&self) -> Option<i64> {
+        self.graph_columns()
+            .get(self.graph_column)?
+            .seqs
+            .get(self.graph_row)
+            .copied()
+    }
+
+    /// Everything one task waits for, finished or not.
+    pub fn needs_of(&self, seq: i64) -> Vec<i64> {
+        self.edges
+            .iter()
+            .filter(|(task, _)| *task == seq)
+            .map(|(_, on)| *on)
+            .collect()
+    }
+
+    /// Everything that waits for one task.
+    pub fn feeds_of(&self, seq: i64) -> Vec<i64> {
+        self.edges
+            .iter()
+            .filter(|(_, on)| *on == seq)
+            .map(|(task, _)| *task)
+            .collect()
+    }
+
     /// Keep every cursor inside its list after the data changes underneath.
     fn clamp_selection(&mut self) {
+        let columns = self.graph_columns();
+        self.graph_column = self.graph_column.min(columns.len().saturating_sub(1));
+        let rows = columns
+            .get(self.graph_column)
+            .map(|c| c.seqs.len())
+            .unwrap_or(0);
+        self.graph_row = self.graph_row.min(rows.saturating_sub(1));
         for column in Column::ALL {
             let len = self.column_tasks(column).len();
             let idx = &mut self.selected[column.index()];
@@ -647,7 +742,44 @@ impl App {
                 Screen::Queue => self.queue_key(key, db)?,
                 Screen::Memory => self.memory_key(key, db)?,
                 Screen::Swarm => self.swarm_key(key, db)?,
+                Screen::Graph => self.graph_key(key, db)?,
             },
+        }
+        Ok(())
+    }
+
+    fn graph_key(&mut self, key: KeyEvent, db: &Db) -> anyhow::Result<()> {
+        let columns = self.graph_columns();
+        let rows = |column: usize| columns.get(column).map(|c| c.seqs.len()).unwrap_or(0);
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                let last = rows(self.graph_column).saturating_sub(1);
+                self.graph_row = (self.graph_row + 1).min(last);
+            }
+            KeyCode::Char('k') | KeyCode::Up => self.graph_row = self.graph_row.saturating_sub(1),
+            KeyCode::Char('h') | KeyCode::Left => {
+                self.graph_column = self.graph_column.saturating_sub(1);
+                self.graph_row = self
+                    .graph_row
+                    .min(rows(self.graph_column).saturating_sub(1));
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                let last = columns.len().saturating_sub(1);
+                self.graph_column = (self.graph_column + 1).min(last);
+                self.graph_row = self
+                    .graph_row
+                    .min(rows(self.graph_column).saturating_sub(1));
+            }
+            KeyCode::Char('g') | KeyCode::Home => self.graph_row = 0,
+            KeyCode::Char('G') | KeyCode::End => {
+                self.graph_row = rows(self.graph_column).saturating_sub(1);
+            }
+            KeyCode::Enter => {
+                if let Some(seq) = self.graph_selected() {
+                    self.show_task(seq, db)?;
+                }
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -1256,11 +1388,13 @@ mod tests {
         app.on_key(key(KeyCode::Tab), &db).unwrap();
         assert_eq!(app.screen, Screen::Swarm);
         app.on_key(key(KeyCode::Tab), &db).unwrap();
+        assert_eq!(app.screen, Screen::Graph);
+        app.on_key(key(KeyCode::Tab), &db).unwrap();
         assert_eq!(app.screen, Screen::Queue);
 
         // Shift-Tab walks the same ring backwards.
         app.on_key(key(KeyCode::BackTab), &db).unwrap();
-        assert_eq!(app.screen, Screen::Swarm);
+        assert_eq!(app.screen, Screen::Graph);
 
         app.on_key(ch('?'), &db).unwrap();
         assert_eq!(app.mode, Mode::Help);
@@ -1787,5 +1921,72 @@ mod tests {
             app.tasks.iter().find(|t| t.seq == seq).map(|t| t.status),
             Some(Status::Open)
         );
+    }
+
+    #[test]
+    fn the_graph_screen_walks_waves_and_the_ground_they_build_on() {
+        let (mut app, db) = fixture();
+        let schema = db
+            .tasks()
+            .create(PROJECT, "schema", "", 0, "cli")
+            .unwrap()
+            .seq;
+        let repos = db
+            .tasks()
+            .create(PROJECT, "repos", "", 0, "cli")
+            .unwrap()
+            .seq;
+        let notes = db
+            .tasks()
+            .create(PROJECT, "notes", "", 0, "cli")
+            .unwrap()
+            .seq;
+        let loose = db
+            .tasks()
+            .create(PROJECT, "loose", "", 0, "cli")
+            .unwrap()
+            .seq;
+        db.deps().add(repos, schema, "cli").unwrap();
+        db.deps().add(notes, repos, "cli").unwrap();
+        db.tasks()
+            .claim(schema, "codex:1", std::time::Duration::from_secs(900))
+            .unwrap();
+        db.tasks().complete(schema, "codex:1", "done").unwrap();
+        app.refresh(&db).unwrap();
+
+        let columns = app.graph_columns();
+        assert_eq!(columns[0].title, "done · the ground");
+        assert_eq!(columns[0].seqs, vec![schema]);
+        assert_eq!(columns[1].seqs, vec![repos, loose]);
+        assert_eq!(columns[2].seqs, vec![notes]);
+        assert_eq!(app.needs_of(repos), vec![schema]);
+        assert_eq!(app.feeds_of(repos), vec![notes]);
+
+        app.screen = Screen::Graph;
+        assert_eq!(app.graph_selected(), Some(schema));
+        app.on_key(ch('l'), &db).unwrap();
+        app.on_key(ch('j'), &db).unwrap();
+        assert_eq!(app.graph_selected(), Some(loose));
+        // Moving into a shorter column keeps the cursor inside it.
+        app.on_key(ch('l'), &db).unwrap();
+        assert_eq!(app.graph_selected(), Some(notes));
+        app.on_key(ch('l'), &db).unwrap();
+        assert_eq!(app.graph_selected(), Some(notes));
+        app.on_key(key(KeyCode::Enter), &db).unwrap();
+        assert!(matches!(app.mode, Mode::TaskDetail { .. }));
+    }
+
+    #[test]
+    fn an_empty_graph_has_nothing_selected_and_takes_keys_calmly() {
+        let (mut app, db) = fixture();
+        app.refresh(&db).unwrap();
+        app.screen = Screen::Graph;
+        assert!(app.graph_columns().is_empty());
+        assert_eq!(app.graph_selected(), None);
+        for k in ['j', 'k', 'h', 'l', 'g', 'G'] {
+            app.on_key(ch(k), &db).unwrap();
+        }
+        app.on_key(key(KeyCode::Enter), &db).unwrap();
+        assert_eq!(app.mode, Mode::Normal);
     }
 }

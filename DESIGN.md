@@ -17,7 +17,9 @@ The human creates tasks (CLI or TUI), then tells any agent in any harness "pick 
 
 ### Non-goals (v1)
 - No multi-machine sync (design must not preclude it; see §9).
-- No daemon / HTTP server mode.
+- No daemon / HTTP server mode. *(v2.9 draws the line more finely: `hird
+  web` is a loopback, read-only viewer with the TUI's posture, not a server
+  mode anything depends on — see §28.)*
 - No task dependencies/DAGs, priorities beyond a simple integer, or scheduling.
 - No automatic task dispatch — the human assigns tasks by telling an agent the id.
 - No embeddings/vector search — FTS5 only.
@@ -1941,3 +1943,100 @@ gate it is, the TUI status bar carries it beside the counts. No daemon and
 no scheduler follow from the same shape: enforcement happens where claims
 are already decided, and a recess ends when the human says so, never at a
 time.
+
+## 28. (v2.9) The picture — the graph as data, and the board in a browser
+
+Everything the queue knew about the shape of a plan it said in words: waves
+on `hird graph`, `waits #1 #3` on a card, a wave count in the swarm pane. The
+picture existed only as `--dot` and `--mermaid`, a snapshot for a README. A
+human watching a swarm work a twenty-task plan could see who held what and
+could not see the plan.
+
+Three things were built, in the order a reader should meet them.
+
+### The snapshot
+
+`hird graph --json` prints the board as one value (`src/graph.rs`): every
+task in scope with its status, holder, lease, requirements, the plan and
+node it was filed under, the wave it sits in (none for finished work),
+`waits_for` and `feeds`, whether a question parks it, whether it is a review
+or under one and the newest verdict on it; every dependency edge pointing the
+way work flows; the waves; the recess if one stands; and the trail's bounds —
+the first instant and the newest cursor — so a reader can resume and a
+scrubber knows where to start. The renderers are readers of it: the page is
+served this object, and anything else that wants to draw the board reads the
+same one rather than the tables.
+
+`--plan <name>` narrows any rendering to the tasks one plan filed and the
+edges between them, read from `task_plan_nodes` (§13). The `--json` waves
+are the queue's own — computed over the whole scope before narrowing, so a
+plan's task that waits for work outside the plan reads in the wave it will
+really be handed out in — while the text and picture renderers compute waves
+over the narrowed set, because those are drawings of the plan rather than
+statements about the queue. A plan name nothing here was filed from is
+refused by name.
+
+### The graph screen
+
+A fourth TUI screen, after Swarm: one column per wave, and the finished
+tasks live work still builds on in a column of their own on the left. Each
+card is the queue card with one more line — `needs #1 · feeds #4` — and
+selecting a card lights up its neighbours with the side they are on. Edges
+are said, not drawn. That is a decision rather than a shortfall: a terminal
+draws a dozen crossing arrows badly, and a screen that tried would be worse
+at the thing it is good at, which is standing beside the agents. When more
+waves exist than fit, the window slides to keep the selected one on screen.
+
+### `hird web` — a viewer, not a transport
+
+§1 wrote "no daemon / HTTP server mode" as a non-goal, and the roadmap
+repeats "no daemon, no server, no accounts" as a constraint every item must
+respect. Read what those rules protect: nothing hird depends on may stay up,
+and no agent may need a socket to reach the queue. A viewer breaks neither,
+and the TUI is already a long-lived foreground process that polls SQLite
+twice a second. `hird web` is that process rendering into a browser instead
+of a terminal, and it is held to exactly the TUI's posture:
+
+- **Loopback, and it dies with the terminal.** It binds `127.0.0.1` unless
+  told otherwise, one process per session, nothing installed and nothing
+  with an account.
+- **Read-only.** Every route is a `GET`; a `POST` is turned away before it
+  is read; the page has no button that writes. Cancelling, reopening,
+  answering and filing stay with the CLI and the TUI, where the human is.
+- **No agent talks to it.** Harnesses reach the queue over MCP on stdio as
+  before. The queue does not know it is being watched.
+- **It keeps the board's duties while it runs.** It sweeps expired leases at
+  the board's cadence and announces them through the herald (§21), so a tab
+  left open never swallows a summons, and it looks at the working tree on
+  the witness's interval (§12) as `actor = "web"`.
+
+The line, then, is between a *screen* and a *transport*: a transport is what
+an agent depends on to reach the queue, and the HTTP mode for `hird mcp` the
+roadmap defers is still deferred, on its own merits.
+
+Four routes and one stream, hand-rolled on `std::net` with a thread per
+connection: the page, `/api/graph` (live, or `?at=` for a replay, `?plan=`
+to narrow), `/api/task/<seq>` (the text of `hird why` and `hird show`,
+because the answer a human wants when they click a node is the one those
+commands already give), `/api/events` (the tail), and `/api/feed` —
+server-sent events, resumable by cursor, at the poll interval. No HTTP
+framework: the binary's startup time is something harnesses measure, and
+this did not justify a dependency tree.
+
+### The scrubber, and what a replay knows
+
+Dragging the slider asks `/api/graph?at=` for the board as it stood, folded
+from the trail by the same `board_at` that `hird replay` prints (§26). A
+replayed snapshot says `live: false` and is honest about its limits:
+status, holder and the question gate come from events, while dependencies
+and requirements are the present-day rows, because the trail records those
+edits as sentences rather than as reversible facts. A picture that showed an
+edge as of a moment it could not know about would be inventing history; one
+that shows today's edges under yesterday's statuses is showing what it can
+prove, and says which is which.
+
+### Still twelve tools, six statuses, and no new table
+
+One repo read (`Events::bounds`), one module that reads the tables into a
+value, one that serves it, and one screen. No MCP tool, no status, no
+schema change, no dependency.
