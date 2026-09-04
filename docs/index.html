@@ -29,10 +29,12 @@
     <li class="sub"><a href="#protocol">The protocol</a></li>
     <li><a href="#lifecycle">How a task moves</a></li>
     <li><a href="#dependencies">Dependencies</a></li>
+    <li><a href="#capabilities">What a worker must have</a></li>
     <li><a href="#scope">File scope and collisions</a></li>
     <li><a href="#witness">What actually happened</a></li>
     <li class="sub"><a href="#footprint">Modified, or read-only</a></li>
     <li class="sub"><a href="#exhibit">The witness keeps what it saw</a></li>
+    <li class="sub"><a href="#tenure">Every hand that held it</a></li>
     <li><a href="#split">Splitting a task</a></li>
     <li><a href="#review">No agent reviews its own work</a></li>
     <li><a href="#verdict">The review closes its own loop</a></li>
@@ -540,6 +542,13 @@ next: in VS Code: MCP: List Servers → hird → Start Server, then tick hird in
 
 <pre><code><span class="k">hird</span> register codex --name hird-scratch --db /tmp/scratch/hird.db</code></pre>
 
+<p>
+  <code>--capability</code> records what the registered session can satisfy —
+  a browser, network access, an operating system — as
+  <code>HIRD_CAPABILITIES</code> in the same entry, which is how
+  <a href="#capabilities">work that requires them</a> finds the right hands.
+</p>
+
 <h3>What it writes</h3>
 
 <h4>Claude Code</h4>
@@ -739,7 +748,10 @@ env = { HIRD_HARNESS = <span class="s">"codex"</span> }</code></pre>
   github.com runs in an ephemeral container with no access to your machine.
   hird is a local queue in a local SQLite file, so there is nothing there for
   it to connect to — register hird in an editor or CLI that runs on the same
-  machine as the database (<code>hird db-path</code>).
+  machine as the database (<code>hird db-path</code>). What such a session
+  <em>can</em> be given is the brief: <code>hird handoff &lt;seq&gt;</code>
+  renders everything a claim would hand an agent as Markdown, to paste where
+  the queue does not reach.
 </p>
 
 <p>
@@ -841,6 +853,44 @@ it becomes claimable once every dependency is done</span></code></pre>
   <code>hird graph</code> prints waves rather than edges, because that is the
   shape you actually want: how much of this can run at once, and what the
   critical path is.
+</p>
+</section>
+
+<section id="capabilities">
+<h2>Work knows what its worker must have</h2>
+
+<p>
+  Harnesses are not interchangeable. One may have a browser, another network
+  access or deployment credentials, and a third may be the only session
+  running on macOS. Put those hard constraints on the work instead of
+  discovering them after the wrong agent takes a lease:
+</p>
+
+<pre><code><span class="k">hird</span> add <span class="s">"Verify the responsive UI"</span> --path <span class="s">'frontend/**'</span> --requires browser
+<span class="k">hird</span> register codex --capability network
+<span class="k">hird</span> register claude-code --capability browser --capability network</code></pre>
+
+<p>
+  The registration writes <code>HIRD_CAPABILITIES</code>; labels are lowercase
+  free-form tokens such as <code>browser</code>, <code>network</code>,
+  <code>macos</code> or <code>deploy.staging</code>. A named claim from an
+  unequipped session is refused before it writes anything:
+</p>
+
+<pre><code><span class="w">task 7 requires browser, but this session advertises network; start a capable
+harness or update HIRD_CAPABILITIES</span></code></pre>
+
+<p>
+  <code>task_next</code> routes around the mismatch and reports skipped tasks
+  under <code>incompatible</code>, alongside blocked, contended and recused
+  work. This does not make hird an agent router: the queue knows what the task
+  requires and what this caller advertises, but it has no roster and chooses
+  nobody. The <a href="#dispatch-hook">dispatch hook</a> receives the same
+  requirements as <code>HIRD_REQUIRES</code> and remains the place that maps
+  labels to workers. Reviews inherit the work's requirements, because checking
+  browser-only work generally requires a browser too; use
+  <code>hird require &lt;seq&gt; --clear</code> when a particular review only
+  needs its diff.
 </p>
 </section>
 
@@ -1100,21 +1150,43 @@ salvaged src/config.rs as the witness last saw it under the task — 24 bytes in
 </p>
 
 <p>
-  The record survives the task changing hands. When a lease expires mid-work,
-  work is released, or a review sends it back, the next claim archives the
-  previous holding as a <em>tenure</em> — who held it, how it ended, what
-  moved — instead of overwriting it, and the successor's claim answer carries
-  <code>previously</code>: whose uncommitted leavings are in the tree it
-  starts from, and which files to re-read before building on or over them.
-  <code>hird show</code> numbers the rounds, and <code>hird diff --tenure
-  N</code> and <code>hird salvage --tenure N</code> read them back after the
-  redo has written over everything.
-</p>
-
-<p>
   Kept versions are pruned once nothing references them and they have aged
   out, so the store grows with what actually changed, not with time.
   <code>exhibit = false</code> keeps the watching and gives up the keeping.
+</p>
+
+<h3 id="tenure">A task remembers every hand that held it</h3>
+
+<p>
+  An agent claims a task, edits two files, and dies — session killed, laptop
+  closed, context burned out. The lease lapses and the task goes back in the
+  pool. Whoever picks it up next starts on a working tree carrying a vanished
+  agent's uncommitted edits, looking exactly like code that was always there.
+</p>
+
+<p>
+  So the record survives the task changing hands. When a lease expires
+  mid-work, work is released, or a review sends it back, the next claim
+  archives the previous holding as a <em>tenure</em> — who held it, how it
+  ended, what moved — instead of overwriting it, and the successor's claim
+  answer carries <code>previously</code>: whose uncommitted leavings are in
+  the tree it starts from, and which files to re-read before building on or
+  over them.
+</p>
+
+<pre><code>{ <span class="s">"claimed"</span>: 7,
+  <span class="s">"previously"</span>: <span class="s">"codex:9f2c went quiet until the lease expired, and these files moved
+    while they held it: src/config.rs (modified), src/loader.rs (added). Whatever state
+    they left is part of the tree this claim starts from — `hird diff 7 --tenure 1`
+    shows that round's changes before you build on or over them"</span> }</code></pre>
+
+<p>
+  <code>hird show</code> numbers the rounds (<code>held  round 1: codex:9f2c —
+  lease expired; saw src/config.rs (modified)</code>), and <code>hird diff
+  --tenure N</code> and <code>hird salvage --tenure N</code> keep every earlier
+  round readable and recoverable after the redo has written over all of it. A
+  review that sends work back gets the same benefit for free: the redo no
+  longer erases the evidence of the round the reviewer judged.
 </p>
 
 <h3 id="witness-cost">It is never in the way</h3>
@@ -1594,10 +1666,13 @@ shaky     the renderer redraws on every poll
 <h2>Command line</h2>
 
 <pre><code>hird add &lt;title&gt; [--body &lt;md&gt;|--body-file &lt;path&gt;] [--priority N] [--project &lt;path&gt;]
-                 [--needs &lt;seq&gt;,…] [--path &lt;glob&gt;]… [--review]
+                 [--needs &lt;seq&gt;,…] [--path &lt;glob&gt;]… [--requires &lt;capability&gt;]… [--review]
 hird ls [--status &lt;status&gt;] [--all-projects]
 hird show &lt;seq&gt;
 hird why &lt;seq&gt;
+hird blame &lt;path&gt;
+hird digest [--since &lt;when&gt;] [--peek] [--all-projects]
+hird handoff &lt;seq&gt;
 hird diff &lt;seq&gt; [--path &lt;file&gt;] [--tenure N]
 hird salvage &lt;seq&gt; &lt;path&gt; [--baseline] [--tenure N] [--out &lt;file&gt; [--force]]
 hird cancel &lt;seq&gt; [--reason &lt;text&gt;]
@@ -1609,8 +1684,10 @@ hird dep add &lt;seq&gt; --needs &lt;seq&gt;,…
 hird dep rm  &lt;seq&gt; --needs &lt;seq&gt;,…
 hird plan apply &lt;file&gt; [--dry-run] [--project &lt;path&gt;]
 hird plan lint &lt;file&gt; [--project &lt;path&gt;]
+hird plan export [--plan &lt;name&gt;] [--name &lt;name&gt;] [--all] [--project &lt;path&gt;]
 hird graph [--all-projects] [--plan &lt;name&gt;] [--dot | --mermaid | --json]
 hird scope &lt;seq&gt; [--path &lt;glob&gt;]… [--clear]
+hird require &lt;seq&gt; [--capability &lt;name&gt;]… [--clear]
 hird agents [--all-projects]
 hird recuse &lt;seq&gt; --from &lt;seq&gt;,… [--reason &lt;text&gt;] | --clear
 hird record [--all-projects]
@@ -1625,6 +1702,8 @@ hird mem export [--path &lt;glob&gt;] [--firm]
 hird tui
 hird web [--port N] [--bind &lt;addr&gt;] [--all-projects]
 hird mcp
+hird register &lt;claude-code|codex|copilot|copilot-cli|gemini|opencode&gt; [--name &lt;name&gt;]
+              [--capability &lt;name&gt;]… [--print] [--force]
 hird db-path</code></pre>
 
 <div class="table-wrap">
@@ -1635,15 +1714,19 @@ hird db-path</code></pre>
     <tr><td><code>ls</code></td><td>The queue as rows: status, holder, lease countdown, what it waits for, and whether it <a href="#footprint">changed anything</a>.</td></tr>
     <tr><td><code>show</code></td><td>One task in full — body, dependencies, scope, history, what was learned on it, and what the working tree says it did.</td></tr>
     <tr><td><code>why</code></td><td>Whether a task is claimable right now, verdict first — and if not, every gate in the way: the lease, unfinished dependencies, an unanswered question, recusals, capability requirements, overlap with live work.</td></tr>
+    <tr><td><code>blame</code></td><td>One file's history across the queue: which tasks declared it, whose hands the witness saw in it across every round they were held, and what the memory says about it, each fact marked with whether it still stands. <code>show</code> answers for a task; this answers for a file.</td></tr>
+    <tr><td><code>digest</code></td><td>What happened on the board since you last looked, folded into news. Reading it moves a bookmark so the next digest starts where this one ended; <code>--peek</code> reads without moving it, <code>--since 2h</code> reads a window instead.</td></tr>
+    <tr><td><code>handoff</code></td><td>The claim brief as Markdown — instructions, the ground it builds on, questions and answers, declared files, what has moved under it, the findings it was sent back with, and what earlier work learned about the same files — for a session that cannot reach the queue: a cloud harness, a fresh clone, a session with no MCP at all.</td></tr>
     <tr><td><code>diff</code></td><td>The uncommitted diff of what moved under a task, from the versions the <a href="#exhibit">witness kept</a> — even after the task is done and the tree has moved on. <code>--tenure N</code> reads an archived round instead, after the task has changed hands.</td></tr>
     <tr><td><code>salvage</code></td><td>Recover a version of a file as it stood under a task: the last one the witness saw, or with <code>--baseline</code> the one the task started from. <code>--tenure N</code> reaches an earlier holding's record.</td></tr>
     <tr><td><code>cancel</code> / <code>reopen</code></td><td>Human overrides. They work regardless of who holds the task.</td></tr>
     <tr><td><code>answer</code></td><td>Resolve the question holding an open task out of dispatch; the answer is handed to its next claimant.</td></tr>
     <tr><td><code>recess</code> / <code>resume</code></td><td>Stand this project's queue down and lift it again — <a href="#recess">the recess</a>. While it stands nothing is handed out and the dispatch hook is quiet; work already claimed continues. Resuming announces everything that waited.</td></tr>
     <tr><td><code>dep</code></td><td>Add or remove "must wait for" edges after the fact.</td></tr>
-    <tr><td><code>plan</code></td><td>File a whole graph from a <a href="#plan-files">plan file</a>, in one transaction. <code>--dry-run</code> reads it out — waves, overlaps and all — and writes nothing. <code>lint</code> reads the same file for the trouble it can carry while still filing cleanly: unordered tasks on the same files, tasks the collision radar cannot see, reviews that will never be filed or that nobody present could claim.</td></tr>
+    <tr><td><code>plan</code></td><td>File a whole graph from a <a href="#plan-files">plan file</a>, in one transaction. <code>--dry-run</code> reads it out — waves, overlaps and all — and writes nothing. <code>lint</code> reads the same file for the trouble it can carry while still filing cleanly: unordered tasks on the same files, tasks the collision radar cannot see, reviews that will never be filed or that nobody present could claim. <code>export</code> is the round trip: the board written back out as the TOML <code>apply</code> reads, unfinished tasks by default and everything with <code>--all</code>, tasks keeping the names their plan gave them.</td></tr>
     <tr><td><code>graph</code></td><td>The plan as dispatch waves: workable now, and what each later wave waits for. <code>--dot</code> and <code>--mermaid</code> draw it; <code>--json</code> is the board as one object, for anything that draws it; <code>--plan</code> narrows any of them to one plan's tasks.</td></tr>
     <tr><td><code>scope</code></td><td>Show or set the files a task is expected to touch. Warns about overlaps.</td></tr>
+    <tr><td><code>require</code></td><td>Show or set the <a href="#capabilities">capabilities</a> a task's worker must have. Supplying any replaces the set; <code>--clear</code> empties it, which a review only needing its diff sometimes wants.</td></tr>
     <tr><td><code>agents</code></td><td>Who is working what, what has moved under each of them, and a <code>!!</code> line wherever two agents are in the same files.</td></tr>
     <tr><td><code>record</code></td><td>Each harness's track record under <a href="#verdict">review</a>: work upheld, work sent back, first-pass rate, and the verdicts it has handed out.</td></tr>
     <tr><td><code>events</code></td><td>The append-only trail read across tasks, oldest first — <a href="#events">the board as a log</a>. <code>--follow</code> keeps reading; <code>--json</code> makes each line one object.</td></tr>
@@ -1653,6 +1736,7 @@ hird db-path</code></pre>
     <tr><td><code>tui</code></td><td>The live board.</td></tr>
     <tr><td><code>web</code></td><td>The live board as a picture in a browser — <a href="#web">the graph, running</a>. Loopback, read-only, gone when the terminal is.</td></tr>
     <tr><td><code>mcp</code></td><td>Serve MCP on stdio. Harnesses run this, you generally do not.</td></tr>
+    <tr><td><code>register</code></td><td>Write the MCP registration into <a href="#harnesses">the one file a harness reads</a>, with the binary's absolute path. <code>--capability</code> records what that session can satisfy; <code>--print</code> shows the entry without writing it.</td></tr>
     <tr><td><code>db-path</code></td><td>Print the database path this invocation would use.</td></tr>
   </tbody>
 </table>
@@ -1981,6 +2065,7 @@ question_hook = <span class="s">""</span></code></pre>
   <thead><tr><th>Variable</th><th>Meaning</th></tr></thead>
   <tbody>
     <tr><td><code>HIRD_HARNESS</code></td><td>This session's harness name. Set it in the MCP registration. Unset, the name the harness’s client gives for itself is used instead.</td></tr>
+    <tr><td><code>HIRD_CAPABILITIES</code></td><td>Comma-separated <a href="#capabilities">capabilities</a> this MCP session can satisfy. <code>hird register --capability</code> writes it.</td></tr>
     <tr><td><code>HIRD_PROJECT</code></td><td>Override project detection.</td></tr>
     <tr><td><code>HIRD_DB</code></td><td>Override the database path.</td></tr>
   </tbody>
@@ -2037,6 +2122,10 @@ question_hook = <span class="s">""</span></code></pre>
       <td>A finished task's uncommitted diff shown after the tree has moved on, and a written-over version brought back — the <a href="#exhibit">exhibit</a>, end to end. Makes its own throwaway git repository.</td>
     </tr>
     <tr>
+      <td><a href="https://github.com/aoprisan/hird/blob/main/examples/tenure.sh"><code>tenure.sh</code></a></td>
+      <td>An agent leaves uncommitted edits and vanishes; the successor's own claim says whose leavings it is standing in, and round one stays diffable after round two writes over it — <a href="#tenure">the tenure</a>. Makes its own throwaway git repository.</td>
+    </tr>
+    <tr>
       <td><a href="https://github.com/aoprisan/hird/blob/main/examples/question.sh"><code>question.sh</code></a></td>
       <td>An agent reaches a decision it must not guess, the task stays out of dispatch until the human answers, and the answer rides in the next claim.</td>
     </tr>
@@ -2057,6 +2146,10 @@ question_hook = <span class="s">""</span></code></pre>
       <td>The <a href="#dispatch-hook">dispatch hook</a> hearing about every task that becomes claimable — filed, unblocked, review filed, sent back — with a log file standing in for the multiplexer.</td>
     </tr>
     <tr>
+      <td><a href="https://github.com/aoprisan/hird/blob/main/examples/recess.sh"><code>recess.sh</code></a></td>
+      <td><a href="#recess">The queue stood down</a>: claims refused in the human's words, <code>task_next</code> told to stand by rather than "the queue is empty", the dispatch hook quiet, and everything that waited announced on <code>hird resume</code>.</td>
+    </tr>
+    <tr>
       <td><a href="https://github.com/aoprisan/hird/blob/main/examples/events.sh"><code>events.sh</code></a></td>
       <td><a href="#events">The board as a log</a>: a follower tails the trail while two harnesses work, then the same record is read after the fact, filtered by kind, and emitted as JSON. Makes its own throwaway git repository.</td>
     </tr>
@@ -2074,7 +2167,11 @@ question_hook = <span class="s">""</span></code></pre>
     </tr>
     <tr>
       <td><a href="https://github.com/aoprisan/hird/tree/main/examples/harness"><code>harness/</code></a></td>
-      <td>Drop-in MCP registration for Claude Code, Codex CLI and VS&nbsp;Code / Copilot.</td>
+      <td>Drop-in MCP registration for Claude Code, Codex CLI, Copilot in VS&nbsp;Code, the Copilot CLI, the Gemini CLI and OpenCode — what <code>hird register</code> writes, for reading or for pasting somewhere it does not reach.</td>
+    </tr>
+    <tr>
+      <td><a href="https://github.com/aoprisan/hird/blob/main/examples/lib/mcp.sh"><code>lib/mcp.sh</code></a></td>
+      <td>The shell helpers the scripts share — a raw MCP session in twenty lines, and the stateless 2026-07-28 form beside it.</td>
     </tr>
   </tbody>
 </table>

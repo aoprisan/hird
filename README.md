@@ -348,7 +348,9 @@ empty log is the healthy case and `command not found` is the usual one.
 in an ephemeral container with no access to your machine. hird is a local
 queue in a local SQLite file, so there is nothing there for it to connect to —
 register hird in an editor or CLI that runs on the same machine as the
-database (`hird db-path`).
+database (`hird db-path`). What such a session *can* be given is the brief:
+`hird handoff <seq>` renders everything a claim would hand an agent as
+Markdown, to paste where the queue does not reach.
 
 Confirm the binary works at all before blaming the wiring: `hird ls` from a
 terminal exercises the same database over the same code the server does.
@@ -1238,8 +1240,11 @@ hird add <title> [--body <md>|--body-file <path>] [--priority N] [--project <pat
 hird ls [--status <status>] [--all-projects]
 hird show <seq>
 hird why <seq>
-hird diff <seq> [--path <file>]
-hird salvage <seq> <path> [--baseline] [--out <file> [--force]]
+hird blame <path>
+hird digest [--since <when>] [--peek] [--all-projects]
+hird handoff <seq>
+hird diff <seq> [--path <file>] [--tenure N]
+hird salvage <seq> <path> [--baseline] [--tenure N] [--out <file> [--force]]
 hird cancel <seq> [--reason <text>]
 hird reopen <seq> [--reason <text>]
 hird answer <seq> <answer>
@@ -1249,6 +1254,7 @@ hird dep add <seq> --needs <seq>,…
 hird dep rm  <seq> --needs <seq>,…
 hird plan apply <file> [--dry-run] [--project <path>]
 hird plan lint <file> [--project <path>]
+hird plan export [--plan <name>] [--name <name>] [--all] [--project <path>]
 hird graph [--all-projects] [--plan <name>] [--dot | --mermaid | --json]
 hird scope <seq> [--path <glob>]… [--clear]
 hird require <seq> [--capability <name>]… [--clear]
@@ -1395,6 +1401,50 @@ And because the trail is append-only, the past stays a board too: `hird
 replay 2h` (or a timestamp) folds the events back into the queue as it stood
 at that moment — who held what, which wave was live, what was parked on a
 question — for the post-mortem question `--follow` was too late for.
+
+## The queue explains itself
+
+Everything above is written down as it happens. These commands read it back
+in the shape a particular question has, and none of them writes anything.
+
+- **`hird why <seq>`** — whether a task is claimable right now, and if not,
+  every gate in the way in the order dispatch checks them: a standing recess,
+  the lease, unfinished dependencies, an unanswered question, recusals,
+  capability requirements, overlap with live work. It is the same answer an
+  agent gets in a refusal, read by a human before they go and ask.
+- **`hird blame <path>`** — one file's history across the queue: which tasks
+  declared it, whose hands the witness saw in it across every round they were
+  held, and what the memory says about it, each fact marked with whether it
+  still stands. `hird show` answers for a task; this answers for a file,
+  which is the question a reader asks before editing something the swarm has
+  been through.
+- **`hird digest`** — what happened on the board since you last looked,
+  folded into news rather than replayed as a trail. Reading it moves a
+  bookmark so the next digest starts where this one ended; `--peek` reads
+  without moving it, and `--since 2h` (or an instant) reads a window instead.
+- **`hird handoff <seq>`** — the claim brief as Markdown: instructions, the
+  ground it builds on, questions and their answers, declared files, what has
+  already moved under it, the findings it was sent back with, and what earlier
+  work learned about the same files. Everything a `task_claim` would hand an
+  agent, on paper, for a session that cannot reach the queue — a cloud harness,
+  a fresh clone, or a session with no MCP at all.
+- **`hird plan lint <file>`** — the trouble a fileable plan can still carry:
+  unordered tasks declaring the same files, tasks the collision radar cannot
+  see because they declared nothing, reviews that will never be filed or that
+  nobody on this board could claim. Advisories, not refusals; the exit code is
+  nonzero only when the plan itself is unfileable.
+- **`hird plan export`** — the round trip: the board written back out as the
+  TOML `hird plan apply` reads, unfinished tasks by default and everything
+  with `--all`. Tasks filed from a plan keep the names it gave them; the rest
+  are named from their titles. `--plan <name>` exports one plan's tasks.
+- **`hird replay <when>`** — the board as it stood at a past moment, folded
+  from the trail; see [the board as a log](#the-board-as-a-log).
+- **`hird mem export`** — the project's current facts as Markdown for a
+  `CLAUDE.md` or `AGENTS.md`, footing intact: a fact whose ground has moved
+  goes out marked for a re-read, `--firm` leaves it home, and `--path <glob>`
+  narrows to the facts anchored under one part of the tree. One way only —
+  nothing imports prose back, because a memory that round-trips through
+  sentences is a memory that loses facts.
 
 ## Seeing the graph run
 
@@ -1563,10 +1613,14 @@ points `HIRD_DB` at a throwaway file, so running one cannot disturb your board.
                                 #   and a third task that finishes read-only
 ./examples/exhibit.sh           # a finished task's uncommitted diff, and a
                                 #   written-over version brought back
+./examples/tenure.sh            # an agent vanishes mid-edit; the successor's claim
+                                #   says whose leavings it is standing in
 ./examples/question.sh          # wait for a human answer, then hand it to the next claim
 ./examples/footing.sh           # a fact, the file it came from, and that file rewritten
 ./examples/review.sh            # work that files its own review, barred to whoever did it
 ./examples/verdict.sh           # the sent-back loop, and the per-harness record it leaves
+./examples/dispatch-hook.sh     # the one push: a hook hears every task that becomes
+                                #   claimable, with whom it must not wake
 ./examples/recess.sh            # the queue stood down: claims refused in your words,
                                 #   the hook quiet, and the backlog announced on resume
 ./examples/events.sh            # the board as a log: a follower tails the trail
@@ -1578,7 +1632,8 @@ They open real `hird mcp` sessions and send the tool calls a harness would,
 because claiming and completing are agent-side operations with no CLI verb —
 so the transcript shows exactly what "pick up task 42" looks like on the wire.
 [`examples/harness/`](examples/harness) has drop-in MCP registration for Claude
-Code, Codex CLI, Copilot in VS Code and the Copilot CLI.
+Code, Codex CLI, Copilot in VS Code, the Copilot CLI, the Gemini CLI and
+OpenCode.
 
 ## Documentation
 
