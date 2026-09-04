@@ -94,8 +94,8 @@ curl -fsSL https://raw.githubusercontent.com/aoprisan/hird/main/scripts/get.sh |
 ```
 
 No Rust toolchain: this downloads the [release](https://github.com/aoprisan/hird/releases)
-binary for your platform (Linux x86_64/aarch64, macOS Intel/Apple silicon —
-the Linux ones are static musl builds that run on any distribution), verifies
+binary for your platform (Linux x86_64/aarch64, macOS Apple silicon — the
+Linux ones are static musl builds that run on any distribution), verifies
 it against the release's checksum, and installs it as `~/.local/bin/hird`.
 Append `-s -- --install-skill` to the `sh` to also install the agent skill,
 and set `HIRD_VERSION=v0.1.0` to pin a release instead of taking the latest.

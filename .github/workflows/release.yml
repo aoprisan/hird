@@ -51,10 +51,9 @@ jobs:
             runner: ubuntu-latest
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
-          # Both macOS targets build on the arm runner; the Intel one is a
-          # cross-compile the toolchain handles by itself.
-          - target: x86_64-apple-darwin
-            runner: macos-latest
+          # Apple silicon only. An Intel Mac builds from source; a Rosetta
+          # shell on an arm Mac reports x86_64 but takes this same binary,
+          # which scripts/get.sh sorts out by asking the kernel.
           - target: aarch64-apple-darwin
             runner: macos-latest
     runs-on: ${{ matrix.runner }}
