@@ -43,7 +43,15 @@ arch="$(uname -m)"
 case "$os/$arch" in
     Linux/x86_64) target=x86_64-unknown-linux-musl ;;
     Linux/aarch64 | Linux/arm64) target=aarch64-unknown-linux-musl ;;
-    Darwin/x86_64) target=x86_64-apple-darwin ;;
+    # Releases carry no Intel Mac binary. Apple silicon under a Rosetta
+    # shell also reports x86_64, so ask the kernel before refusing.
+    Darwin/x86_64)
+        if [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)" = 1 ]; then
+            target=aarch64-apple-darwin
+        else
+            die "no prebuilt binary for an Intel Mac; scripts/install.sh builds from source (needs a Rust toolchain)"
+        fi
+        ;;
     Darwin/arm64) target=aarch64-apple-darwin ;;
     *) die "no prebuilt binary for $os/$arch; scripts/install.sh builds from source (needs a Rust toolchain)" ;;
 esac
