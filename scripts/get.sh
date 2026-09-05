@@ -13,7 +13,7 @@
 #
 # HIRD_VERSION pins a release tag (default: the latest release):
 #
-#   HIRD_VERSION=v0.1.0 sh scripts/get.sh
+#   HIRD_VERSION=v0.2.2 sh scripts/get.sh
 #
 # Building from source instead is scripts/install.sh, which needs a Rust
 # toolchain and nothing here.

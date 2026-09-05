@@ -1,6 +1,6 @@
 name: Release
 
-# Pushing a v* tag builds prebuilt binaries for Linux and macOS, attaches
+# Pushing a version tag builds prebuilt binaries for Linux and macOS, attaches
 # them to a GitHub release with per-asset checksums, and publishes the crate
 # to crates.io — so installing hird stops requiring a Rust toolchain.
 #
@@ -8,12 +8,16 @@ name: Release
 #
 #   git tag v0.x.y && git push origin v0.x.y
 #
+# A bare `0.x.y` tag works too — 0.2.0 and 0.2.1 were tagged that way, matched
+# nothing, and shipped neither binaries nor a crates.io version, so the trigger
+# now accepts both spellings rather than failing silently on the wrong one.
+#
 # The crates.io publish skips with a notice until the CARGO_REGISTRY_TOKEN
 # repository secret is set (Settings → Secrets and variables → Actions).
 
 on:
   push:
-    tags: ["v*"]
+    tags: ["v*", "[0-9]+.[0-9]+.[0-9]+"]
 
 permissions:
   contents: write
