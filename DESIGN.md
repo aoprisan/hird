@@ -2186,3 +2186,81 @@ the witness reads the server's tree, which is nobody's checkout, so a shared
 queue should turn it off rather than let it report about a directory no one is
 editing; and the hooks run on the host, so on a shared queue they are somebody
 else's tasks spawning commands on your machine.
+
+## 31. (v3.2) The second binary — a server is a different program
+
+§30 made the MCP server able to hold more than one session. This gives those
+sessions a way in from another machine that is not SSH, and it does it in a
+separate binary: `hird` stays the local queue, `hird-server` is the central
+one.
+
+### Why two binaries and not a flag
+
+A `--http` flag on `hird` would be smaller to write and wrong. Cargo features
+are additive per crate, so a flag that pulls in a web stack pulls it in for
+everyone who builds the crate — and `hird`'s claim is that it is one binary,
+one SQLite file, no network. That claim should be checkable, not aspirational.
+
+As two workspace members it is: `hird-server` depends on `hird` as a library
+and adds axum, hyper and tower on its own side of the line, while
+`cargo tree -p hird` names none of them. CI asserts exactly that, so the
+separation fails loudly rather than eroding.
+
+It also matches what the two programs *are*. One is a thing a harness spawns
+and kills a hundred times a day; the other is a thing that stays up, listens on
+a socket, authenticates strangers and outlives every session it serves. Those
+have different failure modes, different threat models and different reasons to
+be audited.
+
+### One endpoint per identity, not one identity per request
+
+rmcp's `StreamableHttpService` takes a service factory with no arguments, so a
+service cannot read the request that created it. The obvious response is to
+resolve identity per *call* — read the token in every tool handler — and it is
+the wrong one: it would thread request state through all twelve tools and make
+a session's identity a thing that could differ between two calls on one
+connection.
+
+So the server inverts it. It builds **one `StreamableHttpService` per roster
+entry**, each closing over the session that entry describes, and dispatch is a
+map lookup on the bearer token. Identity is fixed when the endpoint is built,
+which is the same invariant the local binary gets from one process per session
+— arrived at differently because the constraint is different.
+
+A request with no token, or one the roster does not know, is refused before the
+database is touched, with the same answer either way so the response does not
+say which tokens are real.
+
+### The roster is a file, and it is outside the queue
+
+Authorization lives in a TOML file the operator edits, not in a table in the
+queue's own database. The queue records what happened; who is permitted to make
+things happen is a different kind of fact, and keeping it outside means a
+compromised queue cannot grant access to itself.
+
+Parsing refuses the mistakes that would quietly mis-attribute work rather than
+accepting them: a duplicated token (two people the queue could not tell apart),
+a missing project (the server's working directory is not the caller's, so there
+is nothing true to guess), a token under 24 characters, an empty roster.
+
+An entry may pin `harness`, and when it does the pin wins over what the client
+calls itself. That is §29's rule holding at a distance: a client may name its
+harness, because being wrong there costs a badge, and may never name the
+person. The roster is where an operator can take the first half back too.
+
+### What it deliberately does not do
+
+- **No TLS.** It speaks plain HTTP and says so; a reverse proxy terminates.
+  Rolling certificate handling into a binary that has a working reverse proxy
+  in front of it is how it grows a configuration language.
+- **No accounts, no token issuance, no OAuth.** The roster is a file. The
+  MCP authorization spec — OAuth 2.1, RFC 9728 discovery, tokens bound to a
+  resource — is the right answer for a queue open to more than a few known
+  people, and `REMOTE.md` sets out what adopting it costs. A file is the right
+  answer for two colleagues, and shipping the file first keeps the question
+  open honestly.
+- **No witness.** The server has no checkout worth reading. It prints a warning
+  when the witness is on, because reporting about the host's own directory
+  would be the design's one genuinely false report.
+- **Nothing routes.** Work still crosses machines because a human says "file
+  this" on one side and "pick up 42" on the other.

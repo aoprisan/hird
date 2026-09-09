@@ -21,15 +21,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Formatting
-        run: cargo fmt --check
+        run: cargo fmt --all --check
 
       - name: Lints
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       # Spawns the real binary for the MCP and CLI integration tests, so the
       # binary has to exist before they run.
       - name: Tests
-        run: cargo test --all-targets
+        run: cargo test --workspace --all-targets
+
+      # The local binary must stay free of the server's web stack; that
+      # separation is the whole reason `hird-server` is a second crate.
+      - name: The local binary carries no web stack
+        run: |
+          if cargo tree -p hird -e normal | grep -qE '(^|[^-])\b(axum|hyper|tower-http)\b'; then
+            echo "hird has picked up an HTTP dependency; it belongs in hird-server" >&2
+            cargo tree -p hird -e normal | grep -E '(axum|hyper|tower-http)' >&2
+            exit 1
+          fi
 
       # The published site is hand-written HTML, so a renamed section id would
       # otherwise break its own table of contents silently.

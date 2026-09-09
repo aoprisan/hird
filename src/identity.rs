@@ -74,6 +74,16 @@ pub struct AgentId {
 }
 
 impl AgentId {
+    /// Mint an identity for a named harness without consulting the
+    /// environment, for a process whose environment is not the caller's.
+    ///
+    /// An empty name leaves the harness unset, so a client that names itself
+    /// still supplies one — the fallback §1.6 added, and the one a server has
+    /// to rely on because it cannot see the far end's configuration.
+    pub fn fresh(harness: impl Into<String>) -> AgentId {
+        AgentId::new(harness, short_session_id())
+    }
+
     /// Read the harness and principal from the environment and mint a fresh
     /// session suffix.
     pub fn from_env() -> AgentId {

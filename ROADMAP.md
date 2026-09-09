@@ -85,19 +85,20 @@ design work that remains is real — two machines can hold two working trees,
 so the witness's evidence is per-machine even when the queue is shared — and
 it is the reason this is *later* rather than *next*.
 
-**An HTTP transport.** Half of this shipped in v3.1 (§30): the server holds
-per-connection session state, so one process can serve two people under two
-identities, and SSH carries `hird mcp` between machines with a forced command
-pinning who each key is. Two people already share a queue that way, and
-`README.md` has the recipe.
+**Authorization beyond a file.** The transport shipped: v3.1 (§30) gave the
+MCP server per-connection session state, and v3.2 (§31) put an HTTP one behind
+it in a second binary, `hird-server`, so the local `hird` carries no web stack
+at all. A bearer token in a roster file maps to a person, one endpoint is built
+per identity, and two people on two machines share a queue. `README.md` has
+both recipes — SSH for harnesses that can spawn it, HTTP for those that cannot.
 
-What is still missing is a transport for harnesses that cannot spawn `ssh` —
-the Copilot coding agent on github.com, or any cloud harness in an ephemeral
-container. rmcp ships `transport-streamable-http-server` and `auth`, so the
-protocol work is a feature flag; the cost is a web stack (hyper, tower) in a
-binary whose only HTTP today is a hand-rolled loopback viewer, plus TLS and an
-OAuth 2.1 resource-server story that `REMOTE.md` sets out. It waits on somebody
-needing it, because SSH covers the case that exists.
+What a file cannot do is scale past a few people you know: no rotation, no
+expiry, no revocation short of an edit and a restart, and no delegation. The
+MCP authorization spec is the answer — OAuth 2.1 with the server as a resource
+server only, RFC 9728 discovery, RFC 8707 tokens bound to this server — and
+rmcp ships an `auth` feature for it. `REMOTE.md` sets out the cost. It waits on
+a queue with more than a handful of people on it, because that is the first
+point at which editing a file stops being the simpler thing.
 
 The witness caveat is unchanged and now load-bearing: a remote harness has a
 remote working tree, so a shared queue serves every session with the witness,

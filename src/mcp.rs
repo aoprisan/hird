@@ -197,7 +197,7 @@ impl Session {
     /// whatever they leave unsaid.
     pub fn resolve(attributes: &Attributes, config: &Config) -> crate::Result<Session> {
         let agent = match &attributes.harness {
-            Some(harness) => AgentId::new(harness.clone(), short_session()),
+            Some(harness) => AgentId::fresh(harness.clone()),
             None => AgentId::from_env(),
         };
         let agent = match &attributes.identity {
@@ -243,12 +243,6 @@ pub struct Attributes {
     pub project: Option<String>,
     /// Capability labels this connection may claim against.
     pub capabilities: Vec<String>,
-}
-
-/// A session suffix for an identity built from attributes rather than from
-/// `AgentId::from_env`, which mints its own.
-fn short_session() -> String {
-    AgentId::from_env().session().to_string()
 }
 
 /// The MCP server state for one connection: what everybody shares, and what

@@ -1548,10 +1548,51 @@ Two things are honestly worse across machines, and it is better to know which:
   tasks running commands on your box. Leave them unset unless you have decided
   otherwise on purpose.
 
-There is no HTTP transport yet, so this needs a harness that can spawn `ssh` —
-which is every one on the list above, and not a coding agent running in
-somebody's cloud container. That is the [remaining
-deferral](REMOTE.md).
+SSH needs a harness that can spawn it, which is every one on the list above.
+For anything else — a coding agent in somebody's cloud container, a harness
+that only speaks HTTP — there is a second binary.
+
+### The central queue over HTTP
+
+`hird` is a local queue: one process per session, stdio, no network. Serving
+one over HTTP is a different kind of program, so it is a different binary.
+`hird-server` carries a web stack that `hird` must not, and CI fails if an
+HTTP dependency ever reaches the local one.
+
+```sh
+hird-server --roster roster.toml --bind 127.0.0.1 --port 7474
+```
+
+The roster ([`examples/roster.toml`](examples/roster.toml)) is the whole
+authorization story: a bearer token per person, and the session that token
+connects as.
+
+```toml
+project = "/srv/acme"
+
+[[worker]]
+token = "…32 random bytes…"
+identity = "ana"
+capabilities = ["browser", "linux"]
+```
+
+A harness then points at the URL with its token, and the server builds the
+session from the roster — never from what the client says about itself:
+
+```
+task 1 is claimed by ana/claude-code:z55d
+```
+
+`ana` came from the roster; `claude-code` is the client naming its own harness,
+which §29 allows and which the roster overrides when you set `harness`. There is
+no path from a connection to a name it was not given.
+
+Two things this does not do, on purpose. It **terminates no TLS** — put a
+reverse proxy in front, because a bearer token on a plain connection is a token
+you have handed out. And it **issues no tokens and has no accounts**: the roster
+is a file you edit, deliberately outside the queue's own database, so a
+compromised queue cannot grant access to itself. Whether that grows into OAuth
+is [an open question](REMOTE.md), not an oversight.
 
 ## Projects
 

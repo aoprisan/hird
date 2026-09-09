@@ -14,20 +14,20 @@ release:
     cargo build --release
 
 test:
-    cargo test --all-targets
+    cargo test --workspace --all-targets
 
 # Just the fast in-process tests, without spawning the binary.
 test-unit:
     cargo test --lib
 
 lint:
-    cargo clippy --all-targets -- -D warnings
+    cargo clippy --workspace --all-targets -- -D warnings
 
 fmt:
-    cargo fmt
+    cargo fmt --all
 
 fmt-check:
-    cargo fmt --check
+    cargo fmt --all --check
 
 # Install `hird` into ~/.cargo/bin.
 install:
