@@ -5,6 +5,13 @@
 //! the same project scope while staying distinguishable as actors. The one
 //! thing the environment does not always say is the harness's name, and there
 //! the client's own name for itself stands in — see [`AgentId`].
+//!
+//! An actor answers *what* is acting. `HIRD_IDENTITY` adds *who*: an optional
+//! principal, prefixed as `<principal>/<harness>:<session>`, for a queue more
+//! than one person files into. It is recorded and reported; it steers nothing.
+//! Recusal keeps barring the harness, because §15's bar is about models rather
+//! than people — two people on one harness are still one model reading its own
+//! work. Absent the variable the actor string is exactly what it was.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -13,6 +20,8 @@ use ulid::Ulid;
 
 /// Environment variable naming the harness, set in each harness's MCP config.
 pub const HARNESS_ENV: &str = "HIRD_HARNESS";
+/// Environment variable naming the person a session acts for.
+pub const IDENTITY_ENV: &str = "HIRD_IDENTITY";
 /// Environment variable overriding project detection.
 pub const PROJECT_ENV: &str = "HIRD_PROJECT";
 /// Environment variable overriding the database path.
@@ -31,7 +40,15 @@ pub const ACTOR_WEB: &str = "web";
 /// TUI column, not a payload, and it arrives over the wire in the MCP case.
 const HARNESS_MAX: usize = 32;
 
-/// A `<harness>:<session>` identity for one MCP session.
+/// Longest principal recorded in an actor string, on the same reasoning as
+/// [`HARNESS_MAX`]: a name in a column, not a payload.
+const PRINCIPAL_MAX: usize = 32;
+
+/// Separates the principal from the harness in an actor string. Stripped by
+/// [`sanitize`] from every component, so no name can forge a second one.
+const PRINCIPAL_SEP: char = '/';
+
+/// A `[<principal>/]<harness>:<session>` identity for one MCP session.
 ///
 /// The session half is minted once, when the process starts. The harness half
 /// is whatever `HIRD_HARNESS` says; when the environment does not say, it is
@@ -41,29 +58,63 @@ const HARNESS_MAX: usize = 32;
 ///
 /// Taken once and then latched, not re-read per call. An actor string that
 /// changed mid-session would leave this process unable to find its own leases.
+///
+/// The principal — *who* the session acts for — comes from `HIRD_IDENTITY` and
+/// nowhere else. Deliberately not from the client: a harness may name itself,
+/// because being wrong about that costs a badge, but a client that could name
+/// the person would be a client that could sign another person's work. The
+/// human sets it where they set the rest of the registration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentId {
     /// Unset until the environment or a client supplies a usable name.
     harness: OnceLock<String>,
+    /// Who this session acts for. `None` until somebody says, and no client may.
+    principal: Option<String>,
     session: String,
 }
 
 impl AgentId {
-    /// Read the harness from the environment and mint a fresh session suffix.
+    /// Mint an identity for a named harness without consulting the
+    /// environment, for a process whose environment is not the caller's.
+    ///
+    /// An empty name leaves the harness unset, so a client that names itself
+    /// still supplies one — the fallback §1.6 added, and the one a server has
+    /// to rely on because it cannot see the far end's configuration.
+    pub fn fresh(harness: impl Into<String>) -> AgentId {
+        AgentId::new(harness, short_session_id())
+    }
+
+    /// Read the harness and principal from the environment and mint a fresh
+    /// session suffix.
     pub fn from_env() -> AgentId {
         AgentId::new(
             std::env::var(HARNESS_ENV).unwrap_or_default(),
             short_session_id(),
         )
+        .acting_for(std::env::var(IDENTITY_ENV).unwrap_or_default())
     }
 
     pub fn new(harness: impl Into<String>, session: impl Into<String>) -> AgentId {
         let id = AgentId {
             harness: OnceLock::new(),
+            principal: None,
             session: sanitize(&session.into()),
         };
         id.name_harness(&harness.into());
         id
+    }
+
+    /// Name the person this session acts for. An empty or unusable name leaves
+    /// the identity as it was, which is the unattributed actor of every queue
+    /// with one human on it.
+    pub fn acting_for(mut self, principal: impl Into<String>) -> AgentId {
+        self.principal = clamp(&principal.into(), PRINCIPAL_MAX);
+        self
+    }
+
+    /// Who this session acts for, if anybody said.
+    pub fn principal(&self) -> Option<&str> {
+        self.principal.as_deref()
     }
 
     /// Offer a name a client gave for itself, and say whether it was taken.
@@ -76,15 +127,9 @@ impl AgentId {
     }
 
     fn name_harness(&self, raw: &str) -> bool {
-        let mut name = sanitize(raw);
-        if name.is_empty() {
+        let Some(name) = clamp(raw, HARNESS_MAX) else {
             return false;
-        }
-        name.truncate(
-            name.char_indices()
-                .nth(HARNESS_MAX)
-                .map_or(name.len(), |(i, _)| i),
-        );
+        };
         self.harness.set(name).is_ok()
     }
 
@@ -97,23 +142,79 @@ impl AgentId {
         &self.session
     }
 
-    /// The full `harness:session` string stored on claims and assertions.
+    /// The full `[principal/]harness:session` string stored on claims and
+    /// assertions.
     pub fn as_actor(&self) -> String {
-        format!("{}:{}", self.harness(), self.session)
+        match self.principal() {
+            Some(who) => format!("{who}{PRINCIPAL_SEP}{}:{}", self.harness(), self.session),
+            None => format!("{}:{}", self.harness(), self.session),
+        }
     }
 }
 
 impl std::fmt::Display for AgentId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}", self.harness(), self.session)
+        f.write_str(&self.as_actor())
     }
 }
 
 /// The harness part of an actor string, for badge rendering.
 ///
-/// Non-agent actors (`cli`, `tui`, `hird`) have no colon and are returned whole.
+/// Non-agent actors (`cli`, `tui`, `hird`) have no colon and are returned
+/// whole. A principal prefix is dropped: the badge answers *what* is acting,
+/// and every reader of it — the TUI's colours, recusal's bar, the record's
+/// rows — is asking about the model rather than the person.
 pub fn actor_harness(actor: &str) -> &str {
-    actor.split_once(':').map_or(actor, |(h, _)| h)
+    let what = actor.split_once(':').map_or(actor, |(what, _)| what);
+    what.rsplit_once(PRINCIPAL_SEP)
+        .map_or(what, |(_, harness)| harness)
+}
+
+/// The person an actor string was recorded for, if it names one.
+///
+/// `None` for the unattributed actors of a single-human queue, and for the
+/// `cli`, `tui` and `web` actors, which are the human at the keyboard already.
+pub fn actor_principal(actor: &str) -> Option<&str> {
+    let what = actor.split_once(':').map_or(actor, |(what, _)| what);
+    what.split_once(PRINCIPAL_SEP)
+        .map(|(who, _)| who)
+        .filter(|who| !who.is_empty())
+}
+
+/// Normalize a principal the way an identity would, for callers writing one
+/// down before any session exists — `hird register`, chiefly.
+///
+/// `None` when nothing usable survives, so an empty `--identity` writes no
+/// variable rather than an empty one.
+pub fn principal_name(raw: &str) -> Option<String> {
+    clamp(raw, PRINCIPAL_MAX)
+}
+
+/// Which half of an actor a reading groups by.
+///
+/// The record measures "whose work survives a reading by a different model"
+/// (§16). With one human on a queue those two words mean the same thing and
+/// [`Axis::Harness`] answers both. With more than one they come apart, and
+/// only the reader knows which was meant — so this is a choice at the point of
+/// reading, never a change to what is stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Axis {
+    /// Group by the model that acted. Every actor has one.
+    #[default]
+    Harness,
+    /// Group by the person it acted for. Unattributed actors have none, and a
+    /// reading along this axis leaves them out rather than inventing a name.
+    Person,
+}
+
+impl Axis {
+    /// The key `actor` falls under, or `None` when it carries no such half.
+    pub fn key<'a>(&self, actor: &'a str) -> Option<&'a str> {
+        match self {
+            Axis::Harness => Some(actor_harness(actor)),
+            Axis::Person => actor_principal(actor),
+        }
+    }
 }
 
 /// Four lowercase characters of ULID randomness — enough to tell a handful of
@@ -124,13 +225,29 @@ fn short_session_id() -> String {
 }
 
 /// Strip our separators and whitespace from identity components: the colon
-/// splits `harness:session`, and the comma joins harness names in the
-/// herald's `HIRD_RECUSED` list.
+/// splits `harness:session`, the slash splits the principal from the harness,
+/// and the comma joins harness names in the herald's `HIRD_RECUSED` list.
+///
+/// Stripping rather than rejecting keeps a badly set variable a cosmetic
+/// problem, and stripping the slash is what stops a harness or session name
+/// from claiming to be somebody.
 fn sanitize(raw: &str) -> String {
     raw.trim()
         .chars()
-        .filter(|c| !c.is_whitespace() && *c != ':' && *c != ',')
+        .filter(|c| !c.is_whitespace() && !matches!(*c, ':' | ',' | PRINCIPAL_SEP))
         .collect()
+}
+
+/// Sanitize `raw` and cut it to `max` characters, or `None` if nothing usable
+/// survives. Shared by the harness and the principal, which have the same
+/// shape and the same reason for a limit.
+fn clamp(raw: &str, max: usize) -> Option<String> {
+    let mut name = sanitize(raw);
+    if name.is_empty() {
+        return None;
+    }
+    name.truncate(name.char_indices().nth(max).map_or(name.len(), |(i, _)| i));
+    Some(name)
 }
 
 /// Resolve the project root a process is working in.
@@ -305,6 +422,72 @@ mod tests {
         assert_eq!(actor_harness("claude-code:af31"), "claude-code");
         assert_eq!(actor_harness("cli"), "cli");
         assert_eq!(actor_harness("tui"), "tui");
+    }
+
+    #[test]
+    fn actor_harness_looks_past_the_principal() {
+        // Every reader of a badge asks what model acted, so the answer must not
+        // change when a queue starts recording who it acted for.
+        assert_eq!(actor_harness("ana/claude-code:af31"), "claude-code");
+        assert_eq!(actor_harness("ana/claude-code"), "claude-code");
+    }
+
+    #[test]
+    fn actor_principal_names_who_acted_or_nobody() {
+        assert_eq!(actor_principal("ana/claude-code:af31"), Some("ana"));
+        assert_eq!(actor_principal("claude-code:af31"), None);
+        assert_eq!(actor_principal("cli"), None);
+    }
+
+    #[test]
+    fn an_identity_without_a_principal_is_the_actor_it_always_was() {
+        let id = AgentId::new("claude-code", "af31");
+        assert_eq!(id.as_actor(), "claude-code:af31");
+        assert_eq!(id.principal(), None);
+        assert_eq!(id.to_string(), id.as_actor());
+    }
+
+    #[test]
+    fn an_identity_with_a_principal_carries_it_in_the_actor() {
+        let id = AgentId::new("claude-code", "af31").acting_for("ana");
+        assert_eq!(id.as_actor(), "ana/claude-code:af31");
+        assert_eq!(id.principal(), Some("ana"));
+        assert_eq!(actor_harness(&id.as_actor()), "claude-code");
+        assert_eq!(actor_principal(&id.as_actor()), Some("ana"));
+    }
+
+    #[test]
+    fn an_empty_principal_leaves_the_identity_unattributed() {
+        let id = AgentId::new("claude-code", "af31").acting_for("   ");
+        assert_eq!(id.principal(), None);
+        assert_eq!(id.as_actor(), "claude-code:af31");
+    }
+
+    #[test]
+    fn no_component_can_forge_a_second_separator() {
+        // A harness that could write a slash could claim to be someone; a
+        // principal that could write a colon could claim to be a session.
+        let id = AgentId::new("ben/claude-code", "af:31").acting_for("ana/root:x");
+        assert_eq!(id.as_actor(), "anarootx/benclaude-code:af31");
+        assert_eq!(actor_principal(&id.as_actor()), Some("anarootx"));
+        assert_eq!(actor_harness(&id.as_actor()), "benclaude-code");
+    }
+
+    #[test]
+    fn a_long_principal_is_cut_to_a_column_width() {
+        let id = AgentId::new("claude-code", "af31").acting_for("a".repeat(80));
+        assert_eq!(id.principal().unwrap().chars().count(), PRINCIPAL_MAX);
+    }
+
+    #[test]
+    fn a_client_may_name_the_harness_but_never_the_person() {
+        let id = AgentId::new("", "af31");
+        assert!(id.name_from_client("codex"));
+        assert_eq!(id.harness(), "codex");
+        // There is no path from a client's words to the principal: naming one
+        // takes an owned identity, which only the process's own environment
+        // gets to build.
+        assert_eq!(id.principal(), None);
     }
 
     #[test]

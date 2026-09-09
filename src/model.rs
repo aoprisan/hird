@@ -1074,14 +1074,19 @@ impl VerdictRecord {
     }
 }
 
-/// One harness's standing in the verdict record, both as worker and reviewer.
+/// One harness's — or one person's — standing in the verdict record, both as
+/// worker and reviewer.
 ///
 /// Derived entirely from delivered verdicts, so it measures the one thing the
 /// queue can measure: whose work survives a reading by a different model.
+/// Which sense of *whose* is [`crate::identity::Axis`], chosen when the record
+/// is read.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HarnessRecord {
-    pub harness: String,
-    /// Verdicts received on this harness's work, across every round.
+pub struct RecordRow {
+    /// The harness or the person this row aggregates, per the axis it was read
+    /// along.
+    pub who: String,
+    /// Verdicts received on this row's work, across every round.
     pub judged: i64,
     pub upheld: i64,
     pub sent_back: i64,
@@ -1089,7 +1094,7 @@ pub struct HarnessRecord {
     /// verdict — before any round of rework.
     pub tasks_judged: i64,
     pub first_pass: i64,
-    /// Verdicts this harness has delivered as a reviewer.
+    /// Verdicts this row has delivered as a reviewer.
     pub upheld_given: i64,
     pub sent_back_given: i64,
 }

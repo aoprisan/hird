@@ -1490,6 +1490,110 @@ the plan and node name it was filed under, and the recess if one stands.
 `--plan <name>` narrows any rendering — waves, DOT, Mermaid or JSON — to the
 tasks one plan filed and the dependencies between them.
 
+## Two people, one queue
+
+Everything above assumes one human and a checkout on one disk. `hird` also runs
+as a queue two people file into from two machines, without a daemon or a hosted
+service: one `hird` on a box you both reach, one SQLite file, and SSH carrying
+the connection. Every claim is still atomic, because there is still exactly one
+database.
+
+Put the queue on a host and give each person their own account and key. The
+whole arrangement is one line per person in `authorized_keys`:
+
+```
+command="hird mcp --identity ana --harness claude-code --project /srv/acme --capability browser,linux",no-pty,no-port-forwarding ssh-ed25519 AAAA… ana
+```
+
+Then Ana points her harness at a command instead of a binary:
+
+```jsonc
+{ "mcpServers": { "hird": {
+  "command": "ssh",
+  "args": ["queue.internal", "hird", "mcp"]
+} } }
+```
+
+The forced command is the point. SSH ignores whatever the far end asks to run
+and executes the line from `authorized_keys`, so **the identity is set by the
+person who owns the queue, not by the harness connecting to it.** Ana cannot
+file work as Ben by editing her own config, which is the one property that
+makes a shared record worth keeping. `--project` matters for the same reason:
+the server's working directory is the server's, so say which queue the
+connection is scoping to rather than letting it guess.
+
+Each connection gets its own session — its own identity, project, capabilities
+and lease — so the two of you can hold different tasks at the same second, and
+`--capability` describes the machine each harness is actually running on. Hand
+work over by number, the way you already do: *"file this as a task"* on one
+side, *"pick up task 42"* on the other.
+
+Watch it happen with the board:
+
+```sh
+hird web --bind 0.0.0.0 --port 7473   # read-only, and only where you trust the network
+```
+
+Claimed tasks show the harness and the person holding them, live.
+
+Two things are honestly worse across machines, and it is better to know which:
+
+- **The witness goes quiet.** It reads *the server's* working tree, which is
+  nobody's checkout. Set `witness = false` on a shared queue rather than let it
+  report about a directory no one is editing — contention detection, footprints
+  and memory footing are all per-checkout, and there is no honest way to make
+  one of them speak for two.
+- **The hooks run on the host.** `dispatch_hook` and `question_hook` execute on
+  the machine serving the queue, so on a shared one they are your colleague's
+  tasks running commands on your box. Leave them unset unless you have decided
+  otherwise on purpose.
+
+SSH needs a harness that can spawn it, which is every one on the list above.
+For anything else — a coding agent in somebody's cloud container, a harness
+that only speaks HTTP — there is a second binary.
+
+### The central queue over HTTP
+
+`hird` is a local queue: one process per session, stdio, no network. Serving
+one over HTTP is a different kind of program, so it is a different binary.
+`hird-server` carries a web stack that `hird` must not, and CI fails if an
+HTTP dependency ever reaches the local one.
+
+```sh
+hird-server --roster roster.toml --bind 127.0.0.1 --port 7474
+```
+
+The roster ([`examples/roster.toml`](examples/roster.toml)) is the whole
+authorization story: a bearer token per person, and the session that token
+connects as.
+
+```toml
+project = "/srv/acme"
+
+[[worker]]
+token = "…32 random bytes…"
+identity = "ana"
+capabilities = ["browser", "linux"]
+```
+
+A harness then points at the URL with its token, and the server builds the
+session from the roster — never from what the client says about itself:
+
+```
+task 1 is claimed by ana/claude-code:z55d
+```
+
+`ana` came from the roster; `claude-code` is the client naming its own harness,
+which §29 allows and which the roster overrides when you set `harness`. There is
+no path from a connection to a name it was not given.
+
+Two things this does not do, on purpose. It **terminates no TLS** — put a
+reverse proxy in front, because a bearer token on a plain connection is a token
+you have handed out. And it **issues no tokens and has no accounts**: the roster
+is a file you edit, deliberately outside the queue's own database, so a
+compromised queue cannot grant access to itself. Whether that grows into OAuth
+is [an open question](REMOTE.md), not an oversight.
+
 ## Projects
 
 Every task and assertion is filed under a project — the canonical path of your
@@ -1566,6 +1670,7 @@ more room.
 | Variable | Meaning |
 |---|---|
 | `HIRD_HARNESS` | This session's harness name. Set it in the MCP registration. |
+| `HIRD_IDENTITY` | Who this session acts for, on a queue more than one person files into. Optional. |
 | `HIRD_CAPABILITIES` | Comma-separated capabilities this MCP session can satisfy. |
 | `HIRD_PROJECT` | Override project detection. |
 | `HIRD_DB` | Override the database path. |

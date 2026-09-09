@@ -1,0 +1,23 @@
+[package]
+name = "hird-server"
+version = "0.2.2"
+edition = "2021"
+rust-version = "1.88"
+description = "The central queue: hird served over HTTP for harnesses on other machines."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[[bin]]
+name = "hird-server"
+path = "src/main.rs"
+
+[dependencies]
+hird = { path = ".." }
+anyhow = "1"
+axum = "0.8"
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+rmcp = { version = "=3.0.0-beta.4", features = ["server", "macros", "transport-streamable-http-server"] }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net"] }
+tower-service = "0.3"
+toml = "0.9"

@@ -2040,3 +2040,227 @@ prove, and says which is which.
 One repo read (`Events::bounds`), one module that reads the tables into a
 value, one that serves it, and one screen. No MCP tool, no status, no
 schema change, no dependency.
+
+## 29. (v3.0) The principal — who the harness is acting for
+
+An actor has always answered *what* is acting: `claude-code:af31`, a harness
+and a session. That was the whole truth for the queue this was designed
+around, where one human runs three harnesses and the interesting question is
+which model did the work. On a queue more than one person files into, the
+actor string answers a question nobody asked and stays silent on the one they
+did.
+
+`HIRD_IDENTITY` adds the missing half. When it is set, actors are recorded as
+`<principal>/<harness>:<session>` — `ana/claude-code:af31` — and when it is
+not, they are exactly the strings they were. No migration: the principal lives
+in the actor column that already existed, and every reader that was parsing
+`harness:session` keeps working because `actor_harness` now looks past the
+prefix.
+
+### The client may name the harness; it may never name the person
+
+`AgentId` takes its harness from `HIRD_HARNESS`, and failing that from the
+first client that names itself (§1.6) — being wrong there costs a badge in a
+TUI column. The principal is deliberately not offered that second path. A
+client that could name the person would be a client that could sign another
+person's work, and the whole value of recording who did something is that the
+record is not up to them. It comes from the environment, which is the one
+place the human curates and the client never reaches, and `hird register
+--identity` writes it there beside the harness name.
+
+`sanitize` gains the separator for the same reason it already had the colon
+and the comma: a harness or session that could write a `/` could claim to be
+somebody. Stripping rather than rejecting keeps a badly set variable cosmetic.
+
+### Recusal still bars the harness
+
+The obvious next move is to make recusal bar the person, and it is wrong.
+§15's bar exists because *"the single most valuable property of running three
+different models on one codebase is precisely that they are not the same
+model"* — the point is model diversity, not accountability. Two people driving
+Claude Code at the same task are still one model reading its own work, and
+letting the second one through because they are a different human would sell
+exactly the property the review loop is for.
+
+So nothing about claiming, dispatch, routing or the summons changes. The
+principal is recorded and reported; it steers nothing. This is the same
+posture as the witness and the record: hird measures and does not decide.
+
+### The record grows an axis, because *whose* got ambiguous
+
+§16 says the record measures "whose work survives a reading by a different
+model." With one human those words have one meaning. With two they have two,
+and only the reader knows which was intended — so the choice belongs at the
+point of reading rather than in what is stored. `hird record --by person`
+groups the same verdicts by principal instead of harness.
+
+The two readings genuinely disagree, which is the point. Ana ships on Claude
+Code and Ben reads it on Codex; they swap and repeat. By harness, one model
+shipped everything and the other read everything. By person, both of them
+shipped one and read one. Same verdicts, same table, different question.
+
+Verdicts whose actors name nobody are left out of a person reading entirely,
+rather than collected under `unknown`. An unattributed actor has no person to
+credit, and inventing one would be the record steering rather than measuring.
+
+### Still twelve tools
+
+The principal rides in on the actor string that twelve tools were already
+writing. No tool gained a parameter, no status was added, and an agent is told
+who it acts for in the same handshake instructions that already tell it the
+lease TTL and its capabilities — and only when there is something to tell.
+
+## 30. (v3.1) The connection — a session is not a process
+
+Since v1 the MCP server has held one identity, one project, one capability set
+and one witness, all read from the environment and the working directory at
+startup. That was not a shortcut: one process served exactly one harness
+session, so *session state* and *process state* were the same words for the
+same thing, and reading them once was the simplest correct implementation.
+
+It is also the single assumption that makes a shared queue impossible. A
+process serving two connections under that design serves them as one caller:
+both act under one identity, scope to one project, advertise one capability
+set, and are witnessed against one tree. Not degraded — wrong, and silently.
+
+### The split
+
+`HirdMcp` becomes two things it always was underneath:
+
+- **`Shared`** — the database handle, the configuration, and the two hooks.
+  Everything whose answer is the same whoever is asking, held once per process
+  behind an `Arc`.
+- **`Session`** — the identity, the project, the capabilities and the witness.
+  Everything that is an answer *about the caller*, held once per connection.
+
+One `rusqlite::Connection` behind one mutex still serializes every session's
+writes, and that is not a bottleneck to apologise for: the claim CAS wanted a
+single writer, and a second connection would buy concurrency the queue then has
+to take back. Every field of a `Session` stays fixed for the connection's life,
+for the reason `AgentId` latches its harness — a caller whose identity moved
+mid-session could not find its own leases.
+
+### Attributes, and who gets to set them
+
+A session that can differ per connection needs somebody to say what it is.
+`Attributes` is that: identity, harness, project and capabilities, each
+optional, with the environment answering whatever is left unsaid. A harness
+setting `HIRD_HARNESS` and nothing else behaves exactly as it did, which is
+what keeps this a refactor rather than a migration.
+
+`hird mcp` grows `--identity`, `--harness`, `--project` and `--capability` to
+set them. The flags exist for one reason worth stating precisely: **a flag can
+be set by somebody other than the caller.** §29 established that a client may
+name its harness but never the person, and an environment variable only holds
+that line while the environment belongs to the human running the harness. On a
+shared queue it does not.
+
+An SSH `authorized_keys` forced command is where the two halves meet:
+
+```
+command="hird mcp --identity ana --project /srv/acme" ssh-ed25519 AAAA… ana
+```
+
+SSH runs that line and discards whatever the far end asked for, so the identity
+is a property of the key rather than a claim by the connection. That is the
+whole authentication story, and it is somebody else's — which is the right
+place for it. hird checks no passwords and issues no tokens.
+
+`--project` is not a convenience in this arrangement. The server's working
+directory is the server's; a remote caller's checkout is on another machine
+entirely, so project detection has nothing true to find and must be told.
+
+### What this deliberately does not do
+
+No transport was added. `hird mcp` still speaks stdio, and SSH is what carries
+it between machines — which means a harness that cannot spawn `ssh` still
+cannot reach a shared queue, and the HTTP transport stays deferred with its
+dependency cost unpaid. What changed is that the server is now *able* to serve
+more than one session, which was the blocking half.
+
+Nothing routes. Work crosses machines because a human says "file this" on one
+side and "pick up 42" on the other. The queue still chooses nobody.
+
+And two things get quietly worse, recorded here so their absence is a decision:
+the witness reads the server's tree, which is nobody's checkout, so a shared
+queue should turn it off rather than let it report about a directory no one is
+editing; and the hooks run on the host, so on a shared queue they are somebody
+else's tasks spawning commands on your machine.
+
+## 31. (v3.2) The second binary — a server is a different program
+
+§30 made the MCP server able to hold more than one session. This gives those
+sessions a way in from another machine that is not SSH, and it does it in a
+separate binary: `hird` stays the local queue, `hird-server` is the central
+one.
+
+### Why two binaries and not a flag
+
+A `--http` flag on `hird` would be smaller to write and wrong. Cargo features
+are additive per crate, so a flag that pulls in a web stack pulls it in for
+everyone who builds the crate — and `hird`'s claim is that it is one binary,
+one SQLite file, no network. That claim should be checkable, not aspirational.
+
+As two workspace members it is: `hird-server` depends on `hird` as a library
+and adds axum, hyper and tower on its own side of the line, while
+`cargo tree -p hird` names none of them. CI asserts exactly that, so the
+separation fails loudly rather than eroding.
+
+It also matches what the two programs *are*. One is a thing a harness spawns
+and kills a hundred times a day; the other is a thing that stays up, listens on
+a socket, authenticates strangers and outlives every session it serves. Those
+have different failure modes, different threat models and different reasons to
+be audited.
+
+### One endpoint per identity, not one identity per request
+
+rmcp's `StreamableHttpService` takes a service factory with no arguments, so a
+service cannot read the request that created it. The obvious response is to
+resolve identity per *call* — read the token in every tool handler — and it is
+the wrong one: it would thread request state through all twelve tools and make
+a session's identity a thing that could differ between two calls on one
+connection.
+
+So the server inverts it. It builds **one `StreamableHttpService` per roster
+entry**, each closing over the session that entry describes, and dispatch is a
+map lookup on the bearer token. Identity is fixed when the endpoint is built,
+which is the same invariant the local binary gets from one process per session
+— arrived at differently because the constraint is different.
+
+A request with no token, or one the roster does not know, is refused before the
+database is touched, with the same answer either way so the response does not
+say which tokens are real.
+
+### The roster is a file, and it is outside the queue
+
+Authorization lives in a TOML file the operator edits, not in a table in the
+queue's own database. The queue records what happened; who is permitted to make
+things happen is a different kind of fact, and keeping it outside means a
+compromised queue cannot grant access to itself.
+
+Parsing refuses the mistakes that would quietly mis-attribute work rather than
+accepting them: a duplicated token (two people the queue could not tell apart),
+a missing project (the server's working directory is not the caller's, so there
+is nothing true to guess), a token under 24 characters, an empty roster.
+
+An entry may pin `harness`, and when it does the pin wins over what the client
+calls itself. That is §29's rule holding at a distance: a client may name its
+harness, because being wrong there costs a badge, and may never name the
+person. The roster is where an operator can take the first half back too.
+
+### What it deliberately does not do
+
+- **No TLS.** It speaks plain HTTP and says so; a reverse proxy terminates.
+  Rolling certificate handling into a binary that has a working reverse proxy
+  in front of it is how it grows a configuration language.
+- **No accounts, no token issuance, no OAuth.** The roster is a file. The
+  MCP authorization spec — OAuth 2.1, RFC 9728 discovery, tokens bound to a
+  resource — is the right answer for a queue open to more than a few known
+  people, and `REMOTE.md` sets out what adopting it costs. A file is the right
+  answer for two colleagues, and shipping the file first keeps the question
+  open honestly.
+- **No witness.** The server has no checkout worth reading. It prints a warning
+  when the witness is on, because reporting about the host's own directory
+  would be the design's one genuinely false report.
+- **Nothing routes.** Work still crosses machines because a human says "file
+  this" on one side and "pick up 42" on the other.

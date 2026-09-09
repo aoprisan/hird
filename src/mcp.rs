@@ -14,7 +14,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
@@ -57,14 +57,18 @@ const SELF_CONTAINED: &str =
 
 /// Serve the MCP protocol on stdio until the client disconnects.
 pub async fn serve(db_path: &Path, config: Config) -> anyhow::Result<()> {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
-    let server = HirdMcp::with_capabilities(
-        Db::open(db_path)?,
-        AgentId::from_env(),
-        identity::resolve_project(&cwd),
-        config,
-        crate::capability::from_env()?,
-    )?;
+    serve_session(db_path, config, &Attributes::default()).await
+}
+
+/// Serve one connection whose session `attributes` describe.
+pub async fn serve_session(
+    db_path: &Path,
+    config: Config,
+    attributes: &Attributes,
+) -> anyhow::Result<()> {
+    let session = Session::resolve(attributes, &config)?;
+    let shared = Arc::new(Shared::new(Db::open(db_path)?, config));
+    let server = HirdMcp::connect(shared, session);
     let running = match server.serve(rmcp::transport::stdio()).await {
         Ok(running) => running,
         Err(rmcp::service::ServerInitializeError::ExpectedInitializeRequest(opener)) => {
@@ -107,27 +111,145 @@ fn refuse_opener(opener: Option<&rmcp::model::ClientJsonRpcMessage>) {
     let _ = stdout.flush();
 }
 
-/// The MCP server state for one harness session.
-pub struct HirdMcp {
+/// What one process holds however many connections it serves.
+///
+/// The database handle, the configuration, and the two hooks: everything whose
+/// answer is the same whoever is asking. One `rusqlite::Connection` behind one
+/// mutex serializes every session's writes, which is what the claim CAS wanted
+/// anyway — a second connection would buy concurrency the queue then has to
+/// take back.
+pub struct Shared {
     // `rusqlite::Connection` is `Send` but not `Sync`; the mutex is only ever
     // held inside synchronous closures, never across an await.
     db: Mutex<Db>,
-    agent: AgentId,
-    project: String,
     config: Config,
-    /// Human-controlled labels read once for this process. Like identity,
-    /// changing them mid-session would make two calls from one agent obey
-    /// different claim rules.
-    capabilities: Vec<String>,
-    /// Resolved once at startup: whether this project is somewhere the working
-    /// tree can be watched. `None` is an ordinary state, not a degraded one.
-    witness: Option<Witness>,
-    /// Likewise resolved once: the dispatch hook, if one is configured, ready
-    /// to announce tasks this session's calls make claimable.
+    /// The dispatch hook, if one is configured, ready to announce tasks a
+    /// session's calls make claimable.
     herald: Option<Herald>,
     /// The dispatch hook's twin for the other audience: the question hook, if
     /// one is configured, ready to tell a human a task now waits on them.
     question_herald: Option<crate::herald::QuestionHerald>,
+}
+
+impl Shared {
+    /// Open the database and resolve everything that does not depend on who
+    /// is connecting.
+    pub fn new(db: Db, config: Config) -> Shared {
+        let herald = config.herald(db.path());
+        let question_herald = config.question_herald(db.path());
+        Shared {
+            db: Mutex::new(db),
+            config,
+            herald,
+            question_herald,
+        }
+    }
+}
+
+/// What one connection is: who is calling, from where, and with what.
+///
+/// Until now these lived on the server, because one process served exactly one
+/// session and the two were the same thing. They are separated so a process
+/// can serve more than one — the identity a connection acts under, the project
+/// its calls scope to, the capabilities it may claim against, and the tree, if
+/// any, its evidence is read from.
+///
+/// Every field is fixed for the life of the connection. An identity that
+/// changed mid-session would leave a caller unable to find its own leases; a
+/// project or capability set that changed would make two calls from one agent
+/// obey different rules.
+pub struct Session {
+    agent: AgentId,
+    project: String,
+    /// Human-controlled labels this connection may claim against.
+    capabilities: Vec<String>,
+    /// Whether this connection's project is somewhere the working tree can be
+    /// watched. `None` is an ordinary state, not a degraded one — and it is
+    /// the ordinary state for a connection whose tree is on another machine.
+    witness: Option<Witness>,
+}
+
+impl Session {
+    /// Resolve a connection's session against `config`.
+    pub fn new(
+        agent: AgentId,
+        project: String,
+        capabilities: Vec<String>,
+        config: &Config,
+    ) -> crate::Result<Session> {
+        let witness = config.witness(Path::new(&project));
+        Ok(Session {
+            agent,
+            project,
+            capabilities: crate::capability::normalize_all(&capabilities)?,
+            witness,
+        })
+    }
+
+    /// The session a process's own environment describes — one harness, one
+    /// checkout, one set of labels. The stdio case, and the only case before
+    /// a connection could say anything about itself.
+    pub fn from_env(config: &Config) -> crate::Result<Session> {
+        Session::resolve(&Attributes::default(), config)
+    }
+
+    /// The session `attributes` describe, with the environment answering
+    /// whatever they leave unsaid.
+    pub fn resolve(attributes: &Attributes, config: &Config) -> crate::Result<Session> {
+        let agent = match &attributes.harness {
+            Some(harness) => AgentId::fresh(harness.clone()),
+            None => AgentId::from_env(),
+        };
+        let agent = match &attributes.identity {
+            Some(who) => agent.acting_for(who.clone()),
+            None => agent,
+        };
+        let project = match &attributes.project {
+            Some(project) => identity::resolve_project(Path::new(project)),
+            None => {
+                let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
+                identity::resolve_project(&cwd)
+            }
+        };
+        let capabilities = if attributes.capabilities.is_empty() {
+            crate::capability::from_env()?
+        } else {
+            attributes.capabilities.clone()
+        };
+        Session::new(agent, project, capabilities, config)
+    }
+
+    /// Who this session acts for, if anybody said.
+    pub fn principal(&self) -> Option<&str> {
+        self.agent.principal()
+    }
+}
+
+/// What a connection is told it is, ahead of the environment.
+///
+/// Every field is optional and the environment answers what is left unsaid, so
+/// a harness that sets `HIRD_HARNESS` and nothing else behaves exactly as it
+/// did. The point of saying it explicitly is that it can then be said by
+/// somebody other than the harness — an SSH `authorized_keys` forced command
+/// pins the identity of the person on the far end of the key, which is the one
+/// arrangement where a remote caller cannot name itself.
+#[derive(Debug, Default, Clone)]
+pub struct Attributes {
+    /// The person this connection acts for.
+    pub identity: Option<String>,
+    /// The harness name, when it is not coming from the environment.
+    pub harness: Option<String>,
+    /// The project directory this connection's calls scope to.
+    pub project: Option<String>,
+    /// Capability labels this connection may claim against.
+    pub capabilities: Vec<String>,
+}
+
+/// The MCP server state for one connection: what everybody shares, and what
+/// only this caller is.
+pub struct HirdMcp {
+    shared: Arc<Shared>,
+    session: Session,
 }
 
 impl HirdMcp {
@@ -143,29 +265,23 @@ impl HirdMcp {
         config: Config,
         capabilities: Vec<String>,
     ) -> crate::Result<HirdMcp> {
-        let witness = config.witness(Path::new(&project));
-        let herald = config.herald(db.path());
-        let question_herald = config.question_herald(db.path());
-        Ok(HirdMcp {
-            db: Mutex::new(db),
-            agent,
-            project,
-            config,
-            capabilities: crate::capability::normalize_all(&capabilities)?,
-            witness,
-            herald,
-            question_herald,
-        })
+        let session = Session::new(agent, project, capabilities, &config)?;
+        Ok(HirdMcp::connect(Arc::new(Shared::new(db, config)), session))
+    }
+
+    /// One connection onto an already-open process.
+    pub fn connect(shared: Arc<Shared>, session: Session) -> HirdMcp {
+        HirdMcp { shared, session }
     }
 
     /// The identity recorded on this session's claims and assertions.
     pub fn actor(&self) -> String {
-        self.agent.as_actor()
+        self.session.agent.as_actor()
     }
 
     /// The project scope this session defaults to.
     pub fn project(&self) -> &str {
-        &self.project
+        &self.session.project
     }
 
     /// Run a closure against the database.
@@ -173,12 +289,15 @@ impl HirdMcp {
     /// Deliberately a synchronous function: the guard is created and dropped
     /// entirely inside it, so it never lands in an async state machine.
     fn with_db<T>(&self, f: impl FnOnce(&Db) -> T) -> T {
-        let db = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let db = self.shared.db.lock().unwrap_or_else(|e| e.into_inner());
         f(&db)
     }
 
     fn scope(&self, all_projects: Option<bool>) -> ProjectScope {
-        ProjectScope::resolve(&self.project, self.config.all_projects(all_projects))
+        ProjectScope::resolve(
+            &self.session.project,
+            self.shared.config.all_projects(all_projects),
+        )
     }
 
     /// Run the dispatch hook for each announcement, if a hook is configured.
@@ -187,7 +306,7 @@ impl HirdMcp {
     /// invocations read the same database, and must find both the lock free
     /// and the write they are being told about already committed.
     fn announce(&self, list: &[Announcement]) {
-        crate::herald::announce(self.herald.as_ref(), list);
+        crate::herald::announce(self.shared.herald.as_ref(), list);
     }
 
     /// Task `seq` as an announcement with `cause`, if it is claimable now.
@@ -195,10 +314,10 @@ impl HirdMcp {
     /// Read against the committed board, so a task another agent has taken in
     /// the meantime — or one that still waits for something — stays quiet.
     fn dispatchable(&self, db: &Db, cause: Cause, seq: i64) -> Option<Announcement> {
-        self.herald.as_ref()?;
+        self.shared.herald.as_ref()?;
         let claimable = db
             .deps()
-            .claimable(seq, self.config.clearance())
+            .claimable(seq, self.shared.config.clearance())
             .ok()
             .flatten()?;
         Some(announcement(cause, claimable))
@@ -227,7 +346,7 @@ impl HirdMcp {
     /// the hook summons finds `task_next` empty-handed. That is the race the
     /// skill's fallback exists for, and cheaper than an expiry nobody hears.
     fn sweep_announcing(&self) {
-        if self.herald.is_none() {
+        if self.shared.herald.is_none() {
             return;
         }
         let announcements = self.with_db(|db| {
@@ -249,10 +368,10 @@ impl HirdMcp {
     /// `sent_back` verdict reopened; and the review the finish filed, which
     /// is itself an open task waiting for a harness that did not do the work.
     fn dispatched(&self, db: &Db, finished: &Finished) -> Vec<Announcement> {
-        if self.herald.is_none() {
+        if self.shared.herald.is_none() {
             return Vec::new();
         }
-        let clearance = self.config.clearance();
+        let clearance = self.shared.config.clearance();
         let mut released = db
             .deps()
             .released_by(finished.task.seq, clearance)
@@ -298,10 +417,10 @@ impl HirdMcp {
     /// the call it did make. Nothing here can turn a completed task into an
     /// error, and there is no configuration in which it can.
     fn witnessed(&self, db: &Db, seq: i64) -> Evidence {
-        let Some(witness) = &self.witness else {
+        let Some(witness) = &self.session.witness else {
             return Evidence::default();
         };
-        let swept = witness::sweep(db, witness, &self.project, &self.actor()).ok();
+        let swept = witness::sweep(db, witness, &self.session.project, &self.actor()).ok();
         let mut evidence = self.evidence(db, seq);
         if let Some(swept) = swept {
             let _ = db.witnessed().confirm(seq, swept.changes_for(seq));
@@ -316,10 +435,28 @@ impl HirdMcp {
         evidence
     }
 
+    /// Who this session acts for, when a human has said.
+    ///
+    /// Silent on a queue with one person on it, where an unattributed actor is
+    /// the whole truth and a sentence about identity is noise in a context
+    /// window. Said plainly where it matters, because an agent whose claims
+    /// carry a name should be able to report that name to the human.
+    fn identity_instructions(&self) -> String {
+        match self.session.agent.principal() {
+            Some(who) => format!(
+                "\nThis session acts for {who}, and every claim, review and assertion it \
+                 makes is recorded under that name alongside the harness. More than one \
+                 person files into this queue: work you did not do may be waiting, and \
+                 work you do will be read back to somebody else.\n"
+            ),
+            None => String::new(),
+        }
+    }
+
     /// The witness memory may read the tree through, if the configuration
-    /// lets it. Narrower than `self.witness` by one flag.
+    /// lets it. Narrower than `self.session.witness` by one flag.
     fn footing(&self) -> Option<&Witness> {
-        self.config.footing(self.witness.as_ref())
+        self.shared.config.footing(self.session.witness.as_ref())
     }
 
     /// The memory relevant to a task, each fact carrying whether the code it
@@ -335,10 +472,10 @@ impl HirdMcp {
 
     /// Start watching the tree on behalf of a task this session just claimed.
     fn begin_witnessing(&self, db: &Db, seq: i64) {
-        let Some(witness) = &self.witness else {
+        let Some(witness) = &self.session.witness else {
             return;
         };
-        let _ = witness::begin(db, witness, &self.project, seq, &self.actor());
+        let _ = witness::begin(db, witness, &self.session.project, seq, &self.actor());
     }
 
     /// What happened to this task before it was this claimant's, if it has
@@ -352,7 +489,7 @@ impl HirdMcp {
     /// holder's session is gone, the new holder was not there, and the human
     /// sees two claims on a board that look like one continuous task.
     fn inheritance(&self, db: &Db, seq: i64) -> Option<String> {
-        self.witness.as_ref()?;
+        self.session.witness.as_ref()?;
         let held = db.witnessed().tenures(seq).ok()?;
         let last = held.last()?;
         let mut sentence = last.describe(seq);
@@ -368,7 +505,7 @@ impl HirdMcp {
 
     /// What the witness has to say about a task, as the tools report it.
     fn evidence(&self, db: &Db, seq: i64) -> Evidence {
-        if self.witness.is_none() {
+        if self.session.witness.is_none() {
             return Evidence::default();
         }
         let live = db
@@ -394,7 +531,7 @@ impl HirdMcp {
             partial: None,
             alone: db
                 .witnessed()
-                .baselines(&self.project)
+                .baselines(&self.session.project)
                 .map(|live| live.len() <= 1)
                 .unwrap_or(true),
         }
@@ -402,7 +539,7 @@ impl HirdMcp {
 
     /// How often an agent should call `task_update` to keep its lease.
     fn heartbeat_minutes(&self) -> u64 {
-        (self.config.lease_ttl_minutes / 2).max(1)
+        (self.shared.config.lease_ttl_minutes / 2).max(1)
     }
 
     /// What a harness sees in `initialize`.
@@ -492,12 +629,14 @@ impl HirdMcp {
              assertions, not gospel: if one turns out to be wrong, `mem_store` the truth.\n\
              {footing}\
              {witness}\n\
+             {identity}\
              Everything is scoped to the current project ({project}) unless you pass \
              `all_projects: true`.",
-            ttl = self.config.lease_ttl_minutes,
+            ttl = self.shared.config.lease_ttl_minutes,
             heartbeat = self.heartbeat_minutes(),
-            capabilities = self.capabilities.join(", "),
-            project = self.project,
+            capabilities = self.session.capabilities.join(", "),
+            identity = self.identity_instructions(),
+            project = self.session.project,
             footing = self.footing_instructions(),
             witness = self.witness_instructions(),
         )
@@ -530,7 +669,7 @@ impl HirdMcp {
     /// a project where nothing will ever populate it has been given a rule it
     /// cannot use and a reason to doubt the ones it can.
     fn witness_instructions(&self) -> &'static str {
-        if self.witness.is_none() {
+        if self.session.witness.is_none() {
             return "";
         }
         "\nThe working tree: hird watches it. A claim fingerprints the repository, and \
@@ -1831,7 +1970,7 @@ impl HirdMcp {
                     dispatched,
                     listed,
                     db.deps()
-                        .unmet_map(&scope, self.config.clearance())
+                        .unmet_map(&scope, self.shared.config.clearance())
                         .unwrap_or_default(),
                     db.questions().unanswered_map(&scope).unwrap_or_default(),
                     recused,
@@ -1842,7 +1981,7 @@ impl HirdMcp {
         let tasks = tasks.map_err(stringify)?;
 
         json(&TaskListResult {
-            project: &self.project,
+            project: &self.session.project,
             all_projects: scope.is_all(),
             count: tasks.len(),
             tasks: tasks
@@ -1859,7 +1998,7 @@ impl HirdMcp {
                         question,
                         barred,
                         verdict,
-                        &self.capabilities,
+                        &self.session.capabilities,
                     )
                 })
                 .collect(),
@@ -1871,11 +2010,12 @@ impl HirdMcp {
     #[tool(name = "task_get")]
     async fn task_get(&self, Parameters(args): Parameters<SeqArgs>) -> Result<String, String> {
         self.sweep_announcing();
-        let recall_limit = self.config.recall_limit();
+        let recall_limit = self.shared.config.recall_limit();
         let detail = self.with_db(|db| {
             let task = db.tasks().get(args.seq)?;
-            let (waiting_for, conflicts) =
-                db.tasks().readiness(args.seq, self.config.clearance())?;
+            let (waiting_for, conflicts) = db
+                .tasks()
+                .readiness(args.seq, self.shared.config.clearance())?;
             Ok::<_, Error>(TaskDetail::new(
                 task.clone(),
                 TaskContext {
@@ -1912,10 +2052,10 @@ impl HirdMcp {
     ) -> Result<String, String> {
         self.sweep_announcing();
         let actor = self.actor();
-        let ttl = self.config.lease_ttl();
+        let ttl = self.shared.config.lease_ttl();
         let paths = args.paths.unwrap_or_default();
-        let policy = self.config.on_conflict();
-        let recall_limit = self.config.recall_limit();
+        let policy = self.shared.config.on_conflict();
+        let recall_limit = self.shared.config.recall_limit();
         // Recall runs after the claim, so it sees the paths this call just
         // declared — claiming with `paths` is what makes the file-scope half
         // of recall work on the very first call.
@@ -1927,8 +2067,8 @@ impl HirdMcp {
                     ttl,
                     &paths,
                     policy,
-                    self.config.clearance(),
-                    &self.capabilities,
+                    self.shared.config.clearance(),
+                    &self.session.capabilities,
                 )?;
                 // The tree as it stands is this task's baseline, so anything
                 // that moves from here is inside its window and everything
@@ -1960,10 +2100,10 @@ impl HirdMcp {
     ) -> Result<String, String> {
         self.sweep_announcing();
         let actor = self.actor();
-        let ttl = self.config.lease_ttl();
+        let ttl = self.shared.config.lease_ttl();
         let scope = self.scope(args.all_projects);
-        let avoid = self.config.avoid_conflicts(args.avoid_conflicts);
-        let recall_limit = self.config.recall_limit();
+        let avoid = self.shared.config.avoid_conflicts(args.avoid_conflicts);
+        let recall_limit = self.shared.config.recall_limit();
         let (dispatch, recalled, previously) = self
             .with_db(|db| {
                 let dispatch = db.tasks().claim_next_with_capabilities(
@@ -1971,8 +2111,8 @@ impl HirdMcp {
                     ttl,
                     &scope,
                     avoid,
-                    self.config.clearance(),
-                    &self.capabilities,
+                    self.shared.config.clearance(),
+                    &self.session.capabilities,
                 )?;
                 let (recalled, previously) = match &dispatch.claim {
                     Some(claim) => {
@@ -2006,7 +2146,7 @@ impl HirdMcp {
     ) -> Result<String, String> {
         self.sweep_announcing();
         let actor = self.actor();
-        let policy = self.config.on_conflict();
+        let policy = self.shared.config.on_conflict();
         let (paths, conflicts, evidence) = self
             .with_db(|db| {
                 // Holder-only, like every other write to a claimed task.
@@ -2164,7 +2304,7 @@ impl HirdMcp {
         // when dispatch stays quiet, because the one being summoned is the
         // human the task now waits on. After the commit, like every hook, so
         // its own `hird` calls find the question already on the board.
-        if let (Some(hook), Some(asked)) = (self.question_herald.as_ref(), asked.as_ref()) {
+        if let (Some(hook), Some(asked)) = (self.shared.question_herald.as_ref(), asked.as_ref()) {
             hook.announce(&crate::herald::RaisedQuestion {
                 seq: task.seq,
                 title: task.title.clone(),
@@ -2212,7 +2352,7 @@ impl HirdMcp {
             },
         };
         let actor = self.actor();
-        let ttl = self.config.lease_ttl();
+        let ttl = self.shared.config.lease_ttl();
         let (task, evidence, shifted) = self
             .with_db(|db| {
                 let task = db
@@ -2276,7 +2416,7 @@ impl HirdMcp {
                 // work now — the sweep above has just brought the record and
                 // the kept versions up to date, and the reviewer should be
                 // handed the change itself rather than a list of file names.
-                let exhibit = self.witness.as_ref().and_then(|witness| {
+                let exhibit = self.session.witness.as_ref().and_then(|witness| {
                     let marked = db.tasks().get(args.seq).map(|t| t.review).unwrap_or(false);
                     if !marked {
                         return None;
@@ -2354,7 +2494,7 @@ impl HirdMcp {
         let (recorded, anchored, corroboration) = self
             .with_db(|db| {
                 let recorded = db.memory().record(NewAssertion {
-                    project: &self.project,
+                    project: &self.session.project,
                     content: &args.content,
                     tags: args.tags.as_deref().unwrap_or(""),
                     actor: &actor,
@@ -2410,14 +2550,14 @@ impl HirdMcp {
             .with_db(|db| {
                 let hits = db.memory().search(&query)?;
                 let ids: Vec<String> = hits.iter().map(|a| a.id.clone()).collect();
-                let standings = footing::standings(db, self.footing(), &self.project, &ids);
+                let standings = footing::standings(db, self.footing(), &self.session.project, &ids);
                 Ok::<_, Error>((hits, standings))
             })
             .map_err(stringify)?;
 
         json(&MemSearchResult {
             query: &args.query,
-            project: &self.project,
+            project: &self.session.project,
             all_projects: scope.is_all(),
             count: hits.len(),
             assertions: hits
@@ -2456,7 +2596,7 @@ impl ServerHandler for HirdMcp {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
         if let Some(client) = context.client_info() {
-            self.agent.name_from_client(&client.name);
+            self.session.agent.name_from_client(&client.name);
         }
         Self::tool_router()
             .call(ToolCallContext::new(self, request, context))

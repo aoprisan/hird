@@ -1571,6 +1571,206 @@ fn a_reviewed_task_shows_who_cannot_take_the_review() {
 
 /// The loop closes without the human carrying anything: the review's verdict
 /// sends the work back, the findings arrive in the brief, the redo files a
+/// The point of per-connection session state: two connections onto one queue,
+/// each acting as a different person on a different harness, neither of them
+/// reading the other's environment.
+#[test]
+fn two_connections_carry_two_identities_against_one_queue() {
+    let sandbox = Sandbox::new();
+    sandbox.git_init();
+    let project = sandbox.project();
+    let project = project.to_str().unwrap();
+    sandbox.run(&["add", "Port the loader"]);
+    sandbox.run(&["add", "Wire the CLI"]);
+
+    // Ana's harness, told who it is on the command line rather than by its own
+    // environment — the arrangement a forced SSH command uses.
+    let mut ana = McpSession::start_with_flags(
+        &sandbox,
+        &[
+            "--identity",
+            "ana",
+            "--harness",
+            "claude-code",
+            "--project",
+            project,
+        ],
+    );
+    let mut ben = McpSession::start_with_flags(
+        &sandbox,
+        &[
+            "--identity",
+            "ben",
+            "--harness",
+            "codex",
+            "--project",
+            project,
+        ],
+    );
+
+    // Each claims a different task, and the queue keeps them apart.
+    ana.claim(1);
+    ben.claim(2);
+    ana.shutdown();
+    ben.shutdown();
+
+    let one = sandbox.run(&["show", "1"]);
+    assert!(one.contains("ana/claude-code"), "{one}");
+    let two = sandbox.run(&["show", "2"]);
+    assert!(two.contains("ben/codex"), "{two}");
+}
+
+/// A connection may be told its capabilities too, so two people on one server
+/// can advertise the environments they are actually running in.
+#[test]
+fn a_connection_is_told_the_capabilities_it_may_claim_against() {
+    let sandbox = Sandbox::new();
+    sandbox.git_init();
+    let project = sandbox.project();
+    let project = project.to_str().unwrap();
+    sandbox.run(&["add", "Check the UI", "--requires", "browser"]);
+
+    // Ben's box has no browser, so the queue refuses him the work.
+    let mut ben = McpSession::start_with_flags(
+        &sandbox,
+        &[
+            "--identity",
+            "ben",
+            "--harness",
+            "codex",
+            "--project",
+            project,
+            "--capability",
+            "linux",
+        ],
+    );
+    let refused = ben
+        .call("task_claim", serde_json::json!({"seq": 1}))
+        .unwrap_err();
+    assert!(refused.to_string().contains("browser"), "{refused}");
+    ben.shutdown();
+
+    // Ana's does, on the same server, in the same second.
+    let mut ana = McpSession::start_with_flags(
+        &sandbox,
+        &[
+            "--identity",
+            "ana",
+            "--harness",
+            "claude-code",
+            "--project",
+            project,
+            "--capability",
+            "browser,linux",
+        ],
+    );
+    ana.claim(1);
+    ana.shutdown();
+    assert!(sandbox.run(&["show", "1"]).contains("ana/claude-code"));
+}
+
+/// Two people, two harnesses, one queue: the record answers "whose work
+/// survives" differently depending on which sense of *whose* you ask for.
+#[test]
+fn the_record_reads_by_harness_or_by_person() {
+    let sandbox = Sandbox::new();
+    sandbox.write_file("src/config.rs", "fn load() {}\n");
+    sandbox.git_init();
+    sandbox.run(&[
+        "add",
+        "Port the loader",
+        "--review",
+        "--path",
+        "src/config.rs",
+    ]);
+
+    // Ana ships it on Claude Code; recusal means Ben must read it on Codex.
+    let mut ana = McpSession::start_as(&sandbox, "claude-code", "ana");
+    ana.claim(1);
+    sandbox.write_file("src/config.rs", "fn load() { ported() }\n");
+    ana.call(
+        "task_complete",
+        serde_json::json!({"seq": 1, "result": "ported"}),
+    )
+    .unwrap();
+    ana.shutdown();
+
+    let mut ben = McpSession::start_as(&sandbox, "codex", "ben");
+    ben.claim(2);
+    ben.call(
+        "task_complete",
+        serde_json::json!({"seq": 2, "result": "good", "verdict": "upheld"}),
+    )
+    .unwrap();
+    ben.shutdown();
+
+    // The actor string carries both halves, so the board still shows the model.
+    let show = sandbox.run(&["show", "1"]);
+    assert!(show.contains("ana/claude-code"), "{show}");
+
+    let by_harness = sandbox.run(&["record"]);
+    assert!(by_harness.contains("as worker"), "{by_harness}");
+    assert!(by_harness.contains("claude-code"), "{by_harness}");
+    assert!(
+        !by_harness.contains("ana"),
+        "the harness reading names models, not people: {by_harness}"
+    );
+
+    let by_person = sandbox.run(&["record", "--by", "person"]);
+    assert!(by_person.contains("ana"), "{by_person}");
+    assert!(by_person.contains("ben"), "{by_person}");
+}
+
+/// Reading by person on a queue nobody named says so, rather than showing an
+/// empty table or inventing an `unknown` row.
+#[test]
+fn reading_the_record_by_person_says_when_nobody_is_named() {
+    let sandbox = Sandbox::new();
+    sandbox.write_file("src/config.rs", "fn load() {}\n");
+    sandbox.git_init();
+    sandbox.run(&[
+        "add",
+        "Port the loader",
+        "--review",
+        "--path",
+        "src/config.rs",
+    ]);
+
+    let mut codex = McpSession::start(&sandbox, "codex");
+    codex.claim(1);
+    sandbox.write_file("src/config.rs", "fn load() { ported() }\n");
+    codex
+        .call(
+            "task_complete",
+            serde_json::json!({"seq": 1, "result": "ported"}),
+        )
+        .unwrap();
+    codex.shutdown();
+    let mut claude = McpSession::start(&sandbox, "claude-code");
+    claude.claim(2);
+    claude
+        .call(
+            "task_complete",
+            serde_json::json!({"seq": 2, "result": "good", "verdict": "upheld"}),
+        )
+        .unwrap();
+    claude.shutdown();
+
+    assert!(sandbox.run(&["record"]).contains("codex"));
+    let by_person = sandbox.run(&["record", "--by", "person"]);
+    assert!(by_person.contains("HIRD_IDENTITY"), "{by_person}");
+}
+
+/// `hird register --identity` writes the one thing a client is never allowed
+/// to say about itself.
+#[test]
+fn registering_with_an_identity_writes_it_into_the_harness_config() {
+    let sandbox = Sandbox::new();
+    let printed = sandbox.run(&["register", "claude-code", "--identity", "ana", "--print"]);
+    assert!(printed.contains("HIRD_IDENTITY"), "{printed}");
+    assert!(printed.contains("ana"), "{printed}");
+}
+
 /// fresh review, and the record keeps score on both sides.
 #[test]
 fn a_sent_back_verdict_reopens_the_work_and_the_record_keeps_score() {

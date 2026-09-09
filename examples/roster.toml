@@ -1,0 +1,34 @@
+# The roster: who may connect to `hird-server`, and as whom.
+#
+# The local `hird` binary reads its identity from the environment it was
+# started in, because that environment belongs to the human running the
+# harness. A server has no such luxury — the far end of a socket can claim
+# anything — so nothing a client says about *who* it is gets believed. A
+# request carries a bearer token; this file says what that token means.
+#
+#   hird-server --roster roster.toml --bind 127.0.0.1 --port 7474
+#
+# Keep it readable only by the user running the server (`chmod 600`), and keep
+# it out of the repository: every line is a credential.
+
+# The project every worker files into unless it names its own. Required in one
+# place or the other — a server cannot guess a project from its own working
+# directory, because the caller's checkout is on another machine.
+project = "/srv/acme"
+
+[[worker]]
+# Generate with `openssl rand -hex 32`. Refused under 24 characters: this is
+# the only thing between a stranger and the queue.
+token = "REPLACE-ME-with-32-random-bytes-in-hex"
+identity = "ana"
+# Left unset, the harness names itself — which is allowed for a harness and
+# never for a person. Pin it when you would rather the client had no say.
+capabilities = ["browser", "linux"]
+
+[[worker]]
+token = "REPLACE-ME-with-a-different-32-random-bytes"
+identity = "ben"
+harness = "codex"
+capabilities = ["linux"]
+# A worker may file into a different project from the default.
+# project = "/srv/other"

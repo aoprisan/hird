@@ -68,6 +68,13 @@ hand-written configs get wrong and the reason `register` exists.
 
 ## Later
 
+The two items below — sync and a remote transport — are assessed together in
+[REMOTE.md](REMOTE.md), which surveys what could be bought instead of built
+and reaches a recommendation: dumb object storage with conditional writes for
+the queue, a tunnel for the transport, and no hosted orchestrator at any
+price. It also prices two costs this file understates — the `seq` collision
+and the witness's per-machine blind spot.
+
 **Multi-machine sync (`hird sync`).** The flagship deferral, and the reason
 the event trail is append-only: every mutation in hird already lands as an
 event, which is the shape that makes sync tractable — ship the trail, replay
@@ -78,15 +85,25 @@ design work that remains is real — two machines can hold two working trees,
 so the witness's evidence is per-machine even when the queue is shared — and
 it is the reason this is *later* rather than *next*.
 
-**A remote transport.** hird is a local queue in a local SQLite file, and the
-Copilot coding agent on github.com — or any cloud harness in an ephemeral
-container — has nothing to connect to. An HTTP mode for `hird mcp` would let
-a remote session reach a queue on your machine. `hird web` is not that: it
-serves a human a picture and takes no writes, and the transport question
-stays open on its own merits. It waits on demand and on the
-sync design above, because a remote harness also has a remote working tree,
-and a queue that can see neither the files nor the fingerprints is serving
-that session with the witness, footing and exhibit all dark.
+**Authorization beyond a file.** The transport shipped: v3.1 (§30) gave the
+MCP server per-connection session state, and v3.2 (§31) put an HTTP one behind
+it in a second binary, `hird-server`, so the local `hird` carries no web stack
+at all. A bearer token in a roster file maps to a person, one endpoint is built
+per identity, and two people on two machines share a queue. `README.md` has
+both recipes — SSH for harnesses that can spawn it, HTTP for those that cannot.
+
+What a file cannot do is scale past a few people you know: no rotation, no
+expiry, no revocation short of an edit and a restart, and no delegation. The
+MCP authorization spec is the answer — OAuth 2.1 with the server as a resource
+server only, RFC 9728 discovery, RFC 8707 tokens bound to this server — and
+rmcp ships an `auth` feature for it. `REMOTE.md` sets out the cost. It waits on
+a queue with more than a handful of people on it, because that is the first
+point at which editing a file stops being the simpler thing.
+
+The witness caveat is unchanged and now load-bearing: a remote harness has a
+remote working tree, so a shared queue serves every session with the witness,
+footing and exhibit dark, and should say so by turning them off rather than
+reporting about the server's own directory.
 
 **Semantic search for memory.** FTS5 finds facts by the words they use;
 recall finds them by the files they touch. Neither finds "the loader ignores
