@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use chrono::Utc;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::config::{self, Config};
 use crate::db::Db;
@@ -21,7 +21,7 @@ use crate::glob;
 // encode — a sweep must announce what it collects — binds every reader that
 // polls, not just this one.
 use crate::herald::{announce_claimable, sweep_announcing, Cause, Herald};
-use crate::identity::{self, ACTOR_CLI};
+use crate::identity::{self, Axis, ACTOR_CLI};
 use crate::model::{Footprint, Standing, Status, TaskSummary};
 use crate::plan;
 use crate::register::{self, Registration};
@@ -204,13 +204,16 @@ pub enum Command {
     /// This is what makes a review a review: the queue refuses the claim from
     /// the harness that did the work, and dispatch routes around it.
     Recuse(RecuseArgs),
-    /// Show each harness's track record under review: verdicts received on
-    /// its work, its first-pass rate, and the verdicts it has handed out.
+    /// Show each harness's — or each person's — track record under review:
+    /// verdicts received on its work, its first-pass rate, and the verdicts it
+    /// has handed out.
     ///
     /// Derived entirely from delivered verdicts, so it measures the one thing
     /// the queue can measure — whose work survives a reading by a different
-    /// model. A report, not a scheduler: nothing routes work by it.
-    Record(ScopeFilterArgs),
+    /// model. `--by person` reads the same verdicts along the other half of
+    /// the actor, for a queue more than one person files into. A report, not a
+    /// scheduler: nothing routes work by it.
+    Record(RecordArgs),
     /// Tail the append-only event trail across every task, oldest first:
     /// claims, check-ins, completions, verdicts, witnessed changes, expiries.
     ///
@@ -312,6 +315,10 @@ pub struct RegisterArgs {
     /// Repeatable, or comma-separated.
     #[arg(long = "capability", value_name = "NAME", value_delimiter = ',')]
     pub capabilities: Vec<String>,
+    /// Who this harness's sessions act for, on a queue more than one person
+    /// files into. Recorded on claims, reviews and assertions; steers nothing.
+    #[arg(long = "identity", value_name = "PERSON")]
+    pub identity: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -471,6 +478,34 @@ pub struct ScopeFilterArgs {
     /// Span every project rather than just the current one.
     #[arg(long)]
     pub all_projects: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct RecordArgs {
+    #[command(flatten)]
+    pub scope: ScopeFilterArgs,
+    /// Group the record by the model that acted, or by the person it acted
+    /// for. Reading by person needs `HIRD_IDENTITY` set on the sessions that
+    /// did the work; verdicts that name nobody are left out.
+    #[arg(long = "by", value_name = "AXIS", default_value = "harness")]
+    pub by: RecordAxisArg,
+}
+
+/// The `--by` values, kept separate from [`crate::identity::Axis`] so the
+/// spelling on the command line is not the library's business.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum RecordAxisArg {
+    Harness,
+    Person,
+}
+
+impl From<RecordAxisArg> for Axis {
+    fn from(arg: RecordAxisArg) -> Axis {
+        match arg {
+            RecordAxisArg::Harness => Axis::Harness,
+            RecordAxisArg::Person => Axis::Person,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -768,7 +803,12 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
             agents(&db, &scope_of(&project, &config, args.all_projects), out)
         }
         Command::Recuse(args) => recuse(&db, args, out),
-        Command::Record(args) => record(&db, &scope_of(&project, &config, args.all_projects), out),
+        Command::Record(args) => record(
+            &db,
+            &scope_of(&project, &config, args.scope.all_projects),
+            args.by.into(),
+            out,
+        ),
         Command::Replay { when, scope } => replay(
             &db,
             &scope_of(&project, &config, scope.all_projects),
@@ -792,6 +832,10 @@ fn register_cmd(
     let harness = args.harness;
     let registration =
         Registration::new(harness, &args.name, db).with_capabilities(&args.capabilities)?;
+    let registration = match &args.identity {
+        Some(who) => registration.acting_for(who),
+        None => registration,
+    };
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     if args.print {
@@ -2157,33 +2201,61 @@ fn recuse(db: &Db, args: &RecuseArgs, out: &mut impl Write) -> anyhow::Result<()
     Ok(())
 }
 
-/// `hird record`: each harness's standing in the verdict record.
-fn record(db: &Db, scope: &ProjectScope, out: &mut impl Write) -> anyhow::Result<()> {
-    let records = db.verdicts().record(scope)?;
+/// Column heading for the worker half of the record, per axis.
+fn axis_label(axis: Axis) -> &'static str {
+    match axis {
+        Axis::Harness => "as worker",
+        Axis::Person => "worker",
+    }
+}
+
+/// Column heading for the reviewer half of the record, per axis.
+fn reviewer_label(axis: Axis) -> &'static str {
+    match axis {
+        Axis::Harness => "as reviewer",
+        Axis::Person => "reviewer",
+    }
+}
+
+/// `hird record`: each harness's — or each person's — standing in the record.
+fn record(db: &Db, scope: &ProjectScope, axis: Axis, out: &mut impl Write) -> anyhow::Result<()> {
+    let records = db.verdicts().record(scope, axis)?;
     let workers: Vec<_> = records.iter().filter(|r| r.judged > 0).collect();
     let reviewers: Vec<_> = records
         .iter()
         .filter(|r| r.upheld_given + r.sent_back_given > 0)
         .collect();
     if workers.is_empty() && reviewers.is_empty() {
-        writeln!(
-            out,
-            "no verdicts on record — file work with `hird add --review` and the reviews \
-             that finishing it files will deliver them"
-        )?;
+        if axis == Axis::Person {
+            writeln!(
+                out,
+                "no verdicts on record name a person — set HIRD_IDENTITY on the sessions \
+                 doing the work, or read the record by harness"
+            )?;
+        } else {
+            writeln!(
+                out,
+                "no verdicts on record — file work with `hird add --review` and the reviews \
+                 that finishing it files will deliver them"
+            )?;
+        }
         return Ok(());
     }
     if !workers.is_empty() {
         writeln!(
             out,
             "{:<14} {:>7} {:>7} {:>10} {:>11}",
-            "as worker", "judged", "upheld", "sent back", "first pass"
+            axis_label(axis),
+            "judged",
+            "upheld",
+            "sent back",
+            "first pass"
         )?;
         for r in workers {
             writeln!(
                 out,
                 "{:<14} {:>7} {:>7} {:>10} {:>11}",
-                r.harness,
+                r.who,
                 r.judged,
                 r.upheld,
                 r.sent_back,
@@ -2195,13 +2267,15 @@ fn record(db: &Db, scope: &ProjectScope, out: &mut impl Write) -> anyhow::Result
         writeln!(
             out,
             "\n{:<14} {:>7} {:>10}",
-            "as reviewer", "upheld", "sent back"
+            reviewer_label(axis),
+            "upheld",
+            "sent back"
         )?;
         for r in reviewers {
             writeln!(
                 out,
                 "{:<14} {:>7} {:>10}",
-                r.harness, r.upheld_given, r.sent_back_given
+                r.who, r.upheld_given, r.sent_back_given
             )?;
         }
     }

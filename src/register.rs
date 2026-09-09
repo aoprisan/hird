@@ -19,7 +19,7 @@ use anyhow::Context;
 use clap::ValueEnum;
 use serde_json::{json, Map, Value as Json};
 
-use crate::identity::{self, DB_ENV, HARNESS_ENV};
+use crate::identity::{self, DB_ENV, HARNESS_ENV, IDENTITY_ENV};
 
 /// A harness hird knows how to register itself with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -173,6 +173,17 @@ impl Registration {
             );
         }
         Ok(self)
+    }
+
+    /// Name the person this registration's sessions act for.
+    ///
+    /// Written into the harness's config beside the harness name, because that
+    /// is the one place a human already curates and a client never reaches.
+    pub fn acting_for(mut self, principal: &str) -> Registration {
+        if let Some(principal) = identity::principal_name(principal) {
+            self.env.insert(IDENTITY_ENV.to_string(), principal);
+        }
+        self
     }
 
     /// This entry as JSON, in the dialect `harness` expects.

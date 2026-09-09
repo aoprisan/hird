@@ -316,6 +316,24 @@ impl HirdMcp {
         evidence
     }
 
+    /// Who this session acts for, when a human has said.
+    ///
+    /// Silent on a queue with one person on it, where an unattributed actor is
+    /// the whole truth and a sentence about identity is noise in a context
+    /// window. Said plainly where it matters, because an agent whose claims
+    /// carry a name should be able to report that name to the human.
+    fn identity_instructions(&self) -> String {
+        match self.agent.principal() {
+            Some(who) => format!(
+                "\nThis session acts for {who}, and every claim, review and assertion it \
+                 makes is recorded under that name alongside the harness. More than one \
+                 person files into this queue: work you did not do may be waiting, and \
+                 work you do will be read back to somebody else.\n"
+            ),
+            None => String::new(),
+        }
+    }
+
     /// The witness memory may read the tree through, if the configuration
     /// lets it. Narrower than `self.witness` by one flag.
     fn footing(&self) -> Option<&Witness> {
@@ -492,11 +510,13 @@ impl HirdMcp {
              assertions, not gospel: if one turns out to be wrong, `mem_store` the truth.\n\
              {footing}\
              {witness}\n\
+             {identity}\
              Everything is scoped to the current project ({project}) unless you pass \
              `all_projects: true`.",
             ttl = self.config.lease_ttl_minutes,
             heartbeat = self.heartbeat_minutes(),
             capabilities = self.capabilities.join(", "),
+            identity = self.identity_instructions(),
             project = self.project,
             footing = self.footing_instructions(),
             witness = self.witness_instructions(),

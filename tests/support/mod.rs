@@ -177,6 +177,19 @@ impl McpSession {
             Some(harness),
             Lifecycle::Handshake(CLIENT_NAME),
             Some(capabilities),
+            None,
+        )
+    }
+
+    /// A session on a queue more than one person files into: the registration
+    /// names the harness and the human it is acting for.
+    pub fn start_as(sandbox: &Sandbox, harness: &str, principal: &str) -> McpSession {
+        McpSession::spawn_capable(
+            sandbox,
+            Some(harness),
+            Lifecycle::Handshake(CLIENT_NAME),
+            None,
+            Some(principal),
         )
     }
 
@@ -209,7 +222,7 @@ impl McpSession {
     }
 
     fn spawn(sandbox: &Sandbox, harness: Option<&str>, lifecycle: Lifecycle) -> McpSession {
-        McpSession::spawn_capable(sandbox, harness, lifecycle, None)
+        McpSession::spawn_capable(sandbox, harness, lifecycle, None, None)
     }
 
     fn spawn_capable(
@@ -217,6 +230,7 @@ impl McpSession {
         harness: Option<&str>,
         lifecycle: Lifecycle,
         capabilities: Option<&str>,
+        principal: Option<&str>,
     ) -> McpSession {
         let mut command: Command = sandbox.command();
         if let Some(harness) = harness {
@@ -224,6 +238,9 @@ impl McpSession {
         }
         if let Some(capabilities) = capabilities {
             command.env("HIRD_CAPABILITIES", capabilities);
+        }
+        if let Some(principal) = principal {
+            command.env("HIRD_IDENTITY", principal);
         }
         let mut child = command
             .arg("mcp")

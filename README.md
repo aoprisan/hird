@@ -1566,6 +1566,7 @@ more room.
 | Variable | Meaning |
 |---|---|
 | `HIRD_HARNESS` | This session's harness name. Set it in the MCP registration. |
+| `HIRD_IDENTITY` | Who this session acts for, on a queue more than one person files into. Optional. |
 | `HIRD_CAPABILITIES` | Comma-separated capabilities this MCP session can satisfy. |
 | `HIRD_PROJECT` | Override project detection. |
 | `HIRD_DB` | Override the database path. |

@@ -2040,3 +2040,72 @@ prove, and says which is which.
 One repo read (`Events::bounds`), one module that reads the tables into a
 value, one that serves it, and one screen. No MCP tool, no status, no
 schema change, no dependency.
+
+## 29. (v3.0) The principal — who the harness is acting for
+
+An actor has always answered *what* is acting: `claude-code:af31`, a harness
+and a session. That was the whole truth for the queue this was designed
+around, where one human runs three harnesses and the interesting question is
+which model did the work. On a queue more than one person files into, the
+actor string answers a question nobody asked and stays silent on the one they
+did.
+
+`HIRD_IDENTITY` adds the missing half. When it is set, actors are recorded as
+`<principal>/<harness>:<session>` — `ana/claude-code:af31` — and when it is
+not, they are exactly the strings they were. No migration: the principal lives
+in the actor column that already existed, and every reader that was parsing
+`harness:session` keeps working because `actor_harness` now looks past the
+prefix.
+
+### The client may name the harness; it may never name the person
+
+`AgentId` takes its harness from `HIRD_HARNESS`, and failing that from the
+first client that names itself (§1.6) — being wrong there costs a badge in a
+TUI column. The principal is deliberately not offered that second path. A
+client that could name the person would be a client that could sign another
+person's work, and the whole value of recording who did something is that the
+record is not up to them. It comes from the environment, which is the one
+place the human curates and the client never reaches, and `hird register
+--identity` writes it there beside the harness name.
+
+`sanitize` gains the separator for the same reason it already had the colon
+and the comma: a harness or session that could write a `/` could claim to be
+somebody. Stripping rather than rejecting keeps a badly set variable cosmetic.
+
+### Recusal still bars the harness
+
+The obvious next move is to make recusal bar the person, and it is wrong.
+§15's bar exists because *"the single most valuable property of running three
+different models on one codebase is precisely that they are not the same
+model"* — the point is model diversity, not accountability. Two people driving
+Claude Code at the same task are still one model reading its own work, and
+letting the second one through because they are a different human would sell
+exactly the property the review loop is for.
+
+So nothing about claiming, dispatch, routing or the summons changes. The
+principal is recorded and reported; it steers nothing. This is the same
+posture as the witness and the record: hird measures and does not decide.
+
+### The record grows an axis, because *whose* got ambiguous
+
+§16 says the record measures "whose work survives a reading by a different
+model." With one human those words have one meaning. With two they have two,
+and only the reader knows which was intended — so the choice belongs at the
+point of reading rather than in what is stored. `hird record --by person`
+groups the same verdicts by principal instead of harness.
+
+The two readings genuinely disagree, which is the point. Ana ships on Claude
+Code and Ben reads it on Codex; they swap and repeat. By harness, one model
+shipped everything and the other read everything. By person, both of them
+shipped one and read one. Same verdicts, same table, different question.
+
+Verdicts whose actors name nobody are left out of a person reading entirely,
+rather than collected under `unknown`. An unattributed actor has no person to
+credit, and inventing one would be the record steering rather than measuring.
+
+### Still twelve tools
+
+The principal rides in on the actor string that twelve tools were already
+writing. No tool gained a parameter, no status was added, and an agent is told
+who it acts for in the same handshake instructions that already tell it the
+lease TTL and its capabilities — and only when there is something to tell.

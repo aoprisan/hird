@@ -44,8 +44,8 @@ use std::collections::BTreeMap;
 use rusqlite::{params, Connection, Transaction};
 
 use crate::error::{Error, Result};
-use crate::identity::actor_harness;
-use crate::model::{now_ts, EventKind, HarnessRecord, Status, Verdict, VerdictRecord};
+use crate::identity::{actor_harness, Axis};
+use crate::model::{now_ts, EventKind, RecordRow, Status, Verdict, VerdictRecord};
 
 /// One verdict as it landed on a reviewed task, and what the queue did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,13 +126,19 @@ impl<'a> Verdicts<'a> {
         Ok(out)
     }
 
-    /// Each harness's standing in the record: verdicts received on its work,
-    /// first-pass rate across distinct tasks, and verdicts it has handed out.
+    /// Each harness's — or each person's — standing in the record: verdicts
+    /// received on its work, first-pass rate across distinct tasks, and
+    /// verdicts it has handed out.
     ///
     /// Aggregated from the delivered verdicts and nothing else, so it holds
     /// still when leases churn and workers hand tasks on: a verdict names the
     /// worker it judged at the moment it landed, and that name does not move.
-    pub fn record(&self, scope: &super::ProjectScope) -> Result<Vec<HarnessRecord>> {
+    ///
+    /// `axis` picks which half of those names to group by. Along
+    /// [`Axis::Person`], verdicts whose actors name nobody are left out
+    /// entirely — an unattributed actor has no person to credit, and guessing
+    /// one would be the record steering rather than measuring.
+    pub fn record(&self, scope: &super::ProjectScope, axis: Axis) -> Result<Vec<RecordRow>> {
         let (clause, value) = scope.clause("t.project");
         let sql = format!(
             "SELECT v.worker, v.reviewer, v.verdict, v.task_id FROM task_verdicts v
@@ -150,27 +156,22 @@ impl<'a> Verdicts<'a> {
             ))
         })?;
 
-        fn entry<'m>(
-            records: &'m mut BTreeMap<String, HarnessRecord>,
-            harness: &str,
-        ) -> &'m mut HarnessRecord {
-            records
-                .entry(harness.to_string())
-                .or_insert_with(|| HarnessRecord {
-                    harness: harness.to_string(),
-                    ..HarnessRecord::default()
-                })
+        fn entry<'m>(records: &'m mut BTreeMap<String, RecordRow>, who: &str) -> &'m mut RecordRow {
+            records.entry(who.to_string()).or_insert_with(|| RecordRow {
+                who: who.to_string(),
+                ..RecordRow::default()
+            })
         }
-        let mut records: BTreeMap<String, HarnessRecord> = BTreeMap::new();
+        let mut records: BTreeMap<String, RecordRow> = BTreeMap::new();
         let mut first_seen: BTreeMap<String, (String, Verdict)> = BTreeMap::new();
         for row in rows {
             let (worker, reviewer, verdict, task_id) = row?;
             let Ok(verdict) = verdict.parse::<Verdict>() else {
                 continue;
             };
-            if !worker.is_empty() {
-                let harness = actor_harness(&worker).to_string();
-                let rec = entry(&mut records, &harness);
+            if let Some(who) = axis.key(&worker).filter(|_| !worker.is_empty()) {
+                let who = who.to_string();
+                let rec = entry(&mut records, &who);
                 rec.judged += 1;
                 match verdict {
                     Verdict::Upheld => rec.upheld += 1,
@@ -178,16 +179,18 @@ impl<'a> Verdicts<'a> {
                 }
                 // The first verdict on a task is the one that measures the
                 // work as delivered, before any round of rework.
-                first_seen.entry(task_id).or_insert((harness, verdict));
+                first_seen.entry(task_id).or_insert((who, verdict));
             }
-            let rec = entry(&mut records, actor_harness(&reviewer));
-            match verdict {
-                Verdict::Upheld => rec.upheld_given += 1,
-                Verdict::SentBack => rec.sent_back_given += 1,
+            if let Some(who) = axis.key(&reviewer) {
+                let rec = entry(&mut records, who);
+                match verdict {
+                    Verdict::Upheld => rec.upheld_given += 1,
+                    Verdict::SentBack => rec.sent_back_given += 1,
+                }
             }
         }
-        for (harness, verdict) in first_seen.into_values() {
-            if let Some(rec) = records.get_mut(&harness) {
+        for (who, verdict) in first_seen.into_values() {
+            if let Some(rec) = records.get_mut(&who) {
                 rec.tasks_judged += 1;
                 if verdict == Verdict::Upheld {
                     rec.first_pass += 1;
@@ -762,9 +765,9 @@ mod tests {
 
         let record = db
             .verdicts()
-            .record(&ProjectScope::Only(PROJECT.into()))
+            .record(&ProjectScope::Only(PROJECT.into()), Axis::Harness)
             .unwrap();
-        let of = |harness: &str| record.iter().find(|r| r.harness == harness).unwrap();
+        let of = |who: &str| record.iter().find(|r| r.who == who).unwrap();
 
         let codex = of("codex");
         assert_eq!(codex.judged, 2);
@@ -781,6 +784,87 @@ mod tests {
         assert_eq!(claude.first_pass, 1);
         assert_eq!(claude.upheld_given, 1);
         assert_eq!(claude.sent_back_given, 1);
+    }
+
+    /// Two people on one harness are one row by harness and two by person —
+    /// the whole reason the axis exists.
+    #[test]
+    fn the_record_can_be_read_by_person() {
+        let db = Db::open_in_memory().unwrap();
+        // Ana ships on Claude Code, Ben reads it on Codex; then they swap
+        // harnesses and do it again. Recusal forces the swap — a review is
+        // barred to the harness that did the work — which is exactly what
+        // makes the two axes disagree.
+        let (_, ana_review) = reviewed_work(&db, "ana/claude-code:af31");
+        db.tasks().claim(ana_review, "ben/codex:9f2c", TTL).unwrap();
+        db.tasks()
+            .complete_with(ana_review, "ben/codex:9f2c", "good", Some(Verdict::Upheld))
+            .unwrap();
+
+        let (_, ben_review) = reviewed_work(&db, "ben/claude-code:1a2b");
+        db.tasks().claim(ben_review, "ana/codex:3c4d", TTL).unwrap();
+        db.tasks()
+            .complete_with(
+                ben_review,
+                "ana/codex:3c4d",
+                "nope",
+                Some(Verdict::SentBack),
+            )
+            .unwrap();
+
+        // By harness: one model shipped everything and the other read it all.
+        let by_harness = db
+            .verdicts()
+            .record(&ProjectScope::Only(PROJECT.into()), Axis::Harness)
+            .unwrap();
+        let of = |rows: &[crate::model::RecordRow], who: &str| {
+            rows.iter().find(|r| r.who == who).unwrap().clone()
+        };
+        assert_eq!(of(&by_harness, "claude-code").judged, 2);
+        assert_eq!(of(&by_harness, "claude-code").upheld_given, 0);
+        assert_eq!(of(&by_harness, "codex").judged, 0);
+        assert_eq!(of(&by_harness, "codex").upheld_given, 1);
+        assert_eq!(of(&by_harness, "codex").sent_back_given, 1);
+
+        // By person: the same verdicts say both of them shipped one and read
+        // one. Same rows, different question.
+        let by_person = db
+            .verdicts()
+            .record(&ProjectScope::Only(PROJECT.into()), Axis::Person)
+            .unwrap();
+        assert_eq!(by_person.len(), 2);
+        assert_eq!(of(&by_person, "ana").judged, 1);
+        assert_eq!(of(&by_person, "ana").upheld, 1);
+        assert_eq!(of(&by_person, "ana").first_pass, 1);
+        assert_eq!(of(&by_person, "ana").sent_back_given, 1);
+        assert_eq!(of(&by_person, "ben").judged, 1);
+        assert_eq!(of(&by_person, "ben").sent_back, 1);
+        assert_eq!(of(&by_person, "ben").upheld_given, 1);
+    }
+
+    /// An unattributed actor has no person to credit, and the record says
+    /// nothing rather than guessing one.
+    #[test]
+    fn reading_by_person_leaves_out_what_names_nobody() {
+        let db = Db::open_in_memory().unwrap();
+        let (_, review) = reviewed_work(&db, "claude-code:af31");
+        db.tasks().claim(review, "codex:9f2c", TTL).unwrap();
+        db.tasks()
+            .complete_with(review, "codex:9f2c", "ok", Some(Verdict::Upheld))
+            .unwrap();
+
+        assert_eq!(
+            db.verdicts()
+                .record(&ProjectScope::Only(PROJECT.into()), Axis::Harness)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(db
+            .verdicts()
+            .record(&ProjectScope::Only(PROJECT.into()), Axis::Person)
+            .unwrap()
+            .is_empty());
     }
 
     /// Failing a review is not delivering a verdict: the reviewer could not do
