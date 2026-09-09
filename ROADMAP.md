@@ -68,6 +68,13 @@ hand-written configs get wrong and the reason `register` exists.
 
 ## Later
 
+The two items below — sync and a remote transport — are assessed together in
+[REMOTE.md](REMOTE.md), which surveys what could be bought instead of built
+and reaches a recommendation: dumb object storage with conditional writes for
+the queue, a tunnel for the transport, and no hosted orchestrator at any
+price. It also prices two costs this file understates — the `seq` collision
+and the witness's per-machine blind spot.
+
 **Multi-machine sync (`hird sync`).** The flagship deferral, and the reason
 the event trail is append-only: every mutation in hird already lands as an
 event, which is the shape that makes sync tractable — ship the trail, replay
