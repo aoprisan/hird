@@ -85,15 +85,24 @@ design work that remains is real — two machines can hold two working trees,
 so the witness's evidence is per-machine even when the queue is shared — and
 it is the reason this is *later* rather than *next*.
 
-**A remote transport.** hird is a local queue in a local SQLite file, and the
-Copilot coding agent on github.com — or any cloud harness in an ephemeral
-container — has nothing to connect to. An HTTP mode for `hird mcp` would let
-a remote session reach a queue on your machine. `hird web` is not that: it
-serves a human a picture and takes no writes, and the transport question
-stays open on its own merits. It waits on demand and on the
-sync design above, because a remote harness also has a remote working tree,
-and a queue that can see neither the files nor the fingerprints is serving
-that session with the witness, footing and exhibit all dark.
+**An HTTP transport.** Half of this shipped in v3.1 (§30): the server holds
+per-connection session state, so one process can serve two people under two
+identities, and SSH carries `hird mcp` between machines with a forced command
+pinning who each key is. Two people already share a queue that way, and
+`README.md` has the recipe.
+
+What is still missing is a transport for harnesses that cannot spawn `ssh` —
+the Copilot coding agent on github.com, or any cloud harness in an ephemeral
+container. rmcp ships `transport-streamable-http-server` and `auth`, so the
+protocol work is a feature flag; the cost is a web stack (hyper, tower) in a
+binary whose only HTTP today is a hand-rolled loopback viewer, plus TLS and an
+OAuth 2.1 resource-server story that `REMOTE.md` sets out. It waits on somebody
+needing it, because SSH covers the case that exists.
+
+The witness caveat is unchanged and now load-bearing: a remote harness has a
+remote working tree, so a shared queue serves every session with the witness,
+footing and exhibit dark, and should say so by turning them off rather than
+reporting about the server's own directory.
 
 **Semantic search for memory.** FTS5 finds facts by the words they use;
 recall finds them by the files they touch. Neither finds "the loader ignores

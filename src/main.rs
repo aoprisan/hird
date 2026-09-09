@@ -43,7 +43,7 @@ fn run() -> anyhow::Result<()> {
     }
 
     match cli.command.as_ref().expect("clap requires a command") {
-        Command::Mcp => serve_mcp(&cli),
+        Command::Mcp(args) => serve_mcp(&cli, args),
         Command::Tui => {
             let config = Config::load_default()?;
             let db_path = config::resolve_db_path(cli.db.as_deref());
@@ -73,11 +73,12 @@ fn run() -> anyhow::Result<()> {
     }
 }
 
-fn serve_mcp(cli: &Cli) -> anyhow::Result<()> {
+fn serve_mcp(cli: &Cli, args: &hird::cli::McpArgs) -> anyhow::Result<()> {
     let config = Config::load_default()?;
     let db_path = config::resolve_db_path(cli.db.as_deref());
+    let attributes = args.into();
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?
-        .block_on(hird::mcp::serve(&db_path, config))
+        .block_on(hird::mcp::serve_session(&db_path, config, &attributes))
 }

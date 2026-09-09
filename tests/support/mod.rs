@@ -181,6 +181,18 @@ impl McpSession {
         )
     }
 
+    /// A session whose attributes are given on the command line rather than
+    /// in the environment — the arrangement an SSH forced command uses, where
+    /// the far end does not get to say who it is.
+    pub fn start_with_flags(sandbox: &Sandbox, flags: &[&str]) -> McpSession {
+        let mut command: Command = sandbox.command();
+        command.arg("mcp");
+        for flag in flags {
+            command.arg(flag);
+        }
+        McpSession::from_command(command, Lifecycle::Handshake(CLIENT_NAME))
+    }
+
     /// A session on a queue more than one person files into: the registration
     /// names the harness and the human it is acting for.
     pub fn start_as(sandbox: &Sandbox, harness: &str, principal: &str) -> McpSession {
@@ -242,8 +254,13 @@ impl McpSession {
         if let Some(principal) = principal {
             command.env("HIRD_IDENTITY", principal);
         }
+        command.arg("mcp");
+        McpSession::from_command(command, lifecycle)
+    }
+
+    /// Drive an already-configured `hird mcp` command as a session.
+    fn from_command(mut command: Command, lifecycle: Lifecycle) -> McpSession {
         let mut child = command
-            .arg("mcp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

@@ -293,7 +293,11 @@
     return t;
   }
   function clip(s, n) { return s.length > n ? s.slice(0, n - 1) + '…' : s; }
-  function harness(actor) { return actor ? actor.split(':')[0] : ''; }
+  // An actor is `[person/]harness:session`. The board asks two questions of
+  // it — what model holds this, and, on a queue more than one person files
+  // into, who is driving it.
+  function harness(actor) { const w = actor ? actor.split(':')[0] : ''; const i = w.lastIndexOf('/'); return i < 0 ? w : w.slice(i + 1); }
+  function person(actor) { const w = actor ? actor.split(':')[0] : ''; const i = w.indexOf('/'); return i < 0 ? '' : w.slice(0, i); }
 
   function showEmpty(message) {
     $('empty').textContent = message;
@@ -376,6 +380,7 @@
 
       let sub = t.status.replace('_', ' ');
       if (t.holder) sub += ' · ' + harness(t.holder);
+      if (t.holder && person(t.holder)) sub += ' · ' + person(t.holder);
       const line2 = text(g, 12, 39, sub, 'sub');
       if (t.lease_expires_at) {
         const lease = document.createElementNS(svgNS, 'tspan');

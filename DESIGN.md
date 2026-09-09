@@ -2109,3 +2109,80 @@ The principal rides in on the actor string that twelve tools were already
 writing. No tool gained a parameter, no status was added, and an agent is told
 who it acts for in the same handshake instructions that already tell it the
 lease TTL and its capabilities — and only when there is something to tell.
+
+## 30. (v3.1) The connection — a session is not a process
+
+Since v1 the MCP server has held one identity, one project, one capability set
+and one witness, all read from the environment and the working directory at
+startup. That was not a shortcut: one process served exactly one harness
+session, so *session state* and *process state* were the same words for the
+same thing, and reading them once was the simplest correct implementation.
+
+It is also the single assumption that makes a shared queue impossible. A
+process serving two connections under that design serves them as one caller:
+both act under one identity, scope to one project, advertise one capability
+set, and are witnessed against one tree. Not degraded — wrong, and silently.
+
+### The split
+
+`HirdMcp` becomes two things it always was underneath:
+
+- **`Shared`** — the database handle, the configuration, and the two hooks.
+  Everything whose answer is the same whoever is asking, held once per process
+  behind an `Arc`.
+- **`Session`** — the identity, the project, the capabilities and the witness.
+  Everything that is an answer *about the caller*, held once per connection.
+
+One `rusqlite::Connection` behind one mutex still serializes every session's
+writes, and that is not a bottleneck to apologise for: the claim CAS wanted a
+single writer, and a second connection would buy concurrency the queue then has
+to take back. Every field of a `Session` stays fixed for the connection's life,
+for the reason `AgentId` latches its harness — a caller whose identity moved
+mid-session could not find its own leases.
+
+### Attributes, and who gets to set them
+
+A session that can differ per connection needs somebody to say what it is.
+`Attributes` is that: identity, harness, project and capabilities, each
+optional, with the environment answering whatever is left unsaid. A harness
+setting `HIRD_HARNESS` and nothing else behaves exactly as it did, which is
+what keeps this a refactor rather than a migration.
+
+`hird mcp` grows `--identity`, `--harness`, `--project` and `--capability` to
+set them. The flags exist for one reason worth stating precisely: **a flag can
+be set by somebody other than the caller.** §29 established that a client may
+name its harness but never the person, and an environment variable only holds
+that line while the environment belongs to the human running the harness. On a
+shared queue it does not.
+
+An SSH `authorized_keys` forced command is where the two halves meet:
+
+```
+command="hird mcp --identity ana --project /srv/acme" ssh-ed25519 AAAA… ana
+```
+
+SSH runs that line and discards whatever the far end asked for, so the identity
+is a property of the key rather than a claim by the connection. That is the
+whole authentication story, and it is somebody else's — which is the right
+place for it. hird checks no passwords and issues no tokens.
+
+`--project` is not a convenience in this arrangement. The server's working
+directory is the server's; a remote caller's checkout is on another machine
+entirely, so project detection has nothing true to find and must be told.
+
+### What this deliberately does not do
+
+No transport was added. `hird mcp` still speaks stdio, and SSH is what carries
+it between machines — which means a harness that cannot spawn `ssh` still
+cannot reach a shared queue, and the HTTP transport stays deferred with its
+dependency cost unpaid. What changed is that the server is now *able* to serve
+more than one session, which was the blocking half.
+
+Nothing routes. Work crosses machines because a human says "file this" on one
+side and "pick up 42" on the other. The queue still chooses nobody.
+
+And two things get quietly worse, recorded here so their absence is a decision:
+the witness reads the server's tree, which is nobody's checkout, so a shared
+queue should turn it off rather than let it report about a directory no one is
+editing; and the hooks run on the host, so on a shared queue they are somebody
+else's tasks spawning commands on your machine.

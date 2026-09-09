@@ -1571,6 +1571,104 @@ fn a_reviewed_task_shows_who_cannot_take_the_review() {
 
 /// The loop closes without the human carrying anything: the review's verdict
 /// sends the work back, the findings arrive in the brief, the redo files a
+/// The point of per-connection session state: two connections onto one queue,
+/// each acting as a different person on a different harness, neither of them
+/// reading the other's environment.
+#[test]
+fn two_connections_carry_two_identities_against_one_queue() {
+    let sandbox = Sandbox::new();
+    sandbox.git_init();
+    let project = sandbox.project();
+    let project = project.to_str().unwrap();
+    sandbox.run(&["add", "Port the loader"]);
+    sandbox.run(&["add", "Wire the CLI"]);
+
+    // Ana's harness, told who it is on the command line rather than by its own
+    // environment — the arrangement a forced SSH command uses.
+    let mut ana = McpSession::start_with_flags(
+        &sandbox,
+        &[
+            "--identity",
+            "ana",
+            "--harness",
+            "claude-code",
+            "--project",
+            project,
+        ],
+    );
+    let mut ben = McpSession::start_with_flags(
+        &sandbox,
+        &[
+            "--identity",
+            "ben",
+            "--harness",
+            "codex",
+            "--project",
+            project,
+        ],
+    );
+
+    // Each claims a different task, and the queue keeps them apart.
+    ana.claim(1);
+    ben.claim(2);
+    ana.shutdown();
+    ben.shutdown();
+
+    let one = sandbox.run(&["show", "1"]);
+    assert!(one.contains("ana/claude-code"), "{one}");
+    let two = sandbox.run(&["show", "2"]);
+    assert!(two.contains("ben/codex"), "{two}");
+}
+
+/// A connection may be told its capabilities too, so two people on one server
+/// can advertise the environments they are actually running in.
+#[test]
+fn a_connection_is_told_the_capabilities_it_may_claim_against() {
+    let sandbox = Sandbox::new();
+    sandbox.git_init();
+    let project = sandbox.project();
+    let project = project.to_str().unwrap();
+    sandbox.run(&["add", "Check the UI", "--requires", "browser"]);
+
+    // Ben's box has no browser, so the queue refuses him the work.
+    let mut ben = McpSession::start_with_flags(
+        &sandbox,
+        &[
+            "--identity",
+            "ben",
+            "--harness",
+            "codex",
+            "--project",
+            project,
+            "--capability",
+            "linux",
+        ],
+    );
+    let refused = ben
+        .call("task_claim", serde_json::json!({"seq": 1}))
+        .unwrap_err();
+    assert!(refused.to_string().contains("browser"), "{refused}");
+    ben.shutdown();
+
+    // Ana's does, on the same server, in the same second.
+    let mut ana = McpSession::start_with_flags(
+        &sandbox,
+        &[
+            "--identity",
+            "ana",
+            "--harness",
+            "claude-code",
+            "--project",
+            project,
+            "--capability",
+            "browser,linux",
+        ],
+    );
+    ana.claim(1);
+    ana.shutdown();
+    assert!(sandbox.run(&["show", "1"]).contains("ana/claude-code"));
+}
+
 /// Two people, two harnesses, one queue: the record answers "whose work
 /// survives" differently depending on which sense of *whose* you ask for.
 #[test]

@@ -261,7 +261,7 @@ pub enum Command {
     /// dies with the terminal like `hird tui`. No agent talks to it.
     Web(WebArgs),
     /// Serve the Model Context Protocol on stdio. Harnesses run this.
-    Mcp,
+    Mcp(McpArgs),
     /// Write this binary's MCP registration into a harness's config file.
     Register(RegisterArgs),
     /// Print the database path this invocation would use.
@@ -509,6 +509,40 @@ impl From<RecordAxisArg> for Axis {
 }
 
 #[derive(Debug, Args)]
+pub struct McpArgs {
+    /// Who this connection acts for. Overrides HIRD_IDENTITY.
+    ///
+    /// Said here rather than by the harness so somebody other than the caller
+    /// can say it: an SSH `authorized_keys` forced command pins the identity
+    /// of whoever holds the key, and the far end cannot argue.
+    #[arg(long, value_name = "PERSON")]
+    pub identity: Option<String>,
+    /// This connection's harness name. Overrides HIRD_HARNESS.
+    #[arg(long, value_name = "NAME")]
+    pub harness: Option<String>,
+    /// The project directory this connection's calls scope to. Overrides
+    /// HIRD_PROJECT and the working directory, which is the server's rather
+    /// than the caller's when the caller is on another machine.
+    #[arg(long, value_name = "DIR")]
+    pub project: Option<String>,
+    /// Capability this connection can satisfy. Repeatable, or
+    /// comma-separated. Overrides HIRD_CAPABILITIES.
+    #[arg(long = "capability", value_name = "NAME", value_delimiter = ',')]
+    pub capabilities: Vec<String>,
+}
+
+impl From<&McpArgs> for crate::mcp::Attributes {
+    fn from(args: &McpArgs) -> crate::mcp::Attributes {
+        crate::mcp::Attributes {
+            identity: args.identity.clone(),
+            harness: args.harness.clone(),
+            project: args.project.clone(),
+            capabilities: args.capabilities.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Args)]
 pub struct WebArgs {
     /// Port to listen on; 0 lets the system pick one, which the banner
     /// reports.
@@ -670,7 +704,7 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
         .context("a command or installer option is required")?
     {
         Command::DbPath | Command::Register(_) => unreachable!("handled above"),
-        Command::Tui | Command::Mcp | Command::Web(_) => {
+        Command::Tui | Command::Mcp(_) | Command::Web(_) => {
             anyhow::bail!(
                 "`hird {}` is served by the binary, not the command dispatcher",
                 match &cli.command {
