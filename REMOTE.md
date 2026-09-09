@@ -1,5 +1,15 @@
 # Assessment: a hosted service for delegating tasks across machines
 
+> **Update.** The constraints below were treated as fixed in the first pass.
+> Their author has since lifted them, and named the actual target: **a hird
+> MCP server he hosts, that his own agent and a colleague's agent both connect
+> to, passing tasks between them, with the agents running in different
+> environments with different capabilities.** That is problem C, which the
+> first pass scoped out on constraints rather than on merit. [§ A hosted
+> shared queue](#a-hosted-shared-queue-problem-c-taken-seriously) assesses it
+> properly, and the answer to *"does it work out of the box today?"* is **no —
+> but not mainly for the reasons auth and encryption suggest.**
+
 *Written against v0.2.2. This is an assessment, not a specification — nothing
 here is built. `DESIGN.md` remains the specification; `ROADMAP.md` records
 multi-machine sync and a remote transport as the two flagship deferrals. This
@@ -187,6 +197,194 @@ across **your** machines; they give you a fleet you do not own. Useful
 alongside hird — such a fleet is a consumer of the queue, which is exactly
 problem B — but they do not answer the question asked.
 
+## A hosted shared queue (problem C, taken seriously)
+
+**Target:** one `hird mcp` on a host you control. Your agent connects. A
+colleague's agent connects. You pass tasks between you. The agents run in
+different environments with different capabilities.
+
+**Does it work out of the box today? No.** Auth and encryption are genuinely
+missing and you named them correctly — but they are the *easy* half, and
+fixing only them would produce a server that is worse than broken, because it
+would run and give wrong answers.
+
+### The good news first
+
+The queue core needs nothing. Central hosting is **strictly easier than sync**:
+one SQLite file on one machine means the claim CAS (§5) is already
+linearizable across every connected agent, and none of the distributed-consensus
+problem from the earlier sections exists. Atomic claiming, leases and their
+lazy expiry, dependencies, readiness, `task_split`, reviews, verdicts and the
+sent-back loop all work unmodified. That is most of the value, and it is free.
+
+Two things then go wrong: one architectural, one semantic.
+
+### The blocker: session state is process state
+
+`hird mcp` speaks stdio only — `rmcp::transport::stdio()`, with rmcp's
+features set to `["server", "macros", "transport-io"]`. But the missing
+transport is the small problem. The real one is that **the design assumes one
+process per session**, so everything that ought to be per-*connection* is
+per-*process*, read once from the server's own environment and CWD at startup:
+
+| State | Comes from | On a shared server |
+|---|---|---|
+| Actor identity | `HIRD_HARNESS` + a session id minted at process start, then **latched** | Every client is the same agent |
+| Project scope | `HIRD_PROJECT`, else git toplevel of **the server's CWD** | Everyone lands in the host's project |
+| Capabilities | `HIRD_CAPABILITIES` on the server | Every agent advertises identical labels |
+| Witness | Built from `project` in `HirdMcp::new` | Reads the host's tree for everybody |
+
+The capability row is worth pausing on, because it inverts the feature you
+asked for. Capability-aware dispatch (v2.6) reads `HIRD_CAPABILITIES` from the
+process; a hosted server has exactly one, so *"agents in different
+environments with different capabilities"* becomes "every agent advertises the
+host's capabilities." The mechanism exists and is well-shaped — labels are
+small, human-controlled tokens — it is just wired to the wrong end of the
+connection. It has to become something the client presents at initialization
+(and, once there is auth, something the server is willing to believe).
+
+The identity row is the same shape and worse consequences: `AgentId` latches
+its harness in a `OnceLock` and is documented as deliberately un-rewritable,
+because "an actor string that changed mid-session would leave this process
+unable to find its own leases." That reasoning is correct *for one process per
+session* and becomes the bug the moment one process holds many.
+
+### The semantic problem: hird has no concept of a person
+
+This is the finding that survives all the plumbing, and it is not fixed by
+adding auth.
+
+**Recusal bars a harness, not a session** — §15 says so outright: *"The bar is
+the harness, not the session. Two Claude Code windows are one."* That is the
+right call for one person running three harnesses, which is what it was
+designed for. Invert the situation and it breaks: if you and your colleague
+both run Claude Code, hird considers you **the same reviewer**. Your
+colleague is refused the review of your work — the exact cross-check the
+review loop exists to provide, blocked because the queue cannot tell two
+people apart. Whether recusal works at all becomes an accident of whether you
+happened to pick different harnesses.
+
+The same axis error runs through everything keyed on the harness: the routed
+summons (`HIRD_RECUSED` carries harness names), and `hird record`, which
+measures "whose work survives a reading by a different model" — a sentence
+that quietly means *a different person* once two people share a queue, and
+cannot report it.
+
+So authentication is not only a security control here. **It is the missing
+identity axis**, and adopting it means deciding what recusal, routing and the
+record are keyed on: harness, person, or the pair. That is a design decision,
+not a login screen.
+
+### The tree-reading half goes wrong, not dark
+
+Earlier sections said a remote harness runs with witness, footing and exhibit
+*dark*. On a hosted server it is worse than dark: the witness reads the
+**server's** working tree and reports about it confidently. Contentions,
+footprints, `ground_shifted` and footing would all be computed against a
+checkout nobody is editing, or — if the host happens to hold a clone —
+against the wrong one. Under the "reports, not verdicts" principle this is the
+one real violation in the whole design: a report that is not merely absent but
+false.
+
+The honest handling is to **disable the tree-reading half server-side** and say
+so, rather than let it answer. The valuable version — each agent witnessing
+its own tree and shipping evidence to the shared queue — is a real feature and
+a substantial build, not a config change.
+
+### Security: the part not on your list
+
+Two config keys run shell commands on the host: `dispatch_hook` and
+`question_hook`, both through `sh -c` with task-derived values in the
+environment (`HIRD_TASK`, `HIRD_TITLE`, `HIRD_PROJECT`, `HIRD_RECUSED`,
+`HIRD_REQUIRES`). Today that is entirely safe — it is your machine, your
+config, your tasks.
+
+On a shared server it means **a colleague filing a task causes shell execution
+on your host**, with fields they control in that shell's environment. The
+values are passed as environment variables rather than interpolated into the
+command, which is the right construction and avoids the obvious injection —
+but any hook that expands `$HIRD_TITLE` into another command re-opens it, and
+the documented `case ",$HIRD_RECUSED," in` routing idiom is exactly the kind
+of thing people extend by hand. This deserves a decision before the port is
+open, not after: hooks off by default when serving multiple identities, or a
+hard rule that hook input is never interpolated.
+
+Also worth stating plainly: **`project` is a filter, not a boundary.** One
+global DB holds every project, tools take an `all_projects: true` escape
+hatch, and the project string is supplied by the client's own environment.
+Nothing today stops a connected agent reading or claiming another project's
+tasks. Multi-tenancy needs server-side authorization bound to the
+authenticated identity; the existing scoping is a convenience and was never
+built to hold a boundary.
+
+### Auth and encryption — the standard answer
+
+The good news is that none of this needs inventing, because MCP standardized
+it:
+
+- **Transport:** Streamable HTTP, which replaced HTTP+SSE. Revision
+  2026-07-28 — the one hird already targets — makes the protocol core
+  stateless, which suits a multi-client server. rmcp ships a
+  streamable-HTTP server feature; hird enables only `transport-io`.
+- **Authorization:** OAuth 2.1 with mandatory PKCE, the MCP server acting as a
+  *resource server only* and validating tokens from an external authorization
+  server. Discovery via RFC 9728 protected resource metadata, RFC 8414 for
+  authorization-server metadata, and RFC 8707 resource indicators so a token
+  is bound to your server and cannot be replayed elsewhere.
+- **Encryption:** TLS terminated at a reverse proxy. No new code.
+
+Bring your own identity provider rather than growing accounts inside hird —
+that keeps the authorization server out of the codebase, and it is what the
+spec expects.
+
+### What works today, with no code: SSH
+
+Worth knowing before building anything, because it hits most of the target
+now.
+
+Point the colleague's MCP client at a stdio command that happens to be remote:
+
+```
+ssh queue.example.internal 'HIRD_HARNESS=codex HIRD_CAPABILITIES=browser,linux HIRD_PROJECT=/srv/acme hird mcp'
+```
+
+This works **because** of the one-process-per-session design rather than in
+spite of it. SSH spawns a fresh `hird mcp` per connection, so identity,
+project and capabilities are per-session again — correctly, and per person —
+and every column in the table above lands right. You get authentication (keys),
+encryption (SSH), and per-agent capability labels, today, against v0.2.2 with
+no changes. Both agents share one SQLite file on one host, so claiming stays
+atomic.
+
+The caveats are real but bounded: give each person their own account (a shared
+one collapses the identity axis again, and recusal still cannot separate two
+people on the same harness), lock the keys down with `command=` restrictions in
+`authorized_keys` so this grants queue access rather than a shell, turn the
+witness off, and set `HIRD_PROJECT` explicitly since the server's CWD is
+meaningless here. It also does not reach a browser-based or cloud harness that
+cannot spawn an `ssh` command — which is precisely where the Streamable HTTP
+build earns its keep.
+
+### Rough shape of the build
+
+In dependency order; the first two are most of the work:
+
+1. **Per-connection session state.** Identity, project and capabilities move
+   from process env to connection state, presented at initialization and
+   validated server-side. Unavoidable, touches `HirdMcp` broadly, and gates
+   everything else.
+2. **Decide the identity axis.** What recusal, routing and the record key on
+   once a person is distinguishable from a harness. Design, not plumbing —
+   and the thing that decides whether a two-person queue reviews correctly.
+3. **Streamable HTTP transport** via rmcp's feature, TLS at a proxy.
+4. **OAuth 2.1 resource-server validation**, external IdP.
+5. **Authorization on project scope**, turning the filter into a boundary.
+6. **Hooks and witness off** when serving multiple identities, explicitly and
+   loudly.
+
+Steps 3 and 4 are the ones you named. They are perhaps a third of the work,
+and none of it is safe to ship without 1, 2 and 6.
+
 ## Three costs that are easy to miss
 
 These are the findings I would want on the table before any of this is built,
@@ -271,4 +469,5 @@ paragraphs about `seq` and the witness — not the infrastructure.
 - [Durable Objects SQLite storage](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/) · [zero-latency SQLite in Durable Objects](https://blog.cloudflare.com/sqlite-in-durable-objects/)
 - [Turso embedded replicas](https://betterstack.com/community/guides/databases/turso-explained/)
 - [Tailscale Funnel](https://tailscale.com/kb/1223/funnel) · [Cloudflare Tunnel vs ngrok vs Tailscale](https://dev.to/mechcloud_academy/cloudflare-tunnel-vs-ngrok-vs-tailscale-choosing-the-right-secure-tunneling-solution-4inm)
+- [MCP authorization (2026-07-28)](https://modelcontextprotocol.io/docs/2026-07-28/tutorials/security/authorization) · [the MCP auth spec explained](https://www.descope.com/blog/post/mcp-auth-spec) · [OAuth 2.1 for remote MCP servers over Streamable HTTP](https://mcp.directory/blog/oauth-21-for-remote-mcp-servers-streamable-http-explained-2026) · [authn/authz in MCP](https://stackoverflow.blog/2026/01/21/is-that-allowed-authentication-and-authorization-in-model-context-protocol/)
 - [Delegating tasks to the Copilot coding agent](https://github.blog/changelog/2026-02-17-delegate-tasks-to-copilot-coding-agent-from-visual-studio/)
