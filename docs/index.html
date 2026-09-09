@@ -52,6 +52,7 @@
     <li><a href="#faq">FAQ</a></li>
   </ol>
   <div class="away">
+    <a href="server.html">The central queue, running &rarr;</a>
     <a href="https://github.com/aoprisan/hird">Source on GitHub &rarr;</a>
     <a href="https://github.com/aoprisan/hird/tree/main/examples">Examples folder &rarr;</a>
     <a href="https://github.com/aoprisan/hird/blob/main/DESIGN.md">DESIGN.md &rarr;</a>
@@ -2281,6 +2282,15 @@ question_hook = <span class="s">""</span></code></pre>
   listens on loopback while you have it open, exactly as <code>hird tui</code>
   holds the terminal — it is a screen, not a service, and nothing depends on
   it being up.
+</p>
+<p>
+  There is one you can run <em>on purpose</em>, for harnesses that are not on
+  your machine at all: <code>hird-server</code> serves the same queue over MCP
+  on HTTP, with a roster file saying which bearer token connects as whom.
+  <a href="server.html">How the central queue works</a> walks a request through
+  it — token to person, and two agents racing for one task — with the server
+  simulated in the page. Nothing local depends on it; the local queue never
+  learns to speak HTTP.
 </p>
 
 <h3>How do I start over?</h3>
