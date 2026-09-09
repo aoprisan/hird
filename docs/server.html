@@ -1,0 +1,1507 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hird — how the central queue works</title>
+<meta name="description" content="An interactive walkthrough of hird-server: a bearer token becomes a person, one endpoint per identity, and one SQLite compare-and-set decides who claims a task.">
+<link rel="stylesheet" href="style.css">
+<style>
+  /* ------------------------------------------------ the demo, page-local */
+  .demo {
+    background: var(--bg-raised);
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    margin: 1.5rem 0;
+    overflow: hidden;
+  }
+  .demo > .controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 0.75rem;
+    padding: 0.75rem 1rem;
+    background: var(--bg-sunken);
+    border-bottom: 1px solid var(--rule);
+    font-size: 0.875rem;
+  }
+  .demo .controls label { color: var(--ink-faint); display: inline-flex; align-items: center; gap: 0.35rem; }
+  .demo .controls label[hidden] { display: none; }
+  .demo select { max-width: 15rem; }
+  .demo select, .demo button {
+    font: inherit;
+    font-size: 0.875rem;
+    color: var(--ink);
+    background: var(--bg-raised);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: 0.25rem 0.5rem;
+  }
+  .demo button { cursor: pointer; }
+  .demo button:hover:not(:disabled) { border-color: var(--accent); }
+  .demo button:disabled { opacity: 0.5; cursor: default; }
+  .demo button.go { background: var(--accent); border-color: var(--accent); color: var(--bg-raised); font-weight: 500; padding: 0.25rem 0.9rem; }
+  .demo .spacer { flex: 1 1 auto; }
+  .demo .body { padding: 1rem; }
+
+  /* the pipeline: five stages a request walks, and the packet walking them */
+  .pipe { position: relative; display: grid; gap: 0.6rem; grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  @media (max-width: 58rem) { .pipe { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 26rem) { .pipe { grid-template-columns: minmax(0, 1fr); } }
+  .stage {
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    padding: 0.6rem 0.7rem;
+    background: var(--bg);
+    min-height: 7.5rem;
+    transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+  }
+  .stage h5 {
+    margin: 0 0 0.35rem;
+    font: 600 0.6875rem/1.3 var(--sans);
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--ink-faint);
+  }
+  .stage .code { font-family: var(--mono); font-size: 0.6875rem; line-height: 1.45; color: var(--ink-soft); overflow-wrap: anywhere; }
+  .stage .code b { color: var(--ink); font-weight: 600; }
+  .stage .code .no { color: var(--red); }
+  .stage .code .yes { color: var(--green); }
+  .stage.live { border-color: var(--accent); background: var(--accent-soft); box-shadow: 0 0 0 1px var(--accent) inset; }
+  .stage.pass { border-color: var(--green); }
+  .stage.stop { border-color: var(--red); background: var(--bg); background: color-mix(in srgb, var(--red) 8%, var(--bg)); }
+  .packet {
+    position: absolute;
+    top: -0.55rem;
+    left: 0;
+    font: 600 0.6875rem/1 var(--mono);
+    padding: 0.25rem 0.5rem;
+    border-radius: 999px;
+    background: var(--accent);
+    color: var(--bg-raised);
+    box-shadow: 0 1px 6px rgba(0,0,0,0.25);
+    opacity: 0;
+    transform: translate(0, 0);
+    transition: transform 0.42s cubic-bezier(.4,.1,.3,1), opacity 0.2s, background 0.2s;
+    pointer-events: none;
+    white-space: nowrap;
+    z-index: 2;
+  }
+  .packet.flying { opacity: 1; }
+  .packet.refused { background: var(--red); }
+
+  /* transcript, board, trail */
+  .out { margin-top: 1rem; display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr)); }
+  .out h5, .board-wrap h5 {
+    margin: 0 0 0.4rem;
+    font: 600 0.6875rem/1.3 var(--sans);
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--ink-faint);
+  }
+  .out pre { margin: 0; max-height: 17rem; overflow: auto; }
+  .status-line { font-family: var(--mono); font-size: 0.8125rem; margin: 0 0 0.4rem; }
+  .status-line.ok { color: var(--green); }
+  .status-line.bad { color: var(--red); }
+
+  .grid-2 { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr)); }
+  table.board { font-size: 0.8125rem; width: 100%; }
+  table.board td, table.board th { padding: 0.3rem 0.5rem; }
+  table.board td.seq { font-family: var(--mono); color: var(--ink-faint); }
+  table.board td.who { font-family: var(--mono); font-size: 0.75rem; color: var(--ink-soft); }
+  table.board tr.moved td { background: var(--accent-soft); transition: background 1.2s; }
+  .pill {
+    display: inline-block;
+    font: 500 0.6875rem/1.5 var(--mono);
+    border-radius: 999px;
+    padding: 0 0.5rem;
+    border: 1px solid var(--rule);
+    white-space: nowrap;
+  }
+  .pill.open { background: var(--bg-sunken); color: var(--ink-soft); }
+  .pill.claimed { background: var(--bg-sunken); background: color-mix(in srgb, var(--yellow) 22%, var(--bg-raised)); color: var(--yellow); border-color: var(--yellow); }
+  .pill.in_progress { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+  .pill.done { background: var(--bg-sunken); background: color-mix(in srgb, var(--green) 18%, var(--bg-raised)); color: var(--green); border-color: var(--green); }
+  .pill.failed { background: var(--bg-sunken); background: color-mix(in srgb, var(--red) 18%, var(--bg-raised)); color: var(--red); border-color: var(--red); }
+  .pill.cancelled { background: var(--bg-sunken); color: var(--ink-faint); }
+  .lease { font-family: var(--mono); font-size: 0.75rem; color: var(--ink-soft); }
+  .lease.lapsed { color: var(--red); }
+
+  ul.trail { list-style: none; margin: 0; padding: 0; font-family: var(--mono); font-size: 0.75rem; max-height: 17rem; overflow: auto; }
+  ul.trail li { display: grid; grid-template-columns: 4.5rem 3rem 7rem 1fr; gap: 0.5rem; margin: 0 0 0.15rem; white-space: nowrap; }
+  ul.trail .t { color: var(--ink-faint); }
+  ul.trail .k { color: var(--ink); }
+  ul.trail .k.lease_expired, ul.trail .k.failed { color: var(--red); }
+  ul.trail .k.completed { color: var(--green); }
+  ul.trail .a { color: var(--accent); overflow: hidden; text-overflow: ellipsis; }
+
+  /* the race */
+  .lanes { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); }
+  .lane { border: 1px solid var(--rule); border-radius: 8px; padding: 0.75rem 0.85rem; background: var(--bg); }
+  .lane h5 { margin: 0 0 0.5rem; font: 600 0.75rem/1.3 var(--mono); color: var(--ink-soft); }
+  .lane pre { margin: 0 0 0.5rem; font-size: 0.7rem; }
+  .lane .rows { font-family: var(--mono); font-size: 0.8125rem; }
+  .lane.won { border-color: var(--green); }
+  .lane.lost { border-color: var(--red); }
+  .lane .verdict { font-size: 0.8125rem; margin: 0.35rem 0 0; }
+  .lane.won .verdict { color: var(--green); }
+  .lane.lost .verdict { color: var(--red); }
+
+  /* the roster table used as a live map */
+  table.roster { font-size: 0.8125rem; width: 100%; }
+  table.roster td { font-family: var(--mono); font-size: 0.75rem; }
+  table.roster tr.hit td { background: var(--accent-soft); }
+  .clock { font-family: var(--mono); font-size: 0.75rem; color: var(--ink-faint); }
+  .toggles { display: flex; flex-wrap: wrap; gap: 0.75rem 1.25rem; font-size: 0.8125rem; color: var(--ink-soft); margin: 0.25rem 0 0; }
+  .toggles label { display: inline-flex; align-items: center; gap: 0.4rem; }
+  @media (prefers-reduced-motion: reduce) {
+    .packet { transition: opacity 0.2s; }
+  }
+</style>
+</head>
+<body>
+
+<button id="theme" type="button" aria-label="Toggle colour theme">theme</button>
+
+<div class="shell">
+<nav class="toc" aria-label="Contents">
+  <a class="brand" href="#top">hird</a>
+  <p class="tagline">How the central queue turns a token into a person, and a race into one winner.</p>
+  <details class="nav-body" open>
+  <summary>Contents</summary>
+  <ol>
+    <li><a href="#shape">The shape of it</a></li>
+    <li><a href="#request">Watch a request land</a></li>
+    <li><a href="#roster-map">The roster is the whole map</a></li>
+    <li><a href="#identity">A client may not name the person</a></li>
+    <li><a href="#race">The race, and who wins it</a></li>
+    <li><a href="#lease">The lease, and what happens when a session goes quiet</a></li>
+    <li><a href="#refuses">What it refuses to do</a></li>
+    <li><a href="#run">Running one yourself</a></li>
+  </ol>
+  <div class="away">
+    <a href="index.html">The usage guide &rarr;</a>
+    <a href="https://github.com/aoprisan/hird">Source on GitHub &rarr;</a>
+    <a href="https://github.com/aoprisan/hird/blob/main/DESIGN.md">DESIGN.md §31 &rarr;</a>
+  </div>
+  </details>
+</nav>
+
+<main id="top">
+
+<header class="hero">
+  <div class="badges">
+    <span class="badge">MCP over streamable HTTP</span>
+    <span class="badge">one endpoint per identity</span>
+    <span class="badge">a roster file, not accounts</span>
+    <span class="badge">still one SQLite file</span>
+  </div>
+  <h1>How the central queue works</h1>
+  <p class="lede">
+    <code>hird</code> is a local queue: one process per harness session, stdio,
+    no network. <strong>hird-server</strong> is the other thing — a process on a
+    host that two people reach from two machines, speaking MCP over HTTP, with
+    the queue's SQLite file underneath it. This page is that server, simulated
+    in your browser: every panel below runs against one shared board, the way
+    every connection runs against one shared file.
+  </p>
+  <div class="cta">
+    <a class="primary" href="#request">Send a request</a>
+    <a href="#race">Watch two agents race</a>
+    <a href="index.html">Back to the guide</a>
+  </div>
+</header>
+
+<section id="shape">
+<h2>The shape of it</h2>
+
+<pre class="diagram" aria-label="Topology of the central queue"><code>  Ana's laptop                     Ben's cloud container
+┌──────────────┐                  ┌──────────────┐
+│ Claude Code  │                  │  Codex CLI   │
+└──────┬───────┘                  └──────┬───────┘
+       │ MCP / HTTP                      │ MCP / HTTP
+       │ Authorization: Bearer 3f9c…     │ Authorization: Bearer a70b…
+       └───────────────┬─────────────────┘
+                       │
+        ┌──────────────▼───────────────────────────────┐
+        │ hird-server                                  │
+        │                                              │
+        │  bearer()  →  roster lookup  →  endpoint     │
+        │                                 (one per     │
+        │                                  identity)   │
+        │                                      │       │
+        │                       Shared { Mutex&lt;Db&gt; }   │
+        └──────────────────────┬───────────────────────┘
+                               │
+                        ┌──────▼──────┐
+                        │   SQLite    │  one file, one
+                        │    (WAL)    │  compare-and-set
+                        └─────────────┘</code></pre>
+
+<p>
+  Four facts do all the work on this page, and the panels below are each one of
+  them made visible:
+</p>
+
+<ol class="numbered">
+  <li>
+    <strong>Nothing a connection says about who it is gets believed.</strong> A
+    request carries a bearer token, the roster maps that token to a person, and
+    the session is built from the roster's entry.
+  </li>
+  <li>
+    <strong>Identity is fixed when the endpoint is built, not per call.</strong>
+    The server assembles one MCP service per roster entry up front; dispatch is
+    a map lookup on the token.
+  </li>
+  <li>
+    <strong>There is still one SQLite file.</strong> Two people on two machines
+    race through the same compare-and-set, and exactly one wins.
+  </li>
+  <li>
+    <strong>Nothing routes.</strong> The server hands nobody anything. Work
+    crosses machines because a human says <em>file this</em> on one side and
+    <em>pick up 42</em> on the other.
+  </li>
+</ol>
+</section>
+
+<section id="request">
+<h2>Watch a request land</h2>
+
+<p>
+  Pick who is calling, which token they present, and what they ask for. The
+  packet walks the same five stages the real server walks it through — and the
+  board and trail at the bottom are the queue's own state, shared by every
+  panel on this page.
+</p>
+
+<div class="demo" id="demo-request">
+  <div class="controls">
+    <label>caller
+      <select id="who">
+        <option value="ana">Ana — Claude Code, her laptop</option>
+        <option value="ben">Ben — Codex, a cloud container</option>
+        <option value="stranger">a stranger on the internet</option>
+      </select>
+    </label>
+    <label>token
+      <select id="tok">
+        <option value="own">the one the roster gave them</option>
+        <option value="wrong">a token nobody issued</option>
+        <option value="none">no Authorization header</option>
+      </select>
+    </label>
+    <label>call
+      <select id="call">
+        <option value="task_next">task_next</option>
+        <option value="task_claim">task_claim</option>
+        <option value="task_update">task_update &mdash; status=in_progress</option>
+        <option value="task_complete">task_complete</option>
+        <option value="task_list">task_list</option>
+        <option value="mem_store">mem_store</option>
+      </select>
+    </label>
+    <label id="seq-wrap" hidden>task
+      <select id="seq"></select>
+    </label>
+    <span class="spacer"></span>
+    <button class="go" id="send" type="button">Send</button>
+    <button id="reset" type="button">Reset the board</button>
+  </div>
+
+  <div class="body">
+    <div class="pipe" id="pipe">
+      <div class="stage" data-stage="wire">
+        <h5>1 · the wire</h5>
+        <div class="code" id="s-wire">POST / HTTP/1.1<br>waiting…</div>
+      </div>
+      <div class="stage" data-stage="bearer">
+        <h5>2 · bearer()</h5>
+        <div class="code" id="s-bearer">strip_prefix<br>("Bearer ")</div>
+      </div>
+      <div class="stage" data-stage="roster">
+        <h5>3 · roster lookup</h5>
+        <div class="code" id="s-roster">endpoints.get(token)</div>
+      </div>
+      <div class="stage" data-stage="endpoint">
+        <h5>4 · the endpoint</h5>
+        <div class="code" id="s-endpoint">one service per identity</div>
+      </div>
+      <div class="stage" data-stage="queue">
+        <h5>5 · the queue</h5>
+        <div class="code" id="s-queue">Shared { Mutex&lt;Db&gt; }<br>one SQLite file</div>
+      </div>
+      <div class="packet" id="packet">POST</div>
+    </div>
+
+    <div class="out">
+      <div>
+        <h5>What came back</h5>
+        <p class="status-line" id="status">—</p>
+        <pre><code id="response">Press <b>Send</b>.</code></pre>
+      </div>
+      <div>
+        <h5>What the queue ran</h5>
+        <pre><code id="sql">—</code></pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="grid-2 board-wrap">
+  <div>
+    <h5>The board — project /srv/acme <span class="clock" id="clock"></span></h5>
+    <div class="table-wrap">
+      <table class="board">
+        <thead><tr><th>#</th><th>task</th><th>status</th><th>holder</th><th>lease</th></tr></thead>
+        <tbody id="board"></tbody>
+      </table>
+    </div>
+    <p class="quiet">
+      The queue's clock runs at &times;60 here, so a fifteen-minute lease lapses
+      in fifteen seconds. Nothing else is sped up.
+    </p>
+  </div>
+  <div>
+    <h5>The trail — every event, append-only</h5>
+    <ul class="trail" id="trail"></ul>
+    <p class="quiet">
+      Same rows <code>hird events</code> streams and the board's replay slider
+      reads. Assertions filed by <code>mem_store</code> are memory, not task
+      events, so they do not appear here.
+    </p>
+  </div>
+</div>
+</section>
+
+<section id="roster-map">
+<h2>The roster is the whole map</h2>
+
+<p>
+  Authorization is a TOML file the operator edits, deliberately outside the
+  queue's own database — the queue records <em>what happened</em>; who is
+  permitted to make things happen is a different kind of fact, and keeping it
+  outside means a compromised queue cannot grant access to itself. The last
+  request you sent highlights the row it resolved to:
+</p>
+
+<div class="table-wrap">
+  <table class="roster" id="roster-table">
+    <thead><tr><th>token</th><th>identity</th><th>harness</th><th>project</th><th>capabilities</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+
+<span class="filename">roster.toml</span>
+<pre><code><span class="c"># The project every worker files into unless it names its own.</span>
+project = <span class="s">"/srv/acme"</span>
+
+[[worker]]
+<span class="c"># Generate with `openssl rand -hex 32`. Refused under 24 characters:</span>
+<span class="c"># this is the only thing between a stranger and the queue.</span>
+token = <span class="s">"3f9c1d0e…7b21"</span>
+identity = <span class="s">"ana"</span>
+capabilities = [<span class="s">"browser"</span>, <span class="s">"linux"</span>]
+
+[[worker]]
+token = <span class="s">"a70b55c8…44de"</span>
+identity = <span class="s">"ben"</span>
+harness = <span class="s">"codex"</span>
+capabilities = [<span class="s">"linux"</span>]</code></pre>
+
+<p>
+  Parsing refuses the mistakes that would quietly mis-attribute work rather than
+  accepting them: a duplicated token — two people the queue could not tell apart
+  — a missing project, a token under 24&nbsp;characters, an empty roster. Each
+  entry becomes its own MCP service at start-up, so by the time a request
+  arrives there is nothing left to decide but which service to hand it to.
+</p>
+
+<div class="note">
+  <span class="label">Refused before the database is touched</span>
+  <p>
+    A request with no token, and a request with a token the roster does not
+    know, get the same answer:
+    <code>401</code>, <code>WWW-Authenticate: Bearer realm="hird"</code>, and
+    <code>this queue is not open to unnamed callers</code>. The same answer
+    either way, so the response does not say which tokens are real.
+  </p>
+</div>
+</section>
+
+<section id="identity">
+<h2>A client may not name the person</h2>
+
+<p>
+  A local <code>hird</code> reads its identity from the environment it was
+  started in, because that environment belongs to the human running the
+  harness. A server has no such luxury: the environment is the server's, and
+  the far end of a socket can claim anything. So the rule is split. A client
+  may say <em>what</em> it is — being wrong there costs a badge — and may never
+  say <em>who</em> it is. Change what the client claims and watch the session
+  the server actually builds:
+</p>
+
+<div class="demo" id="demo-identity">
+  <div class="controls">
+    <label>connecting with
+      <select id="id-token">
+        <option value="ana">Ana's token (harness unpinned)</option>
+        <option value="ben">Ben's token (harness pinned to codex)</option>
+      </select>
+    </label>
+    <label>the client calls itself
+      <select id="id-harness">
+        <option value="claude-code">claude-code</option>
+        <option value="copilot">copilot</option>
+        <option value="">nothing at all</option>
+      </select>
+    </label>
+    <label>and claims to be
+      <select id="id-claim">
+        <option value="">nobody in particular</option>
+        <option value="ben">ben</option>
+        <option value="root">root</option>
+      </select>
+    </label>
+  </div>
+  <div class="body">
+    <div class="grid-2">
+      <div>
+        <h5>What the client sent</h5>
+        <pre><code id="id-sent"></code></pre>
+      </div>
+      <div>
+        <h5>The session the server built</h5>
+        <pre><code id="id-built"></code></pre>
+        <ul id="id-why" class="quiet" style="margin-top:0.75rem"></ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<p>
+  The actor string — <code>ana/claude-code:z55d</code> — is what lands on every
+  claim, event and assertion the session makes: the person from the roster, the
+  harness from wherever it was allowed to come from, and a fresh session suffix
+  per connection. There is no path from a connection to a name it was not
+  given.
+</p>
+</section>
+
+<section id="race">
+<h2>The race, and who wins it</h2>
+
+<p>
+  This is the load-bearing fact of the whole design, and going over HTTP does
+  not bend it. Claiming is a single compare-and-set. Two agents on two machines
+  reach for the same task in the same instant; both statements run against one
+  file; one updates a row and the other updates none.
+</p>
+
+<div class="demo" id="demo-race">
+  <div class="controls">
+    <label>both reach for
+      <select id="race-seq"></select>
+    </label>
+    <span class="spacer"></span>
+    <button class="go" id="race-go" type="button">Claim it at the same instant</button>
+  </div>
+  <div class="body">
+    <div class="lanes">
+      <div class="lane" id="lane-ana">
+        <h5>ana/claude-code — laptop</h5>
+        <pre><code class="sql-a"></code></pre>
+        <p class="rows">rows changed: <b>—</b></p>
+        <p class="verdict"></p>
+      </div>
+      <div class="lane" id="lane-ben">
+        <h5>ben/codex — cloud container</h5>
+        <pre><code class="sql-b"></code></pre>
+        <p class="rows">rows changed: <b>—</b></p>
+        <p class="verdict"></p>
+      </div>
+    </div>
+    <p class="quiet" id="race-note" style="margin-top:0.75rem">
+      Both requests are already inside the server when this runs — different
+      tokens, different endpoints, different sessions. The only thing they
+      share is the file.
+    </p>
+  </div>
+</div>
+
+<div class="note">
+  <span class="label">Why this survives the network and sync would not</span>
+  <p>
+    Zero rows updated means somebody else won. An append-only trail merges
+    without coordination, but a claim is not an append — it is a consensus. Two
+    machines with async-replicated copies would both see <code>open</code> and
+    both win. One server in front of one file is why the swarm model still
+    holds across machines, and it is the reason the transport was built before
+    any sync was.
+  </p>
+</div>
+</section>
+
+<section id="lease">
+<h2>The lease, and what happens when a session goes quiet</h2>
+
+<p>
+  A claim is a lease, not a lock. It lasts fifteen minutes by default, every
+  <code>task_update</code> renews it, and if the agent holding it crashes, is
+  killed, or simply wanders off, the task returns to <code>open</code> on its
+  own. Nothing sweeps in the background: expiry is enforced lazily, by whoever
+  calls next.
+</p>
+
+<div class="demo" id="demo-lease">
+  <div class="controls">
+    <button id="lease-claim" type="button">Ben claims a task, then his container dies</button>
+    <button id="lease-tick" type="button">A call arrives from somebody else</button>
+    <span class="spacer"></span>
+    <span class="clock" id="lease-state">nothing held</span>
+  </div>
+  <div class="body">
+    <pre><code id="lease-log">Nothing yet.</code></pre>
+    <p class="quiet">
+      A lapsed lease is not swept by a timer — there is no timer. It sits there,
+      overdue, until the next call runs <code>sweep_announcing()</code> on its
+      way in, which is exactly what the second button does. Self-healing within
+      the TTL, and no background process to keep alive.
+    </p>
+  </div>
+</div>
+</section>
+
+<section id="refuses">
+<h2>What it refuses to do</h2>
+
+<div class="cols">
+  <div class="card">
+    <h4>No TLS</h4>
+    <p>
+      It speaks plain HTTP and says so. Terminate TLS in a reverse proxy in
+      front of it — a bearer token on an unencrypted connection is a token you
+      have given away. Rolling certificates into the binary is how a server
+      grows a configuration language.
+    </p>
+  </div>
+  <div class="card">
+    <h4>No accounts, no token issuance</h4>
+    <p>
+      The roster is a file you edit. OAuth&nbsp;2.1 is the right answer for a
+      queue open to more than a few known people; a file is the right answer
+      for two colleagues, and shipping the file keeps the question open
+      honestly.
+    </p>
+  </div>
+  <div class="card">
+    <h4>No witness</h4>
+    <p>
+      The witness reads a working tree, and the server's tree is nobody's
+      checkout. It prints a warning when the witness is on, because reporting
+      about the host's own directory would be the design's one genuinely false
+      report. Set <code>witness = false</code>.
+    </p>
+  </div>
+  <div class="card">
+    <h4>Nothing routes</h4>
+    <p>
+      No scheduler, no placement, no assignment. <code>task_next</code> hands
+      out the next task worth doing <em>to a caller who asked for one</em>. The
+      queue chooses nobody.
+    </p>
+  </div>
+</div>
+
+<p>
+  It also carries no new surface: the same twelve MCP tools the local binary
+  exposes — <code>task_list</code>, <code>task_get</code>,
+  <code>task_claim</code>, <code>task_next</code>, <code>task_scope</code>,
+  <code>task_split</code>, <code>task_release</code>, <code>task_update</code>,
+  <code>task_complete</code>, <code>task_fail</code>, <code>mem_store</code>,
+  <code>mem_search</code> — and the same six statuses. A transport may not grow
+  the surface.
+</p>
+</section>
+
+<section id="run">
+<h2>Running one yourself</h2>
+
+<pre><code><span class="k">hird-server</span> --roster roster.toml --bind 127.0.0.1 --port 7474
+<span class="c">hird-server on http://127.0.0.1:7474  (2 in the roster)</span>
+<span class="c">database: /var/lib/hird/hird.db</span></code></pre>
+
+<p>
+  It is a second binary rather than a flag on the first, and that is load
+  bearing: <code>hird-server</code> carries axum, hyper and tower on its own
+  side of the line, while <code>cargo tree -p hird</code> names no HTTP
+  dependency at all. CI asserts exactly that, so the separation fails loudly
+  rather than eroding.
+</p>
+
+<p>
+  A harness then points at the URL with its token, and the server builds the
+  session from the roster:
+</p>
+
+<pre><code>{ <span class="s">"mcpServers"</span>: { <span class="s">"hird"</span>: {
+  <span class="s">"type"</span>: <span class="s">"http"</span>,
+  <span class="s">"url"</span>: <span class="s">"https://queue.internal/"</span>,
+  <span class="s">"headers"</span>: { <span class="s">"Authorization"</span>: <span class="s">"Bearer 3f9c1d0e…7b21"</span> }
+} } }</code></pre>
+
+<p>
+  The longer written account is <a href="index.html">the usage guide</a>,
+  <a href="https://github.com/aoprisan/hird/blob/main/DESIGN.md">DESIGN.md §31</a>
+  for why it is shaped this way, and
+  <a href="https://github.com/aoprisan/hird/blob/main/REMOTE.md">REMOTE.md</a>
+  for what was assessed and rejected on the way here.
+</p>
+</section>
+
+</main>
+</div>
+
+<footer class="page">
+  <span>hird — one work queue and one memory, shared by every agent you run.</span>
+  <span><a href="index.html">Usage guide</a></span>
+  <span><a href="https://github.com/aoprisan/hird">github.com/aoprisan/hird</a></span>
+</footer>
+
+<script>
+// ---------------------------------------------------------------- chrome
+(function () {
+  // Theme toggle: follow the OS by default, remember an explicit choice.
+  var root = document.documentElement;
+  var saved = null;
+  try { saved = localStorage.getItem("hird-theme"); } catch (e) {}
+  if (saved) root.setAttribute("data-theme", saved);
+
+  document.getElementById("theme").addEventListener("click", function () {
+    var dark = root.getAttribute("data-theme") === "dark" ||
+      (!root.getAttribute("data-theme") &&
+        window.matchMedia("(prefers-color-scheme: dark)").matches);
+    var next = dark ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    try { localStorage.setItem("hird-theme", next); } catch (e) {}
+  });
+
+  // On a phone the contents fold away, so the page starts at the page.
+  var nav = document.querySelector("nav.toc .nav-body");
+  var narrow = window.matchMedia("(max-width: 62rem)");
+  if (!nav) return;
+  if (narrow.matches) nav.removeAttribute("open");
+  nav.addEventListener("click", function (event) {
+    if (narrow.matches && event.target.closest("a")) nav.removeAttribute("open");
+  });
+})();
+
+// -------------------------------------------------------------- the queue
+//
+// One simulated hird-server, shared by every panel on this page — because the
+// point being made is that there is one file underneath all of it.
+(function () {
+  "use strict";
+
+  var TTL_MIN = 15;          // lease_ttl_minutes, the default
+  var HEARTBEAT = 7;         // ttl / 2, what a claim reminds you to do
+  var SPEED = 60;            // one real second is one queue minute
+  var PROJECT = "/srv/acme";
+  var EPOCH = Date.UTC(2026, 6, 25, 14, 0, 0);
+  var origin = (window.performance && performance.now) ? performance.now() : 0;
+
+  function qnow() {
+    var elapsed = ((window.performance && performance.now) ? performance.now() : 0) - origin;
+    return EPOCH + elapsed * SPEED;
+  }
+  function iso(ms) { return new Date(Math.round(ms)).toISOString(); }
+  function clock(ms) { return iso(ms).slice(11, 19); }
+  function mmss(ms) {
+    var total = Math.max(0, Math.round(ms / 1000));
+    return Math.floor(total / 60) + ":" + String(total % 60).padStart(2, "0");
+  }
+  function esc(s) {
+    return String(s).replace(/[&<>]/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c];
+    });
+  }
+
+  // --------------------------------------------------------- the roster
+  var ROSTER = [
+    { token: "3f9c1d0e…7b21", identity: "ana", harness: null, project: PROJECT,
+      capabilities: ["browser", "linux"], session: "z55d" },
+    { token: "a70b55c8…44de", identity: "ben", harness: "codex", project: PROJECT,
+      capabilities: ["linux"], session: "9f2c" }
+  ];
+  var BAD_TOKEN = "0f0f0f0f…dead";
+
+  // One MCP service per roster entry, assembled at start-up. `harness` is a
+  // once-only cell: the pin wins, and otherwise the first client name sticks.
+  var ENDPOINTS = {};
+  ROSTER.forEach(function (worker) {
+    ENDPOINTS[worker.token] = { worker: worker, harness: worker.harness };
+  });
+
+  function sessionOf(token, clientName) {
+    var endpoint = ENDPOINTS[token];
+    if (!endpoint) return null;
+    var worker = endpoint.worker;
+    var harness = endpoint.harness || clientName || "unknown";
+    return {
+      identity: worker.identity,
+      harness: harness,
+      project: worker.project,
+      capabilities: worker.capabilities,
+      actor: worker.identity + "/" + harness + ":" + worker.session,
+      pinned: !!worker.harness
+    };
+  }
+
+  var CLIENTS = {
+    ana: { who: "Ana", token: ROSTER[0].token, names: "claude-code", host: "her laptop" },
+    ben: { who: "Ben", token: ROSTER[1].token, names: "codex", host: "a cloud container" },
+    stranger: { who: "a stranger", token: BAD_TOKEN, names: "curl", host: "the internet" }
+  };
+
+  // ---------------------------------------------------------- the tables
+  var tasks, events, assertions;
+
+  function seed() {
+    var now = qnow();
+    tasks = [
+      { seq: 5, title: "Write examples/roster.toml", status: "done", holder: null,
+        lease: null, priority: 1, requires: [],
+        body: "Every line is a credential. Say so in the comments." },
+      { seq: 6, title: "Port the lease sweep test", status: "in_progress",
+        holder: "ben/codex:9f2c", lease: now + 9 * 60000, priority: 1, requires: [],
+        body: "tests/cli.rs proves the sweep; the server needs the same assertion." },
+      { seq: 7, title: "Wire the bearer route", status: "open", holder: null, lease: null,
+        priority: 2, requires: [],
+        body: "Refuse an unknown token before the database is opened, and with the same answer either way." },
+      { seq: 8, title: "Add the roster loader", status: "open", holder: null, lease: null,
+        priority: 1, requires: [], body: "Parse roster.toml. Refuse a duplicate token." },
+      { seq: 9, title: "Screenshot the board for the README", status: "open", holder: null,
+        lease: null, priority: 1, requires: ["browser"],
+        body: "hird web, dark theme, the swarm mid-flight." },
+      { seq: 10, title: "Terminate TLS in front of the server", status: "open", holder: null,
+        lease: null, priority: 0, requires: [],
+        body: "A bearer token on a plain connection is a token you have given away." }
+    ];
+    events = [
+      { at: now - 41 * 60000, seq: 5, kind: "completed", actor: "ana/claude-code:z55d",
+        note: "roster.toml, comments and all" },
+      { at: now - 12 * 60000, seq: 6, kind: "claimed", actor: "ben/codex:9f2c",
+        note: "lease " + TTL_MIN + "m" },
+      { at: now - 6 * 60000, seq: 6, kind: "status", actor: "ben/codex:9f2c",
+        note: "in_progress" }
+    ];
+    assertions = 3;
+  }
+
+  function task(seq) {
+    for (var i = 0; i < tasks.length; i++) if (tasks[i].seq === seq) return tasks[i];
+    return null;
+  }
+  function record(at, seq, kind, actor, note) {
+    events.push({ at: at, seq: seq, kind: kind, actor: actor, note: note });
+  }
+
+  // The lazy sweep every handler runs on its way in. There is no timer: a
+  // lapsed lease sits there, overdue, until somebody calls.
+  function sweep(now) {
+    var swept = [];
+    tasks.forEach(function (t) {
+      if (t.lease && t.lease <= now && (t.status === "claimed" || t.status === "in_progress")) {
+        var was = t.holder;
+        t.status = "open";
+        t.holder = null;
+        t.lease = null;
+        record(now, t.seq, "lease_expired", "hird", was + " let the lease lapse");
+        swept.push(t.seq);
+      }
+    });
+    return swept;
+  }
+
+  function missingCaps(t, session) {
+    return t.requires.filter(function (cap) {
+      return session.capabilities.indexOf(cap) === -1;
+    });
+  }
+
+  // --------------------------------------------------------- the handlers
+  //
+  // Each returns { code, body, sql, swept } — `body` is what the tool answers
+  // with, `sql` the statement the repository layer ran.
+  function claim(session, seq, now) {
+    var t = task(seq);
+    if (!t) return { code: 200, error: "task " + seq + " not found", sql: SELECT_ONE(seq) };
+    var missing = missingCaps(t, session);
+    if (missing.length) {
+      return {
+        code: 200,
+        error: "task " + seq + " requires " + missing.join(" and ") +
+          ", but this session advertises " + session.capabilities.join(", ") +
+          "; start a capable harness or update HIRD_CAPABILITIES",
+        sql: "SELECT capability FROM task_requirements WHERE task_id = (SELECT id FROM tasks WHERE seq = " + seq + ");"
+      };
+    }
+    var expires = now + TTL_MIN * 60000;
+    var sql = CAS(seq, session.actor, expires, now);
+    if (t.status !== "open") {
+      return {
+        code: 200,
+        rows: 0,
+        sql: sql,
+        error: t.holder
+          ? "task " + seq + " is " + t.status + " by " + t.holder + " until " + iso(t.lease)
+          : "task " + seq + " is " + t.status + ", not open, so it cannot be claimed"
+      };
+    }
+    t.status = "claimed";
+    t.holder = session.actor;
+    t.lease = expires;
+    record(now, seq, "claimed", session.actor, "lease " + TTL_MIN + "m");
+    var recalled = seq === 7 ? [{
+      content: "The 401 body must not say whether the token exists — same answer for absent and unknown.",
+      why: "filed against this task's files",
+      actor: "ana/claude-code:k18p",
+      task_seq: 3,
+      created_at: iso(now - 4 * 3600000),
+      id: "01JZ8Q…",
+      standing: "firm"
+    }] : [];
+    var reminder = "call task_update at least every " + HEARTBEAT +
+      " minutes to keep this lease, then task_complete or task_fail when you are done";
+    if (recalled.length) {
+      reminder = "read `recalled` first — earlier agents left those notes about this work, " +
+        "and each says where it came from. Then: " + reminder;
+    }
+    var body = {
+      claimed: seq,
+      holder: session.actor,
+      lease_expires_at: iso(expires),
+      title: t.title,
+      body: t.body,
+      priority: t.priority,
+      project: session.project
+    };
+    if (t.requires.length) body.requires = t.requires;
+    if (recalled.length) body.recalled = recalled;
+    body.reminder = reminder;
+    return { code: 200, rows: 1, body: body, sql: sql };
+  }
+
+  function CAS(seq, actor, expires, now) {
+    return "UPDATE tasks\n" +
+      "   SET status = 'claimed',\n" +
+      "       claimed_by = '" + actor + "',\n" +
+      "       lease_expires_at = '" + iso(expires) + "',\n" +
+      "       updated_at = '" + iso(now) + "'\n" +
+      " WHERE seq = " + seq + "\n   AND status = 'open';";
+  }
+  function SELECT_ONE(seq) {
+    return "SELECT seq, title, status, claimed_by, lease_expires_at\n" +
+      "  FROM tasks WHERE seq = " + seq + ";";
+  }
+
+  function next(session, now) {
+    var ready = tasks.filter(function (t) { return t.status === "open"; });
+    var capable = ready.filter(function (t) { return missingCaps(t, session).length === 0; });
+    capable.sort(function (a, b) { return b.priority - a.priority || a.seq - b.seq; });
+    var sql = "SELECT seq, id, project FROM tasks\n" +
+      " WHERE project = '" + session.project + "' AND status = 'open'\n" +
+      " ORDER BY priority DESC, seq ASC;";
+    if (!capable.length) {
+      var incompatible = ready.filter(function (t) { return missingCaps(t, session).length; });
+      var idle = incompatible.length
+        ? "nothing is workable: " + incompatible.length +
+          " requiring capabilities this session does not advertise"
+        : "nothing is open in this project; the queue is empty";
+      var body = { idle: idle };
+      if (incompatible.length) {
+        body.incompatible = incompatible.map(function (t) {
+          return { seq: t.seq, missing: missingCaps(t, session) };
+        });
+      }
+      return { code: 200, body: body, sql: sql };
+    }
+    var picked = claim(session, capable[0].seq, now);
+    picked.sql = sql + "\n\n" + picked.sql;
+    if (picked.body) picked.body = { claimed: picked.body };
+    return picked;
+  }
+
+  function drive(session, seq, now, kind) {
+    var t = task(seq);
+    if (!t) return { code: 200, error: "task " + seq + " not found", sql: SELECT_ONE(seq) };
+    if (t.holder !== session.actor) {
+      return {
+        code: 200,
+        sql: SELECT_ONE(seq),
+        error: t.holder
+          ? "task " + seq + " is held by " + t.holder + ", not " + session.actor +
+            "; only the lease holder can update it"
+          : "task " + seq + " is " + t.status + " and unclaimed; " + session.actor +
+            " must claim it first"
+      };
+    }
+    if (kind === "complete") {
+      t.status = "done";
+      t.holder = null;
+      t.lease = null;
+      record(now, seq, "completed", session.actor, "result recorded");
+      return {
+        code: 200,
+        rows: 1,
+        sql: "UPDATE tasks\n   SET status = 'done', claimed_by = NULL, lease_expires_at = NULL,\n" +
+          "       result = ?, updated_at = '" + iso(now) + "'\n WHERE id = ?;",
+        body: { task: seq, status: "done", result_recorded: true, project: session.project }
+      };
+    }
+    var expires = now + TTL_MIN * 60000;
+    var was = t.status;
+    t.status = "in_progress";
+    t.lease = expires;
+    record(now, seq, was === "in_progress" ? "lease_renewed" : "status", session.actor,
+      was === "in_progress" ? "lease " + TTL_MIN + "m" : "in_progress");
+    return {
+      code: 200,
+      rows: 1,
+      sql: "UPDATE tasks\n   SET status = 'in_progress', lease_expires_at = '" + iso(expires) +
+        "',\n       updated_at = '" + iso(now) + "'\n WHERE id = ?;",
+      body: {
+        task: seq,
+        status: "in_progress",
+        lease_expires_at: iso(expires),
+        reminder: "call task_update at least every " + HEARTBEAT + " minutes to keep this lease"
+      }
+    };
+  }
+
+  function list(session) {
+    return {
+      code: 200,
+      sql: "SELECT seq, title, status, claimed_by, lease_expires_at\n" +
+        "  FROM tasks WHERE project = '" + session.project + "' ORDER BY seq;",
+      body: {
+        project: session.project,
+        tasks: tasks.map(function (t) {
+          var row = { seq: t.seq, title: t.title, status: t.status };
+          if (t.holder) row.holder = t.holder;
+          return row;
+        })
+      }
+    };
+  }
+
+  function remember(session, now) {
+    assertions += 1;
+    return {
+      code: 200,
+      rows: 1,
+      sql: "INSERT INTO assertions (id, project, content, actor, created_at)\n" +
+        "VALUES ('01K2…', '" + session.project + "', ?, '" + session.actor + "', '" + iso(now) + "');",
+      body: {
+        stored: "01K2R9…",
+        project: session.project,
+        actor: session.actor,
+        note: "an assertion is memory, not a task event; it does not appear in the trail"
+      }
+    };
+  }
+
+  // --------------------------------------------------------- the drawing
+  var boardEl = document.getElementById("board");
+  var trailEl = document.getElementById("trail");
+  var clockEl = document.getElementById("clock");
+  var rosterBody = document.querySelector("#roster-table tbody");
+  var flash = {};
+
+  function renderBoard() {
+    var now = qnow();
+    var real = Date.now();
+    boardEl.innerHTML = tasks.map(function (t) {
+      var lease = "—";
+      if (t.lease) {
+        var left = t.lease - now;
+        lease = left > 0
+          ? '<span class="lease">' + mmss(left) + "</span>"
+          : '<span class="lease lapsed">lapsed ' + mmss(-left) + " ago</span>";
+      }
+      var requires = t.requires.length
+        ? ' <span class="quiet">· needs ' + esc(t.requires.join(", ")) + "</span>"
+        : "";
+      return '<tr class="' + (flash[t.seq] > real ? "moved" : "") + '">' +
+        '<td class="seq">' + t.seq + "</td>" +
+        "<td>" + esc(t.title) + requires + "</td>" +
+        '<td><span class="pill ' + t.status + '">' + t.status + "</span></td>" +
+        '<td class="who">' + (t.holder ? esc(t.holder) : "—") + "</td>" +
+        "<td>" + lease + "</td></tr>";
+    }).join("");
+    clockEl.textContent = "· queue time " + clock(now) + " ·  ×" + SPEED + " ·  " +
+      assertions + " assertions";
+  }
+
+  function renderTrail() {
+    var rows = events.slice(-40).reverse();
+    trailEl.innerHTML = rows.map(function (e) {
+      return "<li><span class='t'>" + clock(e.at) + "</span>" +
+        "<span class='s'>#" + e.seq + "</span>" +
+        "<span class='k " + e.kind + "'>" + e.kind + "</span>" +
+        "<span class='a'>" + esc(e.actor) + (e.note ? " · " + esc(e.note) : "") + "</span></li>";
+    }).join("");
+  }
+
+  function renderRoster(hitToken) {
+    rosterBody.innerHTML = ROSTER.map(function (w) {
+      return '<tr class="' + (hitToken === w.token ? "hit" : "") + '">' +
+        "<td>" + esc(w.token) + "</td><td>" + esc(w.identity) + "</td>" +
+        "<td>" + (w.harness ? esc(w.harness) + " <span class='quiet'>(pinned)</span>"
+          : "<span class='quiet'>the client names itself</span>") + "</td>" +
+        "<td>" + esc(w.project) + "</td><td>" + esc(w.capabilities.join(", ")) + "</td></tr>";
+    }).join("");
+  }
+
+  function touch(seq) { flash[seq] = Date.now() + 1600; }
+
+  // ------------------------------------------------------ the pipeline UI
+  var pipe = document.getElementById("pipe");
+  var packet = document.getElementById("packet");
+  var STAGES = ["wire", "bearer", "roster", "endpoint", "queue"];
+  var stageEl = {}, stageText = {};
+  STAGES.forEach(function (key) {
+    stageEl[key] = pipe.querySelector('[data-stage="' + key + '"]');
+    stageText[key] = document.getElementById("s-" + key);
+  });
+  var statusEl = document.getElementById("status");
+  var responseEl = document.getElementById("response");
+  var sqlEl = document.getElementById("sql");
+  var busy = false;
+
+  function clearStages() {
+    STAGES.forEach(function (key) { stageEl[key].className = "stage"; });
+    packet.classList.remove("flying", "refused");
+    packet.style.transform = "translate(0,0)";
+  }
+  function mark(key, state) { stageEl[key].className = "stage " + state; }
+  function flyTo(key, label, refused) {
+    var el = stageEl[key];
+    packet.textContent = label;
+    packet.classList.toggle("refused", !!refused);
+    packet.classList.add("flying");
+    packet.style.transform = "translate(" + (el.offsetLeft + 10) + "px," + el.offsetTop + "px)";
+  }
+  function steps(list) {
+    var i = 0;
+    (function go() {
+      if (i >= list.length) { busy = false; controls(false); return; }
+      var step = list[i++];
+      window.setTimeout(function () { step.run(); go(); }, step.wait);
+    })();
+  }
+
+  var whoSel = document.getElementById("who");
+  var tokSel = document.getElementById("tok");
+  var callSel = document.getElementById("call");
+  var seqSel = document.getElementById("seq");
+  var seqWrap = document.getElementById("seq-wrap");
+  var sendBtn = document.getElementById("send");
+  var resetBtn = document.getElementById("reset");
+  var raceSel = document.getElementById("race-seq");
+  var raceBtn = document.getElementById("race-go");
+
+  function controls(disabled) {
+    [sendBtn, resetBtn, raceBtn, whoSel, tokSel, callSel, seqSel, raceSel].forEach(function (el) {
+      if (el) el.disabled = disabled;
+    });
+  }
+
+  function fillSeqSelects() {
+    var options = tasks.map(function (t) {
+      return '<option value="' + t.seq + '">#' + t.seq + " " + esc(t.title) + "</option>";
+    }).join("");
+    var keep = seqSel.value, keepRace = raceSel.value;
+    seqSel.innerHTML = options;
+    raceSel.innerHTML = options;
+    seqSel.value = keep && task(+keep) ? keep : "7";
+    raceSel.value = keepRace && task(+keepRace) ? keepRace : "7";
+  }
+
+  function needsSeq(call) {
+    return call === "task_claim" || call === "task_update" || call === "task_complete";
+  }
+  callSel.addEventListener("change", function () {
+    seqWrap.hidden = !needsSeq(callSel.value);
+  });
+
+  function requestLines(client, token, call, seq) {
+    var auth = token
+      ? "Authorization: Bearer <b>" + esc(token) + "</b>"
+      : "<span class='no'>no Authorization header</span>";
+    var args = call === "task_next" || call === "task_list" ? "{}"
+      : call === "mem_store" ? '{"content": "…"}'
+      : call === "task_update" ? '{"seq": ' + seq + ',<br>&nbsp;"status": "in_progress"}'
+      : '{"seq": ' + seq + "}";
+    return "POST / HTTP/1.1<br>Host: queue.internal<br>" + auth + "<br><br>" +
+      "tools/call<br><b>" + esc(call) + "</b> " + args + "<br><br>" +
+      "<span class='quiet'>" + esc(client.who) + "<br>" + esc(client.host) + "</span>";
+  }
+
+  function show(code, reason, bodyText, sqlText, bad) {
+    statusEl.textContent = code + " " + reason;
+    statusEl.className = "status-line " + (bad ? "bad" : "ok");
+    responseEl.textContent = bodyText;
+    sqlEl.textContent = sqlText;
+  }
+
+  function send() {
+    if (busy) return;
+    busy = true;
+    controls(true);
+    clearStages();
+
+    var client = CLIENTS[whoSel.value];
+    var mode = tokSel.value;
+    var token = mode === "none" ? null : (mode === "wrong" ? BAD_TOKEN : client.token);
+    var call = callSel.value;
+    var seq = parseInt(seqSel.value, 10);
+    var plan = [];
+
+    plan.push({ wait: 40, run: function () {
+      mark("wire", "live");
+      stageText.wire.innerHTML = requestLines(client, token, call, seq);
+      flyTo("wire", call);
+      show("…", "in flight", "waiting for the server", "—", false);
+      renderRoster(null);
+    } });
+
+    plan.push({ wait: 520, run: function () {
+      mark("wire", "pass");
+      mark("bearer", "live");
+      stageText.bearer.innerHTML = token
+        ? 'strip_prefix<br>("Bearer ")<br>→ <b class="yes">Some(<br>"' + esc(token) + '")</b>'
+        : 'no header to<br>strip<br>→ <b class="no">None</b><br>nothing to look up';
+      flyTo("bearer", token ? "token" : "no token", !token);
+    } });
+
+    if (!token) {
+      plan.push({ wait: 520, run: function () {
+        mark("bearer", "stop");
+        stageText.roster.innerHTML = "<span class='quiet'>never reached</span>";
+        stageText.endpoint.innerHTML = "<span class='quiet'>never built</span>";
+        stageText.queue.innerHTML = "<span class='quiet'>the database is never opened</span>";
+        flyTo("wire", "401", true);
+        show(401, "Unauthorized",
+          'WWW-Authenticate: Bearer realm="hird"\n\nthis queue is not open to unnamed callers',
+          "-- no statement ran: the refusal happens before the database is touched",
+          true);
+      } });
+      steps(plan);
+      return;
+    }
+
+    plan.push({ wait: 520, run: function () {
+      mark("bearer", "pass");
+      mark("roster", "live");
+      var hit = ENDPOINTS[token];
+      stageText.roster.innerHTML = 'endpoints.get(<br>&nbsp;"' + esc(token) + '")<br>→ ' +
+        (hit ? '<b class="yes">' + esc(hit.worker.identity) + "</b>" : '<b class="no">None</b>');
+      renderRoster(hit ? token : null);
+      flyTo("roster", hit ? "→ " + hit.worker.identity : "unknown", !hit);
+    } });
+
+    if (!ENDPOINTS[token]) {
+      plan.push({ wait: 520, run: function () {
+        mark("roster", "stop");
+        stageText.endpoint.innerHTML = "<span class='quiet'>never built</span>";
+        stageText.queue.innerHTML = "<span class='quiet'>the database is never opened</span>";
+        flyTo("wire", "401", true);
+        show(401, "Unauthorized",
+          'WWW-Authenticate: Bearer realm="hird"\n\nthis queue is not open to unnamed callers',
+          "-- the same answer an absent token gets, so the response does not\n" +
+          "-- say which tokens are real",
+          true);
+      } });
+      steps(plan);
+      return;
+    }
+
+    var session = sessionOf(token, client.names);
+
+    plan.push({ wait: 520, run: function () {
+      mark("roster", "pass");
+      mark("endpoint", "live");
+      stageText.endpoint.innerHTML = "<b>" + esc(session.actor) + "</b><br>" +
+        esc(session.project) + "<br>caps: " + esc(session.capabilities.join(", ")) +
+        "<br><span class='quiet'>identity was fixed when this endpoint was built</span>";
+      flyTo("endpoint", session.identity + "'s session");
+    } });
+
+    plan.push({ wait: 520, run: function () {
+      mark("endpoint", "pass");
+      mark("queue", "live");
+      flyTo("queue", "run");
+
+      var now = qnow();
+      var swept = sweep(now);
+      var out;
+      if (call === "task_list") out = list(session);
+      else if (call === "task_next") out = next(session, now);
+      else if (call === "task_claim") out = claim(session, seq, now);
+      else if (call === "task_update") out = drive(session, seq, now, "update");
+      else if (call === "task_complete") out = drive(session, seq, now, "complete");
+      else out = remember(session, now);
+
+      var lines = [];
+      if (swept.length) {
+        lines.push("sweep_announcing() → " + swept.length + " lapsed lease" +
+          (swept.length > 1 ? "s" : "") + " returned to open (#" + swept.join(", #") + ")");
+      }
+      lines.push(call);
+      if (out.rows !== undefined) lines.push("rows changed: " + out.rows);
+      if (out.error) lines.push("→ error");
+      stageText.queue.innerHTML = lines.map(esc).join("<br>");
+      mark("queue", out.error ? "stop" : "pass");
+
+      var sqlText = out.sql;
+      if (swept.length) {
+        sqlText = "-- first, on the way in:\nUPDATE tasks\n   SET status = 'open', claimed_by = NULL," +
+          " lease_expires_at = NULL\n WHERE status IN ('claimed','in_progress')\n" +
+          "   AND lease_expires_at < '" + iso(now) + "';\n-- " + swept.length +
+          " row(s) swept\n\n" + sqlText;
+      }
+      if (out.rows !== undefined) sqlText += "\n-- " + out.rows + " row(s) changed";
+      if (out.error) {
+        show(200, "OK · the tool answered with an error", out.error, sqlText, true);
+      } else {
+        show(200, "OK", JSON.stringify(out.body, null, 2), sqlText, false);
+      }
+      touch(seq);
+      if (out.body && out.body.claimed) {
+        touch(typeof out.body.claimed === "object" ? out.body.claimed.claimed : out.body.claimed);
+      }
+      renderBoard();
+      renderTrail();
+    } });
+
+    plan.push({ wait: 560, run: function () {
+      flyTo("wire", statusEl.className.indexOf("bad") > -1 ? "error" : "200 OK",
+        statusEl.className.indexOf("bad") > -1);
+    } });
+    plan.push({ wait: 700, run: function () { packet.classList.remove("flying"); } });
+
+    steps(plan);
+  }
+
+  sendBtn.addEventListener("click", send);
+  resetBtn.addEventListener("click", function () {
+    if (busy) return;
+    seed();
+    flash = {};
+    clearStages();
+    STAGES.forEach(function (key) { stageText[key].innerHTML = "<span class='quiet'>waiting…</span>"; });
+    stageText.wire.innerHTML = "POST / HTTP/1.1<br>waiting…";
+    show("—", "", "Press Send.", "—", false);
+    renderRoster(null);
+    fillSeqSelects();
+    renderBoard();
+    renderTrail();
+    leaseWatch = null;
+    document.getElementById("lease-log").textContent = "Nothing yet.";
+  });
+
+  // ------------------------------------------------------------- the race
+  var laneAna = document.getElementById("lane-ana");
+  var laneBen = document.getElementById("lane-ben");
+  var raceNote = document.getElementById("race-note");
+
+  function paintLane(lane, sqlSel, result, won) {
+    lane.className = "lane " + (won ? "won" : "lost");
+    lane.querySelector(sqlSel).textContent = result.sql;
+    lane.querySelector(".rows b").textContent =
+      result.rows === undefined ? "—" : result.rows;
+    lane.querySelector(".verdict").textContent = won
+      ? "claimed. The lease is theirs for " + TTL_MIN + " minutes."
+      : (result.error || "lost the race");
+  }
+
+  function race() {
+    if (busy) return;
+    busy = true;
+    controls(true);
+    var seq = parseInt(raceSel.value, 10);
+    var now = qnow();
+    sweep(now);
+
+    var ana = sessionOf(ROSTER[0].token, "claude-code");
+    var ben = sessionOf(ROSTER[1].token, "codex");
+    var anaFirst = Math.random() < 0.5;
+    var first = anaFirst ? ana : ben;
+    var second = anaFirst ? ben : ana;
+
+    // Two statements, one file. SQLite's write lock serialises them; the
+    // second one to arrive finds `status = 'open'` no longer true.
+    var firstResult = claim(first, seq, now);
+    var secondResult = claim(second, seq, now + 1);
+
+    paintLane(anaFirst ? laneAna : laneBen, anaFirst ? ".sql-a" : ".sql-b",
+      firstResult, firstResult.rows === 1);
+    paintLane(anaFirst ? laneBen : laneAna, anaFirst ? ".sql-b" : ".sql-a",
+      secondResult, secondResult.rows === 1);
+
+    var somebodyWon = firstResult.rows === 1 || secondResult.rows === 1;
+    raceNote.textContent = somebodyWon
+      ? "The write lock let " + first.identity + "'s statement in first — that is the only " +
+        "difference between them, and it is decided inside SQLite, not by anything hird chose. " +
+        "Run it again and it may go the other way."
+      : "Neither statement changed a row: task " + seq + " was not open when they arrived, so " +
+        "the WHERE clause matched nothing for either of them. That is the same mechanism, seen " +
+        "from the other side. Pick a task that is still open — or reset the board — to watch " +
+        "somebody win.";
+
+    touch(seq);
+    renderBoard();
+    renderTrail();
+    window.setTimeout(function () { busy = false; controls(false); }, 450);
+  }
+  raceBtn.addEventListener("click", race);
+
+  // --------------------------------------------- a client may not say who
+  var idToken = document.getElementById("id-token");
+  var idHarness = document.getElementById("id-harness");
+  var idClaim = document.getElementById("id-claim");
+  var idSent = document.getElementById("id-sent");
+  var idBuilt = document.getElementById("id-built");
+  var idWhy = document.getElementById("id-why");
+
+  function renderIdentity() {
+    var worker = idToken.value === "ana" ? ROSTER[0] : ROSTER[1];
+    var declared = idHarness.value;
+    var claimed = idClaim.value;
+
+    var sent = 'initialize\n  "clientInfo": { "name": ' +
+      (declared ? '"' + declared + '"' : "null") + ' }\n\n' +
+      "POST / HTTP/1.1\n  Authorization: Bearer " + worker.token +
+      (claimed ? '\n  X-Hird-Identity: ' + claimed + "   <- invented by the client" : "") +
+      '\n\ntools/call\n  { "name": "task_claim",\n    "arguments": { "seq": 7' +
+      (claimed ? ', "identity": "' + claimed + '"' : "") + " } }";
+    idSent.textContent = sent;
+
+    var harness = worker.harness || declared || "unknown";
+    idBuilt.textContent = "Session {\n" +
+      '  identity:     "' + worker.identity + '"\n' +
+      '  harness:      "' + harness + '"\n' +
+      '  project:      "' + worker.project + '"\n' +
+      "  capabilities: [" + worker.capabilities.map(function (c) { return '"' + c + '"'; }).join(", ") + "]\n" +
+      "}\n\nactor recorded on everything it does:\n  " +
+      worker.identity + "/" + harness + ":" + worker.session;
+
+    var why = [];
+    if (claimed) {
+      why.push("<b>" + esc(claimed) + " was ignored.</b> No header and no tool argument " +
+        "names the person; the identity comes from the roster row the token resolved to, " +
+        "and there is no code path that reads anything else.");
+    }
+    if (worker.harness) {
+      why.push("<b>The harness was ignored too</b> — this roster entry pins <code>" +
+        esc(worker.harness) + "</code>, and a pin wins over what the client calls itself.");
+    } else if (declared) {
+      why.push("<b>The harness was taken.</b> The entry leaves it unpinned, so the client's " +
+        "own name for itself fills a once-only cell on the first call and sticks for the " +
+        "life of the connection. Being wrong here costs a badge, not an attribution.");
+    } else {
+      why.push("<b>The client would not say what it is</b>, and nothing else can, so the " +
+        "harness is filed as <code>unknown</code>. The person is unaffected: that half " +
+        "never came from the client.");
+    }
+    idWhy.innerHTML = why.map(function (w) { return "<li>" + w + "</li>"; }).join("");
+  }
+  [idToken, idHarness, idClaim].forEach(function (el) {
+    el.addEventListener("change", renderIdentity);
+  });
+
+  // ------------------------------------------------------------ the lease
+  var leaseClaim = document.getElementById("lease-claim");
+  var leaseTick = document.getElementById("lease-tick");
+  var leaseState = document.getElementById("lease-state");
+  var leaseLog = document.getElementById("lease-log");
+  var leaseWatch = null;
+  var leaseLines = [];
+
+  function say(line) {
+    leaseLines.push(line);
+    if (leaseLines.length > 12) leaseLines.shift();
+    leaseLog.textContent = leaseLines.join("\n");
+  }
+
+  leaseClaim.addEventListener("click", function () {
+    var now = qnow();
+    sweep(now);
+    var open = tasks.filter(function (t) { return t.status === "open"; });
+    if (!open.length) {
+      say(clock(now) + "  nothing is open to claim — reset the board above.");
+      return;
+    }
+    var ben = sessionOf(ROSTER[1].token, "codex");
+    var target = open[0];
+    var out = claim(ben, target.seq, now);
+    if (out.error) { say(clock(now) + "  " + out.error); return; }
+    leaseWatch = target.seq;
+    say(clock(now) + "  task_claim {\"seq\": " + target.seq + "}  →  " + ben.actor);
+    say(clock(now) + "  lease_expires_at " + out.body.lease_expires_at + "  (" + TTL_MIN + " minutes)");
+    say(clock(now) + "  the container is destroyed. No FIN, no goodbye, nothing to notice.");
+    touch(target.seq);
+    renderBoard();
+    renderTrail();
+  });
+
+  leaseTick.addEventListener("click", function () {
+    var now = qnow();
+    var swept = sweep(now);
+    var ana = sessionOf(ROSTER[0].token, "claude-code");
+    if (swept.length) {
+      say(clock(now) + "  task_list from " + ana.actor);
+      swept.forEach(function (seq) {
+        say(clock(now) + "  sweep_announcing() → task " + seq +
+          " returned to open, lease_expired recorded");
+        touch(seq);
+      });
+      if (swept.indexOf(leaseWatch) > -1) leaseWatch = null;
+    } else {
+      say(clock(now) + "  task_list from " + ana.actor + "  →  nothing was overdue" +
+        (leaseWatch ? "; task " + leaseWatch + " still has time on its lease" : ""));
+    }
+    renderBoard();
+    renderTrail();
+  });
+
+  function renderLeaseState() {
+    if (leaseWatch === null) { leaseState.textContent = "nothing held"; return; }
+    var t = task(leaseWatch);
+    if (!t || !t.lease) { leaseState.textContent = "task " + leaseWatch + " is back in the pool"; return; }
+    var left = t.lease - qnow();
+    leaseState.textContent = left > 0
+      ? "task " + t.seq + " · " + mmss(left) + " left on the lease"
+      : "task " + t.seq + " · lapsed " + mmss(-left) + " ago, and still marked " + t.status;
+  }
+
+  // -------------------------------------------------------------- running
+  seed();
+  fillSeqSelects();
+  renderRoster(null);
+  renderBoard();
+  renderTrail();
+  renderIdentity();
+  seqWrap.hidden = !needsSeq(callSel.value);
+
+  window.setInterval(function () {
+    renderBoard();
+    renderLeaseState();
+  }, 250);
+})();
+</script>
+</body>
+</html>
