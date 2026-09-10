@@ -1567,7 +1567,9 @@ The roster ([`examples/roster.toml`](examples/roster.toml)) is the whole
 authorization story: a bearer token per person, and the session that token
 connects as. [How the central queue works](https://aoprisan.github.io/hird/server.html)
 walks a request through it in the browser — token to person, one endpoint per
-identity, and two agents racing for the same task.
+identity, and two agents racing for the same task, and
+[How a swarm collaborates](https://aoprisan.github.io/hird/swarm.html) animates
+four agents on two machines working one queue through it.
 
 ```toml
 project = "/srv/acme"
@@ -1745,9 +1747,11 @@ OpenCode.
 ## Documentation
 
 The usage guide at **<https://aoprisan.github.io/hird/>** is a static site with
-no build step: [`docs/`](docs/) is the guide, one stylesheet, and
+no build step: [`docs/`](docs/) is the guide, one stylesheet,
 [`server.html`](docs/server.html) — an interactive walkthrough of the central
-queue that simulates the server in the page — published by
+queue that simulates the server in the page — and
+[`swarm.html`](docs/swarm.html) — four herdr agents on two machines working one
+queue through it, animated call by call — published by
 [`.github/workflows/pages.yml`](.github/workflows/pages.yml) on every push to
 `main` that touches them. `just site` opens it locally, `just site-check` runs the
 dead-link check CI runs, and `just examples` runs both example scripts end to
