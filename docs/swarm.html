@@ -1,0 +1,1301 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hird — how a swarm collaborates</title>
+<meta name="description" content="An animated walkthrough of four herdr agents on two machines working one hird queue through the central server: the calls they make, the one push the queue is allowed, and the board as it moves.">
+<link rel="stylesheet" href="style.css">
+<style>
+  /* ------------------------------------------------- the queue's own palette
+     The board and the dashboard preview below are drawn in the colours
+     `hird web` actually uses (src/web/index.html), so the preview and the
+     real page agree. Declared for all three theme states, like style.css. */
+  :root {
+    --q-open: #ffffff; --q-open-ink: #1c1c1a;
+    --q-claimed: #fff3b0; --q-progress: #ffe066;
+    --q-done: #c7f0c2; --q-failed: #f5b7b1; --q-cancelled: #e2e2dd;
+    --q-edge: #b9b4a6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --q-open: #2a2a26; --q-open-ink: #ecebe6;
+      --q-claimed: #5a4a10; --q-progress: #6e5a00;
+      --q-done: #1f4d2a; --q-failed: #5c2222; --q-cancelled: #2e2e2a;
+      --q-edge: #4a4d51;
+    }
+  }
+  :root[data-theme="dark"] {
+    --q-open: #2a2a26; --q-open-ink: #ecebe6;
+    --q-claimed: #5a4a10; --q-progress: #6e5a00;
+    --q-done: #1f4d2a; --q-failed: #5c2222; --q-cancelled: #2e2e2a;
+    --q-edge: #4a4d51;
+  }
+
+  /* ------------------------------------------------------ the film, page-local */
+  .film {
+    background: var(--bg-raised);
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    margin: 1.5rem 0;
+    overflow: hidden;
+  }
+  .film > .controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 0.75rem;
+    padding: 0.75rem 1rem;
+    background: var(--bg-sunken);
+    border-bottom: 1px solid var(--rule);
+    font-size: 0.875rem;
+  }
+  .film .controls label { color: var(--ink-faint); display: inline-flex; align-items: center; gap: 0.35rem; }
+  .film select, .film button {
+    font: inherit;
+    font-size: 0.875rem;
+    color: var(--ink);
+    background: var(--bg-raised);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: 0.25rem 0.5rem;
+  }
+  .film button { cursor: pointer; }
+  .film button:hover:not(:disabled) { border-color: var(--accent); }
+  .film button:disabled { opacity: 0.5; cursor: default; }
+  .film button.go { background: var(--accent); border-color: var(--accent); color: var(--bg-raised); font-weight: 500; padding: 0.25rem 0.9rem; min-width: 5.5rem; }
+  .film .spacer { flex: 1 1 auto; }
+  .film .clock { font-family: var(--mono); font-size: 0.75rem; color: var(--ink-faint); }
+  /* The scene is a diagram. It fits the column on a desktop; once the page has
+     folded to one narrow column it stops shrinking and pans inside its own box
+     instead, so the labels stay readable rather than dissolving. */
+  .film .stage { padding: 0.5rem 0.75rem 0; overflow-x: auto; }
+  .film svg#scene { display: block; width: 100%; height: auto; }
+  @media (max-width: 48rem) {
+    .film svg#scene { min-width: 46rem; }
+  }
+
+  /* the caption under the scene: what this beat is, and the calls it made */
+  .caption {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 20rem);
+    gap: 0.75rem 1.5rem;
+    padding: 0.85rem 1rem 1rem;
+    border-top: 1px solid var(--rule);
+    background: var(--bg-sunken);
+  }
+  @media (max-width: 48rem) { .caption { grid-template-columns: minmax(0, 1fr); } }
+  .caption h4 { margin: 0 0 0.2rem; font-size: 0.95rem; }
+  .caption p { margin: 0; font-size: 0.875rem; color: var(--ink-soft); }
+  .caption .calls { margin: 0; font-family: var(--mono); font-size: 0.75rem; line-height: 1.6; color: var(--ink-faint); overflow-x: auto; }
+  .caption .calls b { color: var(--ink); font-weight: 500; }
+  .caption .calls span.no { color: var(--red); }
+  .caption .calls span.yes { color: var(--green); }
+
+  /* ---------------------------------------------------------- scene drawing */
+  #scene .group-box { fill: var(--bg-sunken); stroke: var(--rule); }
+  #scene .card { fill: var(--bg-raised); stroke: var(--rule); }
+  #scene .chip { fill: var(--bg); stroke: var(--rule); }
+  #scene text { font-family: var(--sans); fill: var(--ink); }
+  #scene .t-label { font-size: 12px; fill: var(--ink-faint); letter-spacing: 0.06em; text-transform: uppercase; }
+  #scene .t-name { font-size: 15px; font-family: var(--mono); }
+  #scene .t-sub { font-size: 11.5px; fill: var(--ink-faint); font-family: var(--mono); }
+  #scene .t-head { font-size: 14px; font-weight: 600; }
+  #scene .t-chip { font-size: 11px; font-family: var(--mono); fill: var(--ink-soft); }
+  #scene .t-row { font-size: 12px; font-family: var(--mono); }
+  #scene .edge { fill: none; stroke: var(--q-edge); stroke-width: 1.5; opacity: 0.55; }
+  #scene .edge.push { stroke-dasharray: 5 4; }
+  #scene .edge.lit { stroke: var(--accent); opacity: 1; }
+  #scene .agent rect { transition: fill 0.25s, stroke 0.25s; }
+  #scene .agent.busy > rect.card { stroke: var(--accent); }
+  #scene .agent.woken > rect.card { stroke: var(--accent); fill: var(--accent-soft); }
+  #scene .agent.gone > rect.card { stroke: var(--red); stroke-dasharray: 4 3; }
+  #scene .agent.gone text { opacity: 0.45; }
+  #scene .agent.barred > rect.card { stroke: var(--red); }
+  #scene .hot > rect { stroke: var(--accent); }
+  #scene .packet rect { fill: var(--accent); stroke: none; }
+  #scene .packet.back rect { fill: var(--green); }
+  #scene .packet.err rect { fill: var(--red); }
+  #scene .packet.push rect { fill: var(--ink-soft); }
+  #scene .packet text { fill: #ffffff; font-family: var(--mono); font-size: 11.5px; }
+  #scene .swatch { stroke: var(--q-edge); stroke-width: 0.75; }
+  .st-open { fill: var(--q-open); }
+  .st-claimed { fill: var(--q-claimed); }
+  .st-in_progress { fill: var(--q-progress); }
+  .st-done { fill: var(--q-done); }
+  .st-failed { fill: var(--q-failed); }
+  .st-blocked { fill: var(--q-cancelled); }
+
+  /* ---------------------------------------------- the dashboard preview */
+  .dash {
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    overflow: hidden;
+    margin: 1.5rem 0;
+    background: var(--bg-raised);
+    font-size: 0.8125rem;
+  }
+  .dash .dtop, .dash .dscrub {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem 0.75rem;
+    flex-wrap: wrap;
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--rule);
+    background: var(--bg-sunken);
+  }
+  .dash .dbrand { font-weight: 700; letter-spacing: 0.02em; }
+  .dash .dproj, .dash .dcounts, .dash .dasof { font-family: var(--mono); font-size: 0.72rem; color: var(--ink-faint); }
+  .dash .dlive { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.72rem; color: var(--green); }
+  .dash .dlive i { width: 7px; height: 7px; border-radius: 50%; background: var(--green); display: inline-block; }
+  .dash.paused .dlive { color: var(--ink-faint); }
+  .dash.paused .dlive i { background: var(--ink-faint); }
+  .dash .dlegend { display: inline-flex; gap: 0.6rem; flex-wrap: wrap; color: var(--ink-faint); font-size: 0.72rem; margin-left: auto; }
+  .dash .dlegend span { display: inline-flex; align-items: center; gap: 0.25rem; }
+  .dash .dlegend i { width: 10px; height: 10px; border: 1px solid var(--q-edge); display: inline-block; }
+  .dash .dscrub input[type="range"] { flex: 1 1 12rem; min-width: 8rem; accent-color: var(--accent); }
+  .dash .dscrub button { font: inherit; font-size: 0.72rem; padding: 0.15rem 0.5rem; border: 1px solid var(--rule); border-radius: 5px; background: var(--bg-raised); color: var(--ink); cursor: pointer; }
+  .dash .dmain { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 17rem); }
+  @media (max-width: 52rem) { .dash .dmain { grid-template-columns: minmax(0, 1fr); } }
+  .dash .dcanvas { padding: 0.75rem; min-height: 12rem; overflow-x: auto; }
+  .dash .dcanvas svg { display: block; width: 100%; height: auto; min-width: 22rem; }
+  .dash .dfeed { border-left: 1px solid var(--rule); display: flex; flex-direction: column; min-height: 0; }
+  @media (max-width: 52rem) { .dash .dfeed { border-left: 0; border-top: 1px solid var(--rule); } }
+  .dash .fbar { display: flex; justify-content: space-between; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--rule); color: var(--ink-faint); font-size: 0.72rem; }
+  .dash .dfeed ul { list-style: none; margin: 0; padding: 0.35rem 0.6rem 0.6rem; max-height: 16rem; overflow-y: auto; font-family: var(--mono); font-size: 0.72rem; line-height: 1.5; }
+  .dash .dfeed li { padding: 0.1rem 0; color: var(--ink-soft); }
+  .dash .dfeed li .k { color: var(--ink-faint); }
+  .dash .dfeed li .k.claimed, .dash .dfeed li .k.completed { color: var(--green); }
+  .dash .dfeed li .k.lease_expired, .dash .dfeed li .k.failed { color: var(--red); }
+  .dash .dfeed li .k.created, .dash .dfeed li .k.reviewed { color: var(--accent); }
+  .dash .dfeed li b { color: var(--ink); font-weight: 500; }
+  #d-graph .gnode rect { stroke: var(--q-edge); stroke-width: 1; }
+  #d-graph .gnode text.seq { font-family: var(--mono); font-size: 11px; fill: var(--q-open-ink); }
+  #d-graph .gnode text.ttl { font-size: 11.5px; fill: var(--q-open-ink); font-family: var(--sans); }
+  #d-graph .gnode text.who { font-family: var(--mono); font-size: 10px; fill: var(--q-open-ink); opacity: 0.75; }
+  #d-graph .gedge { fill: none; stroke: var(--q-edge); stroke-width: 1.25; }
+  #d-graph .gcol { font-size: 10px; fill: var(--ink-faint); font-family: var(--mono); letter-spacing: 0.08em; }
+
+  /* five columns of roster do not fit a phone; let the table scroll, not the page */
+  .table-wrap { overflow-x: auto; margin: 1.25rem 0; }
+  .table-wrap table { margin: 0; min-width: 34rem; }
+
+  .sr-only {
+    position: absolute;
+    width: 1px; height: 1px;
+    padding: 0; margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  /* -------------------------------------------------------- the run, in words */
+  ol.run { margin: 1.25rem 0; padding: 0; list-style: none; counter-reset: beat; }
+  ol.run li {
+    counter-increment: beat;
+    display: grid;
+    grid-template-columns: 2.25rem minmax(0, 1fr);
+    gap: 0.75rem;
+    padding: 0.6rem 0.5rem;
+    border-top: 1px solid var(--rule);
+  }
+  ol.run li:last-child { border-bottom: 1px solid var(--rule); }
+  ol.run li.here { background: var(--accent-soft); }
+  ol.run li::before {
+    content: counter(beat);
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    color: var(--ink-faint);
+    padding-top: 0.15rem;
+  }
+  ol.run button {
+    font: inherit;
+    text-align: left;
+    background: none;
+    border: 0;
+    padding: 0;
+    color: var(--ink);
+    cursor: pointer;
+  }
+  ol.run button:hover strong { color: var(--accent); }
+  ol.run strong { display: block; font-size: 0.9375rem; font-weight: 600; }
+  ol.run span { display: block; font-size: 0.8125rem; color: var(--ink-soft); }
+  ol.run code { font-size: 0.75rem; }
+
+  @media (prefers-reduced-motion: reduce) {
+    #scene .packet { transition: none; }
+  }
+</style>
+</head>
+<body>
+
+<button id="theme" type="button" aria-label="Toggle colour theme">theme</button>
+
+<div class="shell">
+<nav class="toc" aria-label="Contents">
+  <a class="brand" href="#top">hird</a>
+  <p class="tagline">Four agents, two machines, one queue — and the twelve calls between them.</p>
+  <details class="nav-body" open>
+  <summary>Contents</summary>
+  <ol>
+    <li><a href="#film">Watch the swarm work</a></li>
+    <li><a href="#dashboard">The board, as it moves</a></li>
+    <li><a href="#run">The run, in words</a></li>
+    <li><a href="#cast">Who is on the wire</a></li>
+    <li><a href="#claims">What the picture claims</a></li>
+    <li><a href="#build">Building it yourself</a></li>
+  </ol>
+  <div class="away">
+    <a href="server.html">How the central queue works &rarr;</a>
+    <a href="index.html">The usage guide &rarr;</a>
+    <a href="https://github.com/aoprisan/hird/tree/main/herdr-plugin">The herdr plugin &rarr;</a>
+    <a href="https://github.com/aoprisan/hird">Source on GitHub &rarr;</a>
+  </div>
+  </details>
+</nav>
+
+<main id="top">
+
+<header class="hero">
+  <div class="badges">
+    <span class="badge">four agents, two machines</span>
+    <span class="badge">one SQLite file</span>
+    <span class="badge">pull, with one push</span>
+    <span class="badge">nobody assigns anything</span>
+  </div>
+  <h1>How a swarm collaborates</h1>
+  <p class="lede">
+    Two people run <a href="https://herdr.dev">herdr</a> on two machines, four
+    agents between them, and every one of those agents reaches the same
+    <strong>hird-server</strong> over MCP. This page is that arrangement,
+    animated: the nodes, the calls flowing between them, and the board moving
+    underneath as they land. Nothing here schedules, routes or assigns —
+    watch what happens instead.
+  </p>
+  <div class="cta">
+    <a class="primary" href="#film">Watch it run</a>
+    <a href="#dashboard">See the dashboard</a>
+    <a href="server.html">How the server works</a>
+  </div>
+</header>
+
+<section id="film">
+<h2>Watch the swarm work</h2>
+
+<p>
+  The film below runs one plan from filing to finish. Agents are the boxes
+  inside each herdr session; the calls they make are the pills that travel the
+  wires. Orange is a call going out, green is what
+  the queue answered, red is a refusal. Dashed wires are the one thing
+  the queue is allowed to push: the
+  <a href="index.html#dispatch-hook">dispatch hook</a>, and the herdr plugin's
+  relay knocking on an idle agent's door.
+</p>
+
+<div class="film" id="the-film">
+  <div class="controls">
+    <button class="go" id="play" type="button">Pause</button>
+    <button id="prev" type="button">&#9664; back</button>
+    <button id="next" type="button">forward &#9654;</button>
+    <button id="restart" type="button">Restart</button>
+    <label for="speed">speed
+      <select id="speed">
+        <option value="0.5">slow</option>
+        <option value="1" selected>normal</option>
+        <option value="2">brisk</option>
+      </select>
+    </label>
+    <span class="spacer"></span>
+    <span class="clock" id="beatno">&mdash;</span>
+  </div>
+
+  <div class="stage">
+    <svg id="scene" viewBox="0 0 1160 620" role="img" aria-labelledby="scene-title scene-desc">
+      <title id="scene-title">Four herdr agents on two machines working one hird queue</title>
+      <desc id="scene-desc">Ana's laptop and Ben's cloud container each run a herdr session with two agents. Both sessions speak MCP over HTTP to a hird-server, which holds one SQLite file and the board. When a task becomes claimable the server runs the dispatch hook, and the herdr plugin's relay wakes an idle agent.</desc>
+
+      <g id="edges">
+        <path id="e-cc"   class="edge" d="M310,125 C348,125 352,90 380,90"></path>
+        <path id="e-cx"   class="edge" d="M310,199 C350,199 352,132 380,132"></path>
+        <path id="e-cp"   class="edge" d="M850,125 C812,125 808,90 780,90"></path>
+        <path id="e-gm"   class="edge" d="M850,199 C810,199 808,132 780,132"></path>
+        <path id="e-file" class="edge" d="M310,274 C345,274 350,300 380,300"></path>
+        <path id="e-watch" class="edge" d="M780,320 C815,320 815,274 850,274"></path>
+        <path id="e-hook" class="edge push" d="M540,458 C540,486 496,492 470,510"></path>
+        <path id="e-ana"  class="edge push" d="M400,548 C300,556 175,486 175,322"></path>
+        <path id="e-ben"  class="edge push" d="M760,548 C860,556 985,486 985,322"></path>
+        <path class="edge" d="M580,176 L580,190"></path>
+        <path class="edge" d="M580,230 L580,244"></path>
+      </g>
+
+      <g id="nodes">
+        <!-- Ana's machine -->
+        <rect class="group-box" x="20" y="52" width="310" height="270" rx="12"></rect>
+        <text class="t-label" x="36" y="42">Ana &middot; laptop</text>
+        <text class="t-sub" x="36" y="74">herdr session &mdash; two agents</text>
+        <g class="agent" id="n-cc">
+          <rect class="card" x="40" y="96" width="270" height="58" rx="8"></rect>
+          <text class="t-name" x="54" y="120">claude-code</text>
+          <text class="t-sub" x="54" y="139" id="s-cc">idle &middot; repo</text>
+        </g>
+        <g class="agent" id="n-cx">
+          <rect class="card" x="40" y="170" width="270" height="58" rx="8"></rect>
+          <text class="t-name" x="54" y="194">codex</text>
+          <text class="t-sub" x="54" y="213" id="s-cx">idle &middot; repo, browser</text>
+        </g>
+        <g id="n-ana-pane">
+          <rect class="chip" x="40" y="248" width="270" height="52" rx="8"></rect>
+          <text class="t-chip" x="54" y="270">pane: hird add &mdash; Ana files work</text>
+          <text class="t-chip" x="54" y="288">plugin entrypoint: wire, board</text>
+        </g>
+
+        <!-- the host -->
+        <rect class="card" x="380" y="36" width="400" height="140" rx="10"></rect>
+        <text class="t-head" x="398" y="62">hird-server :7474</text>
+        <text class="t-sub" x="398" y="82">MCP over streamable HTTP &mdash; TLS in front</text>
+        <g id="n-bearer"><rect class="chip" x="396" y="100" width="116" height="56" rx="7"></rect>
+          <text class="t-chip" x="408" y="122">Bearer</text><text class="t-chip" x="408" y="140">token</text></g>
+        <g id="n-roster"><rect class="chip" x="522" y="100" width="116" height="56" rx="7"></rect>
+          <text class="t-chip" x="534" y="122">roster &rarr;</text><text class="t-chip" x="534" y="140">a person</text></g>
+        <g id="n-endpoint"><rect class="chip" x="648" y="100" width="116" height="56" rx="7"></rect>
+          <text class="t-chip" x="660" y="122">one endpoint</text><text class="t-chip" x="660" y="140">per identity</text></g>
+
+        <g id="n-db"><rect class="chip" x="430" y="190" width="300" height="40" rx="7"></rect>
+          <text class="t-chip" x="448" y="215">Shared { Mutex&lt;Db&gt; } &mdash; hird.db (WAL)</text></g>
+
+        <rect class="card" x="380" y="244" width="400" height="214" rx="10"></rect>
+        <text class="t-head" x="398" y="268">the board &mdash; /srv/acme</text>
+        <text class="t-sub" x="762" y="268" id="s-board" text-anchor="end">empty</text>
+        <g id="board-rows"></g>
+
+        <g id="n-relay">
+          <rect class="card" x="400" y="510" width="360" height="76" rx="10"></rect>
+          <text class="t-head" x="418" y="534">the relay &mdash; dispatch.sh</text>
+          <text class="t-sub" x="418" y="553">walks the roster: skips recused,</text>
+          <text class="t-sub" x="418" y="570">unequipped, busy &mdash; then prompts</text>
+        </g>
+
+        <!-- Ben's machine -->
+        <rect class="group-box" x="830" y="52" width="310" height="270" rx="12"></rect>
+        <text class="t-label" x="846" y="42">Ben &middot; cloud container</text>
+        <text class="t-sub" x="846" y="74">herdr session &mdash; two agents</text>
+        <g class="agent" id="n-cp">
+          <rect class="card" x="850" y="96" width="270" height="58" rx="8"></rect>
+          <text class="t-name" x="864" y="120">copilot</text>
+          <text class="t-sub" x="864" y="139" id="s-cp">idle &middot; repo</text>
+        </g>
+        <g class="agent" id="n-gm">
+          <rect class="card" x="850" y="170" width="270" height="58" rx="8"></rect>
+          <text class="t-name" x="864" y="194">gemini</text>
+          <text class="t-sub" x="864" y="213" id="s-gm">idle &middot; repo, browser</text>
+        </g>
+        <g id="n-ben-pane">
+          <rect class="chip" x="850" y="248" width="270" height="52" rx="8"></rect>
+          <text class="t-chip" x="864" y="270">pane: hird events --follow</text>
+          <text class="t-chip" x="864" y="288">the reader that does not stop</text>
+        </g>
+      </g>
+
+      <g id="packets"></g>
+    </svg>
+  </div>
+
+  <div class="caption">
+    <div>
+      <h4 id="beat-title">Nothing is assigned to anybody</h4>
+      <p id="beat-note">Four agents, idle. An empty board. Press play.</p>
+    </div>
+    <p class="calls" id="beat-calls">&mdash;</p>
+  </div>
+</div>
+</section>
+
+<section id="dashboard">
+<h2>The board, as it moves</h2>
+
+<p>
+  This is <code>hird web</code> &mdash; the board drawn live in a browser, with
+  a scrubber over the trail. Here it is wired to the film above: it shows the
+  queue exactly as it stands at the current beat, and dragging its scrubber
+  moves the film. Columns are dependency depth, colour is status, and the
+  trail on the right is the append-only event log every one of those calls
+  wrote to.
+</p>
+
+<div class="dash" id="dash">
+  <div class="dtop">
+    <span class="dbrand">hird</span>
+    <span class="dproj">/srv/acme</span>
+    <span class="dlive"><i></i>live</span>
+    <span class="dcounts" id="d-counts">&mdash;</span>
+    <span class="dlegend">
+      <span><i style="background:var(--q-open)"></i>open</span>
+      <span><i style="background:var(--q-claimed)"></i>claimed</span>
+      <span><i style="background:var(--q-progress)"></i>in progress</span>
+      <span><i style="background:var(--q-done)"></i>done</span>
+    </span>
+  </div>
+  <div class="dscrub">
+    <span class="dproj">the trail</span>
+    <label class="sr-only" for="d-when">Scrub the trail</label>
+    <input type="range" id="d-when" min="0" max="1" value="0" step="1">
+    <span class="dasof" id="d-asof">&mdash;</span>
+    <button id="d-live" type="button">live</button>
+  </div>
+  <div class="dmain">
+    <div class="dcanvas">
+      <svg id="d-graph" viewBox="0 0 660 300" role="img" aria-label="The queue drawn as a dependency graph, coloured by status"></svg>
+    </div>
+    <aside class="dfeed">
+      <div class="fbar"><span>the trail</span><span id="d-feedcount"></span></div>
+      <ul id="d-feed"></ul>
+    </aside>
+  </div>
+</div>
+
+<div class="note">
+  <span class="label">The scrubber is not a replay of a recording</span>
+  <p>
+    Both here and in the real <code>hird web</code>, the board at any point is
+    rebuilt from the trail up to that point. The queue keeps an append-only
+    event log, so &ldquo;how did it stand at 14:02?&rdquo; is a question the
+    data can answer without anybody having filmed it.
+  </p>
+</div>
+</section>
+
+<section id="run">
+<h2>The run, in words</h2>
+
+<p>
+  Every beat of the film, with the call that caused it. Pick one to jump the
+  film there.
+</p>
+
+<ol class="run" id="run-list"></ol>
+</section>
+
+<section id="cast">
+<h2>Who is on the wire</h2>
+
+<p>
+  Four agents, two people, one roster. The roster is the whole map: a token
+  arrives in a header, and the server builds the session from the roster's
+  entry rather than from anything the client said about itself. A client may
+  name its own harness; it may never name the person.
+</p>
+
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>herdr agent</th><th>Person</th><th>Machine</th><th>Advertises</th><th>What it did in the film</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>claude-code</code></td><td>Ana</td><td>laptop</td><td><code>repo</code></td><td>Took #1, was skipped for its own review, picked up the expired lease.</td></tr>
+    <tr><td><code>codex</code></td><td>Ana</td><td>laptop</td><td><code>repo</code>, <code>browser</code></td><td>Won the race for #4, then pulled #2 once it unblocked.</td></tr>
+    <tr><td><code>copilot</code></td><td>Ben</td><td>cloud container</td><td><code>repo</code></td><td>Took #3, then went quiet holding it.</td></tr>
+    <tr><td><code>gemini</code></td><td>Ben</td><td>cloud container</td><td><code>repo</code>, <code>browser</code></td><td>Lost the race for #4, judged Ana's work in review #5.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>
+  The fourth column is what the roster says each worker is equipped with.
+  <code>task_next</code> will not hand out a task whose <code>--requires</code>
+  the caller cannot satisfy, and the relay will not even knock: a task
+  requiring <code>browser</code> is never offered to <code>copilot</code>.
+  The check is repeated atomically at the claim, because the roster is a
+  routing hint and the queue is the authority.
+</p>
+</section>
+
+<section id="claims">
+<h2>What the picture claims</h2>
+
+<p>
+  An animation can imply things the software does not do, so here is the line
+  between what is built and what is drawn.
+</p>
+
+<div class="cols">
+  <div class="card">
+    <h4>Built, and shown accurately</h4>
+    <p>
+      The twelve MCP tools and six statuses; one endpoint per roster identity
+      and a bearer token that decides who you are; the atomic claim that makes
+      the race have exactly one winner; capability-aware dispatch and recusal;
+      the lease that only a reader notices has lapsed; the dispatch hook and
+      the herdr plugin's relay skipping recused, unequipped and busy workers;
+      the trail the dashboard is rebuilt from.
+    </p>
+  </div>
+  <div class="card">
+    <h4>Drawn ahead of the code</h4>
+    <p>
+      One relay reaching <em>two</em> people's herdr sessions. The shipped
+      plugin prompts the herdr it runs beside, and the queue in the film is on
+      a third host. Two machines' agents on one hird-server is real
+      (<a href="server.html">it is what the server is for</a>); a relay that
+      wakes an idle agent on somebody else's machine is not built, and would
+      need a way to address it that hird deliberately does not have.
+    </p>
+  </div>
+</div>
+
+<div class="note">
+  <span class="label">Nothing in the film assigns work</span>
+  <p>
+    The relay does not choose <em>what</em> an agent works on &mdash; it only
+    says <em>go look</em>. Every task in the film was taken by an agent calling
+    <code>task_next</code> or <code>task_claim</code> itself, and the queue
+    refused two of those calls. That is the whole difference between a
+    dispatcher and a queue with a doorbell.
+  </p>
+</div>
+</section>
+
+<section id="build">
+<h2>Building it yourself</h2>
+
+<p>
+  Three pieces: the server on a host both machines reach, a roster that maps a
+  token to each person, and the herdr plugin wired on the machine where the
+  agents live.
+</p>
+
+<pre><code># on the host, one roster entry per person
+cat &gt; roster.toml &lt;&lt;'TOML'
+[[worker]]
+token    = "…"          # generate with: openssl rand -hex 32
+identity = "ana"
+project  = "/srv/acme"
+capabilities = ["repo", "browser"]
+TOML
+
+hird-server --roster roster.toml --bind 127.0.0.1 --port 7474
+# terminate TLS in front of it: a bearer token on plain HTTP is a token given away</code></pre>
+
+<pre><code># on each machine with agents
+herdr plugin install aoprisan/hird/herdr-plugin
+herdr plugin pane open --plugin hird --entrypoint wire   # seeds the roster, writes the hook
+herdr plugin pane open --plugin hird --entrypoint feed   # the reader that notices dead leases</code></pre>
+
+<p>
+  <a href="server.html">How the central queue works</a> takes the request path
+  apart call by call &mdash; the token, the roster lookup, the compare-and-set
+  &mdash; and lets you send requests at a simulated board.
+  <a href="index.html">The usage guide</a> covers everything the agents were
+  doing in between: dependencies, file scope, reviews, memory, and the plan
+  file that filed all four tasks at once.
+</p>
+</section>
+
+</main>
+</div>
+
+<script>
+  // Theme toggle: follow the OS by default, remember an explicit choice.
+  (function () {
+    var root = document.documentElement;
+    var saved = null;
+    try { saved = localStorage.getItem("hird-theme"); } catch (e) {}
+    if (saved) root.setAttribute("data-theme", saved);
+
+    document.getElementById("theme").addEventListener("click", function () {
+      var dark = root.getAttribute("data-theme") === "dark" ||
+        (!root.getAttribute("data-theme") &&
+          window.matchMedia("(prefers-color-scheme: dark)").matches);
+      var next = dark ? "light" : "dark";
+      root.setAttribute("data-theme", next);
+      try { localStorage.setItem("hird-theme", next); } catch (e) {}
+    });
+  })();
+
+  // On a phone the contents fold away, so the page starts at the page.
+  (function () {
+    var nav = document.querySelector("nav.toc .nav-body");
+    var narrow = window.matchMedia("(max-width: 62rem)");
+    if (!nav) return;
+    if (narrow.matches) nav.removeAttribute("open");
+    nav.addEventListener("click", function (event) {
+      if (narrow.matches && event.target.closest("a")) nav.removeAttribute("open");
+    });
+  })();
+</script>
+
+<script>
+/* ===========================================================================
+   The film.
+
+   One scripted run of a swarm, played as a list of beats. Each beat is a pure
+   function on the queue's state plus the packets that beat sends, so the board
+   at beat N is rebuilt by replaying beats 0..N — the same way `hird web`
+   rebuilds the board from the trail rather than from a recording.
+   =========================================================================== */
+(function () {
+  "use strict";
+
+  var $ = function (id) { return document.getElementById(id); };
+  var SVGNS = "http://www.w3.org/2000/svg";
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  /* ------------------------------------------------------------- the cast */
+
+  var AGENTS = {
+    cc: { name: "claude-code", who: "ana", caps: "repo" },
+    cx: { name: "codex", who: "ana", caps: "repo, browser" },
+    cp: { name: "copilot", who: "ben", caps: "repo" },
+    gm: { name: "gemini", who: "ben", caps: "repo, browser" }
+  };
+
+  function initial() {
+    return {
+      tasks: [],
+      agents: { cc: { st: "idle" }, cx: { st: "idle" }, cp: { st: "idle" }, gm: { st: "idle" } },
+      trail: [],
+      note: ""
+    };
+  }
+
+  function task(s, seq) {
+    for (var i = 0; i < s.tasks.length; i++) if (s.tasks[i].seq === seq) return s.tasks[i];
+    return null;
+  }
+  function file(s, t) { s.tasks.push(t); }
+  function log(s, kind, seq, text) { s.trail.push({ kind: kind, seq: seq, text: text }); }
+  function hold(s, seq, key, status) {
+    var t = task(s, seq);
+    t.status = status || "claimed";
+    t.holder = key;
+    s.agents[key].st = "working";
+    s.agents[key].holds = seq;
+  }
+  function release(s, key) {
+    s.agents[key].st = "idle";
+    s.agents[key].holds = null;
+  }
+
+  /* -------------------------------------------------------------- the run */
+
+  var BEATS = [
+    {
+      title: "Nothing is assigned to anybody",
+      note: "Four agents across two machines, all idle, and an empty board. " +
+            "No agent has been told what to do, and there is nothing yet to tell it.",
+      run: "The starting position: four idle agents, one empty queue.",
+      calls: "&mdash;",
+      apply: function () {}
+    },
+    {
+      title: "Ana files a plan",
+      note: "Four tasks, filed from a pane on Ana's machine. #2 depends on #1, " +
+            "and #4 needs a browser to verify anything. Nobody is named in any of them.",
+      run: "Ana files four tasks. #2 waits on #1; #4 declares it needs a browser.",
+      calls: "<b>hird add</b> &times;4 &rarr; <span class='yes'>#1 #2 #3 #4</span>",
+      msgs: [{ e: "e-file", l: "hird add ×4", k: "call", d: "fwd" }],
+      apply: function (s) {
+        file(s, { seq: 1, title: "Design the storage schema", status: "open", needs: [], paths: "src/db.rs" });
+        file(s, { seq: 2, title: "Port the repository layer", status: "open", needs: [1], paths: "src/repo/**" });
+        file(s, { seq: 3, title: "Rewrite the renderer", status: "open", needs: [], paths: "src/tui/**" });
+        file(s, { seq: 4, title: "Verify the responsive UI", status: "open", needs: [], paths: "frontend/**", requires: "browser" });
+        log(s, "created", 1, "Design the storage schema");
+        log(s, "created", 2, "Port the repository layer — waits for #1");
+        log(s, "created", 3, "Rewrite the renderer");
+        log(s, "created", 4, "Verify the responsive UI — requires browser");
+      }
+    },
+    {
+      title: "The queue announces what became claimable",
+      note: "hird's one push: for each task that just became workable it runs the " +
+            "dispatch hook, detached, with the announcement in the environment. " +
+            "#2 gets no announcement — it is blocked, and a blocked task is not claimable.",
+      run: "The queue runs the dispatch hook once per claimable task — three of the four.",
+      calls: "<b>dispatch_hook</b> HIRD_EVENT=filed &times;3<br>#2 blocked &mdash; <span class='no'>no announcement</span>",
+      msgs: [
+        { e: "e-hook", l: "filed #1", k: "push", d: "fwd" },
+        { e: "e-hook", l: "filed #3", k: "push", d: "fwd", at: 260 },
+        { e: "e-hook", l: "filed #4", k: "push", d: "fwd", at: 520 }
+      ],
+      apply: function (s) { s.note = "hook"; }
+    },
+    {
+      title: "The relay walks the roster",
+      note: "The plugin's relay takes each announcement and prompts the first worker " +
+            "that is idle, not recused, and equipped for the task. It says go look at " +
+            "the queue — never what to work on.",
+      run: "The relay prompts one idle agent per announcement: <code>herdr agent prompt</code>.",
+      calls: "<b>herdr agent prompt</b> claude-code<br><b>herdr agent prompt</b> copilot",
+      msgs: [
+        { e: "e-ana", l: "prompt", k: "push", d: "fwd" },
+        { e: "e-ben", l: "prompt", k: "push", d: "fwd", at: 220 }
+      ],
+      marks: { cc: "woken", cp: "woken" },
+      apply: function () {}
+    },
+    {
+      title: "claude-code asks for work, and is handed some",
+      note: "The call carries a bearer token; the server maps it through the roster to " +
+            "Ana and builds the session from that. The task comes back already claimed — " +
+            "being handed it and taking it are one atomic step.",
+      run: "claude-code calls <code>task_next {}</code> and is handed #1, already claimed.",
+      calls: "&rarr; <b>task_next {}</b><br>&larr; <span class='yes'>#1 claimed by claude-code</span>",
+      msgs: [
+        { e: "e-cc", l: "task_next {}", k: "call", d: "fwd" },
+        { e: "e-cc", l: "#1 claimed", k: "back", d: "rev", at: 900 }
+      ],
+      apply: function (s) {
+        hold(s, 1, "cc");
+        log(s, "claimed", 1, "claude-code:af31");
+      }
+    },
+    {
+      title: "copilot is handed #3 — not #2, and not #4",
+      note: "#2 is blocked by #1, and #4 requires a browser copilot does not advertise. " +
+            "task_next does not queue up an unworkable task and hope: it routes around " +
+            "both and reports what it skipped.",
+      run: "copilot calls <code>task_next {}</code>; the queue skips #2 (blocked) and #4 (needs browser) and hands over #3.",
+      calls: "&rarr; <b>task_next {}</b><br>&larr; <span class='yes'>#3 claimed</span> " +
+             "<span class='no'>skipped: #2 blocked, #4 requires browser</span>",
+      msgs: [
+        { e: "e-cp", l: "task_next {}", k: "call", d: "fwd" },
+        { e: "e-cp", l: "#3 claimed", k: "back", d: "rev", at: 900 }
+      ],
+      apply: function (s) {
+        hold(s, 3, "cp");
+        log(s, "claimed", 3, "copilot:9c02");
+      }
+    },
+    {
+      title: "Two agents reach for #4 in the same instant",
+      note: "Both are equipped, both are idle, both call task_claim on the same number " +
+            "from different machines. One UPDATE … WHERE seq=4 AND status='open' " +
+            "decides it: zero rows updated means somebody else won.",
+      run: "codex and gemini claim #4 simultaneously. One SQLite compare-and-set; codex wins, gemini is refused.",
+      calls: "&rarr; <b>task_claim {seq: 4}</b> &times;2<br>" +
+             "&larr; <span class='yes'>codex: ok</span> &nbsp; " +
+             "<span class='no'>gemini: isError — held by codex</span>",
+      msgs: [
+        { e: "e-cx", l: "task_claim {4}", k: "call", d: "fwd" },
+        { e: "e-gm", l: "task_claim {4}", k: "call", d: "fwd", at: 40 },
+        { e: "e-cx", l: "ok", k: "back", d: "rev", at: 950 },
+        { e: "e-gm", l: "already held", k: "err", d: "rev", at: 990 }
+      ],
+      apply: function (s) {
+        hold(s, 4, "cx");
+        log(s, "claimed", 4, "codex:1d77 — gemini lost the race");
+      }
+    },
+    {
+      title: "Scope declared, lease renewed",
+      note: "task_scope says which files a holder will touch and answers with who else " +
+            "is in them. task_update records progress and renews the lease — which is " +
+            "also what moves a claimed task to in progress.",
+      run: "copilot declares its file scope; claude-code reports progress and renews its lease.",
+      calls: "&rarr; <b>task_scope {seq: 3, paths: [\"src/tui/**\"]}</b><br>" +
+             "&larr; <span class='yes'>nobody else is in those files</span><br>" +
+             "&rarr; <b>task_update {seq: 1}</b> &larr; <span class='yes'>in_progress</span>",
+      msgs: [
+        { e: "e-cp", l: "task_scope", k: "call", d: "fwd" },
+        { e: "e-cp", l: "clear", k: "back", d: "rev", at: 800 },
+        { e: "e-cc", l: "task_update", k: "call", d: "fwd", at: 380 },
+        { e: "e-cc", l: "in_progress", k: "back", d: "rev", at: 1180 }
+      ],
+      apply: function (s) {
+        task(s, 1).status = "in_progress";
+        log(s, "scoped", 3, "src/tui/** — no overlap");
+        log(s, "lease_renewed", 1, "claude-code:af31");
+      }
+    },
+    {
+      title: "One memory, two machines",
+      note: "A fact recorded by an agent on Ana's laptop is found by an agent in Ben's " +
+            "container, marked with whether the code behind it has moved since. The " +
+            "queue is shared; so is what the swarm has learned.",
+      run: "claude-code stores a fact with <code>mem_store</code>; gemini finds it from the other machine with <code>mem_search</code>.",
+      calls: "&rarr; <b>mem_store</b> “schema migrations are versioned in db.rs”<br>" +
+             "&rarr; <b>mem_search {q: \"schema\"}</b><br>" +
+             "&larr; <span class='yes'>1 fact — from claude-code, footing: verified</span>",
+      msgs: [
+        { e: "e-cc", l: "mem_store", k: "call", d: "fwd" },
+        { e: "e-gm", l: "mem_search", k: "call", d: "fwd", at: 480 },
+        { e: "e-gm", l: "1 fact", k: "back", d: "rev", at: 1280 }
+      ],
+      apply: function (s) {
+        log(s, "note", 1, "mem_store — schema migrations are versioned in db.rs");
+      }
+    },
+    {
+      title: "#1 finishes: #2 unblocks, and a review is filed",
+      note: "One completion causes two announcements. #2 has nothing in front of it any " +
+            "more, and the finished work is filed as a review task that names its author " +
+            "as recused — the queue will refuse it to whoever did the work.",
+      run: "claude-code completes #1. That unblocks #2 and files review #5, which recuses claude-code.",
+      calls: "&rarr; <b>task_complete {seq: 1}</b> &larr; <span class='yes'>done</span><br>" +
+             "<b>dispatch_hook</b> unblocked #2 &middot; review_filed #5<br>" +
+             "HIRD_RECUSED=<span class='no'>claude-code</span>",
+      msgs: [
+        { e: "e-cc", l: "task_complete {1}", k: "call", d: "fwd" },
+        { e: "e-cc", l: "done", k: "back", d: "rev", at: 820 },
+        { e: "e-hook", l: "unblocked #2", k: "push", d: "fwd", at: 1200 },
+        { e: "e-hook", l: "review_filed #5", k: "push", d: "fwd", at: 1460 }
+      ],
+      apply: function (s) {
+        var t = task(s, 1);
+        t.status = "done"; t.holder = null; t.under_review = 5;
+        release(s, "cc");
+        file(s, { seq: 5, title: "Review the storage schema", status: "open", needs: [], review_of: 1, recused: "claude-code" });
+        log(s, "completed", 1, "claude-code:af31 — schema in src/db.rs");
+        log(s, "created", 5, "review of #1 — recuses claude-code");
+      }
+    },
+    {
+      title: "The review never knocks on the author's door",
+      note: "claude-code is the only idle worker on Ana's machine, and the relay skips it " +
+            "anyway: the announcement named it recused. The summons goes to the other " +
+            "machine instead, where gemini has been free since it lost the race.",
+      run: "The relay skips claude-code — recused on its own work — and prompts gemini instead.",
+      calls: "relay: claude-code <span class='no'>recused</span> &middot; codex <span class='no'>busy</span><br>" +
+             "<b>herdr agent prompt</b> gemini",
+      msgs: [{ e: "e-ben", l: "prompt", k: "push", d: "fwd" }],
+      marks: { cc: "barred", gm: "woken" },
+      apply: function () {}
+    },
+    {
+      title: "gemini takes the review",
+      note: "A swarm of two people gets an independent reviewer for free: the work was " +
+            "done on Ana's laptop and is being judged from Ben's container, by an agent " +
+            "that never touched it.",
+      run: "gemini claims review #5 and reads the work it is judging.",
+      calls: "&rarr; <b>task_claim {seq: 5}</b> &larr; <span class='yes'>ok — review of #1</span>",
+      msgs: [
+        { e: "e-gm", l: "task_claim {5}", k: "call", d: "fwd" },
+        { e: "e-gm", l: "ok", k: "back", d: "rev", at: 880 }
+      ],
+      apply: function (s) {
+        hold(s, 5, "gm");
+        log(s, "claimed", 5, "gemini:44b1 — reviewing #1");
+      }
+    },
+    {
+      title: "codex finishes #4 and pulls again",
+      note: "Nothing told codex that #2 was ready. It finished what it held, called " +
+            "task_next because that is what an agent working the queue does, and the " +
+            "queue handed it the task that had unblocked four beats ago.",
+      run: "codex completes #4, calls <code>task_next</code>, and is handed the now-unblocked #2.",
+      calls: "&rarr; <b>task_complete {seq: 4}</b> &larr; <span class='yes'>done</span><br>" +
+             "&rarr; <b>task_next {}</b> &larr; <span class='yes'>#2 claimed</span>",
+      msgs: [
+        { e: "e-cx", l: "task_complete {4}", k: "call", d: "fwd" },
+        { e: "e-cx", l: "done", k: "back", d: "rev", at: 780 },
+        { e: "e-cx", l: "task_next {}", k: "call", d: "fwd", at: 1300 },
+        { e: "e-cx", l: "#2 claimed", k: "back", d: "rev", at: 2100 }
+      ],
+      apply: function (s) {
+        var t = task(s, 4);
+        t.status = "done"; t.holder = null;
+        release(s, "cx");
+        hold(s, 2, "cx");
+        log(s, "completed", 4, "codex:1d77 — verified at 3 breakpoints");
+        log(s, "claimed", 2, "codex:1d77");
+      }
+    },
+    {
+      title: "copilot goes quiet, holding #3",
+      note: "The agent stops answering mid-task. There is no daemon anywhere in this " +
+            "picture, so nothing notices: the board still says #3 is claimed, and the " +
+            "lease on it keeps running down in silence.",
+      run: "copilot dies holding #3. Nothing notices — there is no daemon to notice.",
+      calls: "<span class='no'>copilot: gone</span> &middot; #3 still claimed &middot; lease expiring",
+      marks: { cp: "gone" },
+      apply: function (s) {
+        s.agents.cp.st = "gone";
+        task(s, 3).stale = true;
+      }
+    },
+    {
+      title: "The next read is what notices",
+      note: "A lease is not enforced by a timer, it is enforced by whoever reads the " +
+            "queue next. The feed pane is a reader that never stops: it sweeps, finds the " +
+            "lapsed lease, puts #3 back on the board and announces it like any other " +
+            "claimable task.",
+      run: "The <code>hird events --follow</code> pane sweeps, the lease is found expired, and #3 goes back on the board.",
+      calls: "&larr; <b>hird events --follow</b> sweeps<br>" +
+             "<span class='no'>lease_expired #3</span> &rarr; open<br>" +
+             "<b>dispatch_hook</b> HIRD_EVENT=lease_expired",
+      msgs: [
+        { e: "e-watch", l: "sweep", k: "call", d: "rev" },
+        { e: "e-watch", l: "lease_expired #3", k: "err", d: "fwd", at: 700 },
+        { e: "e-hook", l: "lease_expired #3", k: "push", d: "fwd", at: 1300 },
+        { e: "e-ana", l: "prompt", k: "push", d: "fwd", at: 1700 }
+      ],
+      marks: { cp: "gone", cc: "woken" },
+      apply: function (s) {
+        var t = task(s, 3);
+        t.status = "open"; t.holder = null; t.stale = false;
+        s.agents.cp.st = "gone";
+        log(s, "lease_expired", 3, "copilot:9c02 went quiet — back on the board");
+      }
+    },
+    {
+      title: "claude-code picks up what was dropped",
+      note: "Not because anybody reassigned it. The task became claimable, the hook " +
+            "announced it, the relay knocked, and an idle agent asked the queue for work.",
+      run: "claude-code calls <code>task_next</code> and is handed #3, the task copilot dropped.",
+      calls: "&rarr; <b>task_next {}</b> &larr; <span class='yes'>#3 claimed by claude-code</span>",
+      msgs: [
+        { e: "e-cc", l: "task_next {}", k: "call", d: "fwd" },
+        { e: "e-cc", l: "#3 claimed", k: "back", d: "rev", at: 900 }
+      ],
+      marks: { cp: "gone" },
+      apply: function (s) {
+        hold(s, 3, "cc");
+        s.agents.cp.st = "gone";
+        log(s, "claimed", 3, "claude-code:af31 — second hand on #3");
+      }
+    },
+    {
+      title: "Where it ends",
+      note: "Two tasks done, three in hand, one agent gone and its work recovered. " +
+            "Every claim in the run was made by an agent that asked — the queue " +
+            "refused two of them and assigned none.",
+      run: "Two done, three held, one dead agent's work recovered. Nobody assigned anything.",
+      calls: "12 tools &middot; 6 statuses &middot; <span class='yes'>1 SQLite file</span>",
+      marks: { cp: "gone" },
+      apply: function (s) { s.agents.cp.st = "gone"; }
+    }
+  ];
+
+  /* --------------------------------------------------------- state replay */
+
+  var state = initial();
+
+  function buildState(n) {
+    var s = initial();
+    for (var i = 0; i <= n && i < BEATS.length; i++) BEATS[i].apply(s);
+    return s;
+  }
+
+  function blocked(s, t) {
+    if (t.status !== "open") return false;
+    for (var i = 0; i < t.needs.length; i++) {
+      var dep = task(s, t.needs[i]);
+      if (dep && dep.status !== "done") return true;
+    }
+    return false;
+  }
+
+  /* ------------------------------------------------------------ the scene */
+
+  function el(name, attrs, text) {
+    var e = document.createElementNS(SVGNS, name);
+    for (var k in attrs) if (attrs.hasOwnProperty(k)) e.setAttribute(k, attrs[k]);
+    if (text != null) e.textContent = text;
+    return e;
+  }
+  function clip(s, n) { return s.length > n ? s.slice(0, n - 1) + "…" : s; }
+
+  function renderScene(s, beat) {
+    var rows = $("board-rows");
+    rows.textContent = "";
+    for (var i = 0; i < s.tasks.length && i < 6; i++) {
+      var t = s.tasks[i];
+      var y = 292 + i * 27;
+      var cls = blocked(s, t) ? "blocked" : t.status;
+      rows.appendChild(el("rect", { x: 398, y: y - 9, width: 11, height: 11, rx: 2, class: "swatch st-" + cls }));
+      rows.appendChild(el("text", { x: 418, y: y, class: "t-row" },
+        "#" + t.seq + "  " + clip(t.title, 30)));
+      var right = "";
+      if (t.holder) right = AGENTS[t.holder].name + (t.stale ? " — quiet" : "");
+      else if (blocked(s, t)) right = "waits #" + t.needs[0];
+      else if (t.status === "done") right = "done";
+      else if (t.requires) right = "needs " + t.requires;
+      else right = "open";
+      rows.appendChild(el("text", { x: 762, y: y, class: "t-sub", "text-anchor": "end" }, right));
+    }
+    var counts = s.tasks.length ? s.tasks.length + " tasks" : "empty";
+    $("s-board").textContent = counts;
+
+    for (var key in AGENTS) {
+      if (!AGENTS.hasOwnProperty(key)) continue;
+      var a = s.agents[key], g = $("n-" + key), sub = $("s-" + key);
+      var mark = (beat && beat.marks && beat.marks[key]) || "";
+      g.setAttribute("class", "agent " + (a.st === "gone" ? "gone" : a.st === "working" ? "busy" : "") + " " + mark);
+      if (a.st === "gone") sub.textContent = "gone — was holding #" + (a.holds || 3);
+      else if (a.st === "working") sub.textContent = "working #" + a.holds;
+      else sub.textContent = "idle · " + AGENTS[key].caps;
+    }
+
+    var lit = {};
+    if (beat && beat.msgs) for (var m = 0; m < beat.msgs.length; m++) lit[beat.msgs[m].e] = true;
+    var edges = $("edges").childNodes;
+    for (var j = 0; j < edges.length; j++) {
+      var p = edges[j];
+      if (p.nodeType !== 1 || !p.id) continue;
+      var base = p.getAttribute("class").replace(" lit", "");
+      p.setAttribute("class", lit[p.id] ? base + " lit" : base);
+    }
+  }
+
+  /* ----------------------------------------------------------- the packets */
+
+  var flying = [];
+
+  function clearPackets() {
+    for (var i = 0; i < flying.length; i++) cancelAnimationFrame(flying[i]);
+    flying = [];
+    $("packets").textContent = "";
+  }
+
+  function fly(msg) {
+    var path = $(msg.e);
+    if (!path) return;
+    var len = path.getTotalLength();
+    var g = el("g", { class: "packet " + (msg.k === "back" ? "back" : msg.k === "err" ? "err" : msg.k === "push" ? "push" : "") });
+    var w = msg.l.length * 6.9 + 16;
+    g.appendChild(el("rect", { x: -w / 2, y: -11, width: w, height: 22, rx: 11 }));
+    g.appendChild(el("text", { x: 0, y: 4, "text-anchor": "middle" }, msg.l));
+    $("packets").appendChild(g);
+
+    var dur = reduce ? 1 : 820;
+    var start = null;
+    function frame(now) {
+      if (start === null) start = now;
+      var k = Math.min(1, (now - start) / dur);
+      var at = msg.d === "rev" ? (1 - k) * len : k * len;
+      var pt = path.getPointAtLength(at);
+      g.setAttribute("transform", "translate(" + pt.x + "," + pt.y + ")");
+      g.setAttribute("opacity", k < 0.12 ? (k / 0.12) : k > 0.88 ? ((1 - k) / 0.12) : 1);
+      if (k < 1) flying.push(requestAnimationFrame(frame));
+      else if (g.parentNode) g.parentNode.removeChild(g);
+    }
+    if (reduce) {
+      var mid = path.getPointAtLength(len / 2);
+      g.setAttribute("transform", "translate(" + mid.x + "," + mid.y + ")");
+      window.setTimeout(function () { if (g.parentNode) g.parentNode.removeChild(g); }, 1400);
+    } else {
+      flying.push(requestAnimationFrame(frame));
+    }
+  }
+
+  /* --------------------------------------------------------- the dashboard */
+
+  function renderDash(s, idx) {
+    var by = { open: 0, claimed: 0, in_progress: 0, done: 0 };
+    for (var i = 0; i < s.tasks.length; i++) by[s.tasks[i].status]++;
+    $("d-counts").textContent = s.tasks.length
+      ? s.tasks.length + " tasks · " + by.open + " open · " +
+        (by.claimed + by.in_progress) + " in hand · " + by.done + " done"
+      : "no tasks yet";
+    $("d-asof").textContent = "beat " + (idx + 1) + " of " + BEATS.length;
+    $("d-when").value = idx;
+    $("d-live").disabled = idx === BEATS.length - 1;
+    $("d-feedcount").textContent = s.trail.length + " events";
+
+    var feed = $("d-feed");
+    feed.textContent = "";
+    for (var f = 0; f < s.trail.length; f++) {
+      var ev = s.trail[f];
+      var li = document.createElement("li");
+      var k = document.createElement("span");
+      k.className = "k " + ev.kind;
+      k.textContent = ev.kind.replace(/_/g, " ");
+      var b = document.createElement("b");
+      b.textContent = " #" + ev.seq + " ";
+      li.appendChild(k); li.appendChild(b);
+      li.appendChild(document.createTextNode(ev.text));
+      feed.appendChild(li);
+    }
+    feed.scrollTop = feed.scrollHeight;
+
+    /* the graph: columns are dependency depth, exactly as `hird web` lays it out */
+    var g = $("d-graph");
+    g.textContent = "";
+    if (!s.tasks.length) {
+      g.setAttribute("viewBox", "0 0 660 120");
+      g.appendChild(el("text", { x: 20, y: 60, class: "gcol" }, "NOTHING FILED YET"));
+      return;
+    }
+    var depth = {}, cols = [];
+    function d(t) {
+      if (depth[t.seq] != null) return depth[t.seq];
+      var best = 0;
+      var refs = t.needs.concat(t.review_of ? [t.review_of] : []);
+      for (var n = 0; n < refs.length; n++) {
+        var dep = task(s, refs[n]);
+        if (dep) best = Math.max(best, d(dep) + 1);
+      }
+      return (depth[t.seq] = best);
+    }
+    for (var q = 0; q < s.tasks.length; q++) {
+      var t = s.tasks[q], c = d(t);
+      (cols[c] = cols[c] || []).push(t);
+    }
+    var W = 156, H = 50, GX = 58, GY = 16, PAD = 14, TOP = 30;
+    var maxRows = 1;
+    for (var c2 = 0; c2 < cols.length; c2++) maxRows = Math.max(maxRows, cols[c2].length);
+    var vw = PAD * 2 + cols.length * W + (cols.length - 1) * GX;
+    var vh = TOP + maxRows * (H + GY);
+    g.setAttribute("viewBox", "0 0 " + vw + " " + vh);
+
+    var pos = {};
+    for (var ci = 0; ci < cols.length; ci++) {
+      var x = PAD + ci * (W + GX);
+      g.appendChild(el("text", { x: x, y: 18, class: "gcol" },
+        ci === 0 ? "READY" : "AFTER " + ci));
+      for (var ri = 0; ri < cols[ci].length; ri++) {
+        var y2 = TOP + ri * (H + GY);
+        pos[cols[ci][ri].seq] = { x: x, y: y2 };
+      }
+    }
+    for (var e2 = 0; e2 < s.tasks.length; e2++) {
+      var tk = s.tasks[e2], to = pos[tk.seq];
+      var refs2 = tk.needs.concat(tk.review_of ? [tk.review_of] : []);
+      for (var r2 = 0; r2 < refs2.length; r2++) {
+        var from = pos[refs2[r2]];
+        if (!from) continue;
+        var x1 = from.x + W, y1 = from.y + H / 2, x2 = to.x, y3 = to.y + H / 2;
+        var mid = (x1 + x2) / 2;
+        var line = el("path", {
+          class: "gedge",
+          d: "M" + x1 + "," + y1 + " C" + mid + "," + y1 + " " + mid + "," + y3 + " " + x2 + "," + y3
+        });
+        if (tk.review_of === refs2[r2]) line.setAttribute("stroke-dasharray", "4 3");
+        g.appendChild(line);
+      }
+    }
+    for (var n2 = 0; n2 < s.tasks.length; n2++) {
+      var t2 = s.tasks[n2], p2 = pos[t2.seq];
+      var node = el("g", { class: "gnode" });
+      var cls2 = blocked(s, t2) ? "blocked" : t2.status;
+      node.appendChild(el("rect", { x: p2.x, y: p2.y, width: W, height: H, rx: 6, class: "st-" + cls2 }));
+      node.appendChild(el("text", { x: p2.x + 10, y: p2.y + 17, class: "seq" }, "#" + t2.seq));
+      node.appendChild(el("text", { x: p2.x + 34, y: p2.y + 17, class: "ttl" }, clip(t2.title, 21)));
+      var line2 = t2.holder ? AGENTS[t2.holder].name
+        : t2.under_review ? "under review #" + t2.under_review
+        : blocked(s, t2) ? "waits #" + t2.needs[0]
+        : t2.review_of ? "review of #" + t2.review_of
+        : t2.status;
+      node.appendChild(el("text", { x: p2.x + 10, y: p2.y + 37, class: "who" }, line2));
+      g.appendChild(node);
+    }
+  }
+
+  /* -------------------------------------------------------------- the run list */
+
+  function renderRunList() {
+    var ol = $("run-list");
+    ol.textContent = "";
+    for (var i = 0; i < BEATS.length; i++) {
+      (function (i) {
+        var li = document.createElement("li");
+        var btn = document.createElement("button");
+        btn.type = "button";
+        var strong = document.createElement("strong");
+        strong.textContent = BEATS[i].title;
+        var span = document.createElement("span");
+        span.innerHTML = BEATS[i].run;
+        btn.appendChild(strong); btn.appendChild(span);
+        btn.addEventListener("click", function () {
+          pause();
+          jump(i, true);
+          $("the-film").scrollIntoView({ block: "center", behavior: reduce ? "auto" : "smooth" });
+        });
+        li.appendChild(btn);
+        ol.appendChild(li);
+      })(i);
+    }
+  }
+
+  function markRun(idx) {
+    var items = $("run-list").childNodes;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].nodeType !== 1) continue;
+      items[i].className = i === idx ? "here" : "";
+    }
+  }
+
+  /* ------------------------------------------------------------- the player */
+
+  var idx = 0, playing = false, timer = null, speed = 1, visible = true;
+  var BEAT_MS = 3600;
+
+  function render(beat) {
+    renderScene(state, beat);
+    renderDash(state, idx);
+    $("beat-title").textContent = BEATS[idx].title;
+    $("beat-note").textContent = BEATS[idx].note;
+    $("beat-calls").innerHTML = BEATS[idx].calls;
+    $("beatno").textContent = "beat " + (idx + 1) + " / " + BEATS.length;
+    markRun(idx);
+    $("dash").className = "dash" + (playing ? "" : " paused");
+    $("play").textContent = playing ? "Pause" : "Play";
+    $("prev").disabled = idx === 0;
+    $("next").disabled = idx === BEATS.length - 1;
+  }
+
+  function jump(n, animate) {
+    idx = Math.max(0, Math.min(BEATS.length - 1, n));
+    state = buildState(idx);
+    clearPackets();
+    render(BEATS[idx]);
+    if (animate && BEATS[idx].msgs) {
+      var msgs = BEATS[idx].msgs;
+      for (var i = 0; i < msgs.length; i++) {
+        (function (m) {
+          window.setTimeout(function () { fly(m); }, (m.at || 0) / speed);
+        })(msgs[i]);
+      }
+    }
+    schedule();
+  }
+
+  function schedule() {
+    window.clearTimeout(timer);
+    if (!playing || !visible) return;
+    if (idx >= BEATS.length - 1) { playing = false; render(BEATS[idx]); return; }
+    var extra = BEATS[idx].msgs ? Math.max.apply(null, BEATS[idx].msgs.map(function (m) { return m.at || 0; })) : 0;
+    timer = window.setTimeout(function () { jump(idx + 1, true); }, (BEAT_MS + extra) / speed);
+  }
+
+  function play() {
+    if (idx >= BEATS.length - 1) { playing = true; jump(0, true); return; }
+    playing = true; render(BEATS[idx]); schedule();
+  }
+  function pause() { playing = false; window.clearTimeout(timer); render(BEATS[idx]); }
+
+  $("play").addEventListener("click", function () { playing ? pause() : play(); });
+  $("prev").addEventListener("click", function () { pause(); jump(idx - 1, true); });
+  $("next").addEventListener("click", function () { pause(); jump(idx + 1, true); });
+  $("restart").addEventListener("click", function () { playing = true; jump(0, true); });
+  $("speed").addEventListener("change", function () { speed = parseFloat(this.value) || 1; schedule(); });
+  // Read the handle before pausing: pause() re-renders, and the re-render puts
+  // the slider back where the film is — which would be reading our own answer.
+  $("d-when").addEventListener("input", function () {
+    var to = parseInt(this.value, 10);
+    pause();
+    jump(to, false);
+  });
+  $("d-live").addEventListener("click", function () { pause(); jump(BEATS.length - 1, false); });
+
+  $("d-when").max = BEATS.length - 1;
+  renderRunList();
+  jump(0, false);
+
+  /* Play while the film is on screen, and only then — a page that animates in
+     a tab nobody is looking at is a page burning somebody's battery. */
+  if ("IntersectionObserver" in window && !reduce) {
+    var started = false;
+    var io = new IntersectionObserver(function (entries) {
+      var on = entries[0].isIntersecting;
+      visible = on;
+      if (on && !started) { started = true; playing = true; jump(0, true); }
+      else if (on) schedule();
+      else window.clearTimeout(timer);
+    }, { threshold: 0.25 });
+    io.observe($("the-film"));
+  }
+})();
+</script>
+</body>
+</html>
