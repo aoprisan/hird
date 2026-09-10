@@ -66,10 +66,14 @@
   .film button.go { background: var(--accent); border-color: var(--accent); color: var(--bg-raised); font-weight: 500; padding: 0.25rem 0.9rem; min-width: 5.5rem; }
   .film .spacer { flex: 1 1 auto; }
   .film .clock { font-family: var(--mono); font-size: 0.75rem; color: var(--ink-faint); }
-  /* The scene is a diagram: below the width where its labels stay readable it
-     pans inside its own box rather than shrinking the type into nothing. */
+  /* The scene is a diagram. It fits the column on a desktop; once the page has
+     folded to one narrow column it stops shrinking and pans inside its own box
+     instead, so the labels stay readable rather than dissolving. */
   .film .stage { padding: 0.5rem 0.75rem 0; overflow-x: auto; }
-  .film svg#scene { display: block; width: 100%; min-width: 56rem; height: auto; }
+  .film svg#scene { display: block; width: 100%; height: auto; }
+  @media (max-width: 48rem) {
+    .film svg#scene { min-width: 46rem; }
+  }
 
   /* the caption under the scene: what this beat is, and the calls it made */
   .caption {
