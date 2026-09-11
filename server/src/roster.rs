@@ -10,10 +10,18 @@
 //! The queue records what happened; who is allowed to make things happen is a
 //! different kind of fact, and keeping it outside means a compromised queue
 //! cannot grant access to itself.
+//!
+//! Capability labels are per worker, and a worker may inherit a set from the
+//! harness it pins: `[harness.opencode]` says what every pinned OpenCode
+//! worker starts with, and the worker's own `capabilities` add to it. Only a
+//! *pinned* harness reaches that table. The name a client gives itself never
+//! does, because a label is something a human grants (§25) and a client's name
+//! for itself is the one thing the design lets a client be wrong about (§29).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use hird::{capability, identity};
 use serde::Deserialize;
 
 /// A parsed roster: every token that may connect, and what it connects as.
@@ -33,7 +41,8 @@ pub struct Worker {
     /// The project this token's calls scope to. Required: the server's working
     /// directory is the server's, and a caller's checkout is somewhere else.
     pub project: String,
-    /// Capability labels this token may claim against.
+    /// Capability labels this token may claim against: the pinned harness's
+    /// defaults and the worker's own, normalized, sorted and deduplicated.
     pub capabilities: Vec<String>,
 }
 
@@ -42,8 +51,18 @@ pub struct Worker {
 struct RosterFile {
     /// Project for workers that do not name their own.
     project: Option<String>,
+    /// Defaults per harness type, keyed by the name a worker pins.
+    #[serde(default, rename = "harness")]
+    harnesses: BTreeMap<String, HarnessFile>,
     #[serde(default, rename = "worker")]
     workers: Vec<WorkerFile>,
+}
+
+/// What every worker pinned to one harness type starts with.
+#[derive(Debug, Deserialize)]
+struct HarnessFile {
+    #[serde(default)]
+    capabilities: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -65,9 +84,24 @@ impl Roster {
     }
 
     /// Parse a roster, refusing the mistakes that would quietly mis-attribute
-    /// work: a duplicated token, a missing project, an empty credential.
+    /// work: a duplicated token, a missing project, an empty credential, a
+    /// capability label the session would refuse, a harness table nobody pins.
     pub fn parse(text: &str) -> anyhow::Result<Roster> {
         let file: RosterFile = toml::from_str(text)?;
+        let mut defaults = BTreeMap::new();
+        for (raw, harness) in file.harnesses {
+            let Some(name) = identity::harness_name(&raw) else {
+                anyhow::bail!("a [harness] table is named {raw:?}, which no worker could pin");
+            };
+            let capabilities = capability::normalize_all(&harness.capabilities)
+                .map_err(|e| anyhow::anyhow!("[harness.{name}]: {e}"))?;
+            if defaults.insert(name.clone(), capabilities).is_some() {
+                anyhow::bail!(
+                    "two [harness] tables both name {name:?} once the name is normalized;                      keep one"
+                );
+            }
+        }
+        let mut pinned = BTreeSet::new();
         let mut workers = BTreeMap::new();
         for worker in file.workers {
             let token = worker.token.trim().to_string();
@@ -95,11 +129,31 @@ impl Roster {
                          a server cannot guess one from its own working directory"
                     )
                 })?;
+            let harness = match worker.harness {
+                Some(raw) => match identity::harness_name(&raw) {
+                    Some(name) => Some(name),
+                    None => anyhow::bail!(
+                        "worker {identity:?} pins harness {raw:?}, which is not a usable name"
+                    ),
+                },
+                None => None,
+            };
+            let inherited = harness
+                .as_ref()
+                .and_then(|name| defaults.get(name))
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            if let Some(name) = &harness {
+                pinned.insert(name.clone());
+            }
+            let capabilities =
+                capability::normalize_all(inherited.iter().chain(worker.capabilities.iter()))
+                    .map_err(|e| anyhow::anyhow!("worker {identity:?}: {e}"))?;
             let entry = Worker {
                 identity: identity.clone(),
-                harness: worker.harness.map(|h| h.trim().to_string()),
+                harness,
                 project,
-                capabilities: worker.capabilities,
+                capabilities,
             };
             if workers.insert(token, entry).is_some() {
                 anyhow::bail!(
@@ -110,6 +164,13 @@ impl Roster {
         }
         if workers.is_empty() {
             anyhow::bail!("the roster names no workers, so nobody could connect");
+        }
+        if let Some(unused) = defaults.keys().find(|name| !pinned.contains(*name)) {
+            anyhow::bail!(
+                "[harness.{unused}] grants capabilities, but no worker pins harness {unused:?}; \
+                 a client naming itself {unused:?} would not inherit them, so either pin a \
+                 worker to it or remove the table"
+            );
         }
         Ok(Roster { workers })
     }
@@ -208,5 +269,114 @@ identity = "ana"
     fn an_empty_roster_is_refused() {
         let err = Roster::parse("").unwrap_err().to_string();
         assert!(err.contains("names no workers"), "{err}");
+    }
+
+    #[test]
+    fn capability_labels_are_normalized_at_parse_time() {
+        let text = OK.replace(r#"["browser"]"#, r#"[" Browser ", "linux", "browser"]"#);
+        let roster = Roster::parse(&text).unwrap();
+        let ana = roster.worker("aaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        assert_eq!(ana.capabilities, ["browser", "linux"]);
+    }
+
+    /// A label the session would refuse is refused when the server starts,
+    /// not when that one worker happens to connect.
+    #[test]
+    fn a_bad_capability_label_is_refused_at_parse_time() {
+        let text = OK.replace(r#"["browser"]"#, r#"["has space"]"#);
+        let err = Roster::parse(&text).unwrap_err().to_string();
+        assert!(err.contains("\"ana\""), "{err}");
+        assert!(err.contains("unsupported character"), "{err}");
+    }
+
+    const WITH_DEFAULTS: &str = r#"
+project = "/srv/acme"
+
+[harness.opencode]
+capabilities = ["browser", "linux"]
+
+[harness.pi]
+capabilities = ["linux"]
+
+[[worker]]
+token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+identity = "ana"
+harness = "opencode"
+capabilities = ["macos"]
+
+[[worker]]
+token = "bbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+identity = "ana"
+harness = "pi"
+
+[[worker]]
+token = "cccccccccccccccccccccccccccc"
+identity = "ben"
+capabilities = ["gpu"]
+"#;
+
+    #[test]
+    fn a_pinned_worker_inherits_its_harness_defaults_and_keeps_its_own() {
+        let roster = Roster::parse(WITH_DEFAULTS).unwrap();
+        let opencode = roster.worker("aaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        assert_eq!(opencode.harness.as_deref(), Some("opencode"));
+        assert_eq!(opencode.capabilities, ["browser", "linux", "macos"]);
+        let pi = roster.worker("bbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap();
+        assert_eq!(pi.capabilities, ["linux"], "defaults alone, nothing added");
+    }
+
+    /// The whole safety argument in one rule: the table is reached by the
+    /// harness the operator pinned, never by the name a client gives itself.
+    #[test]
+    fn an_unpinned_worker_inherits_nothing_whatever_a_client_says() {
+        let roster = Roster::parse(WITH_DEFAULTS).unwrap();
+        let ben = roster.worker("cccccccccccccccccccccccccccc").unwrap();
+        assert_eq!(ben.harness, None);
+        assert_eq!(ben.capabilities, ["gpu"]);
+    }
+
+    /// The pin and the table key are matched the way the identity records
+    /// them, so a stray space or separator does not make the two miss.
+    #[test]
+    fn a_pin_and_a_table_match_after_the_identity_normalization() {
+        let text = WITH_DEFAULTS.replace(r#"harness = "opencode""#, r#"harness = " open:code ""#);
+        let roster = Roster::parse(&text).unwrap();
+        let ana = roster.worker("aaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        assert_eq!(ana.harness.as_deref(), Some("opencode"));
+        assert_eq!(ana.capabilities, ["browser", "linux", "macos"]);
+    }
+
+    #[test]
+    fn a_harness_table_nobody_pins_is_refused_rather_than_ignored() {
+        let text = WITH_DEFAULTS.replace(r#"harness = "pi""#, "");
+        let err = Roster::parse(&text).unwrap_err().to_string();
+        assert!(err.contains("[harness.pi]"), "{err}");
+        assert!(err.contains("no worker pins"), "{err}");
+    }
+
+    #[test]
+    fn a_bad_label_in_a_harness_table_names_the_table() {
+        let text = WITH_DEFAULTS.replace(r#"["linux"]"#, r#"["no,commas"]"#);
+        let err = Roster::parse(&text).unwrap_err().to_string();
+        assert!(err.contains("[harness.pi]"), "{err}");
+    }
+
+    /// The example every operator starts from must be one the parser accepts.
+    #[test]
+    fn the_shipped_example_roster_parses() {
+        let text = include_str!("../../examples/roster.toml");
+        let roster = Roster::parse(text).unwrap();
+        let ana_opencode = roster
+            .worker("REPLACE-ME-with-a-third-32-random-bytes")
+            .unwrap();
+        assert_eq!(ana_opencode.harness.as_deref(), Some("opencode"));
+        assert_eq!(ana_opencode.capabilities, ["browser", "linux"]);
+    }
+
+    #[test]
+    fn a_pin_that_sanitizes_to_nothing_is_refused() {
+        let text = OK.replace(r#"harness = "codex""#, r#"harness = " : ""#);
+        let err = Roster::parse(&text).unwrap_err().to_string();
+        assert!(err.contains("not a usable name"), "{err}");
     }
 }
