@@ -1591,6 +1591,29 @@ task 1 is claimed by ana/claude-code:z55d
 which §29 allows and which the roster overrides when you set `harness`. There is
 no path from a connection to a name it was not given.
 
+Capabilities are per token, so one person running two harnesses with different
+equipment gets two tokens, each pinned to its harness. When several workers of
+one harness type share the same labels, say them once in a `[harness.<name>]`
+table; a worker that pins that harness inherits them and adds its own:
+
+```toml
+[harness.opencode]
+capabilities = ["browser", "linux"]
+
+[[worker]]
+token = "…"
+identity = "ana"
+harness = "opencode"          # starts with browser, linux
+capabilities = ["macos"]      # and adds macos
+```
+
+Only a *pinned* harness reaches that table. A worker without `harness` inherits
+nothing, whatever its client later calls itself, because a capability is
+something a human grants and the client's name for itself is the one thing it
+is allowed to be wrong about. A table no worker pins is refused at start-up, as
+is a label the session would refuse, so mistakes in the roster fail when the
+server starts rather than when one worker connects.
+
 Two things this does not do, on purpose. It **terminates no TLS** — put a
 reverse proxy in front, because a bearer token on a plain connection is a token
 you have handed out. And it **issues no tokens and has no accounts**: the roster

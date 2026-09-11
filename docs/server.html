@@ -414,9 +414,20 @@ capabilities = [<span class="s">"linux"</span>]</code></pre>
 <p>
   Parsing refuses the mistakes that would quietly mis-attribute work rather than
   accepting them: a duplicated token — two people the queue could not tell apart
-  — a missing project, a token under 24&nbsp;characters, an empty roster. Each
-  entry becomes its own MCP service at start-up, so by the time a request
-  arrives there is nothing left to decide but which service to hand it to.
+  — a missing project, a token under 24&nbsp;characters, an empty roster, a
+  capability label the session would refuse. Each entry becomes its own MCP
+  service at start-up, so by the time a request arrives there is nothing left
+  to decide but which service to hand it to.
+</p>
+
+<p>
+  Capabilities are per token, and a worker that pins a harness may inherit a
+  set from a <code>[harness.&lt;name&gt;]</code> table — <code>[harness.opencode]</code>
+  says what every pinned OpenCode worker starts with, and the worker's own
+  labels add to it. Only the harness the <em>operator</em> pinned reaches that
+  table; the name a client gives itself never does, because a label is
+  something a human grants and the client's name for itself is the one thing
+  it is allowed to be wrong about.
 </p>
 
 <div class="note">

@@ -238,6 +238,17 @@ fn sanitize(raw: &str) -> String {
         .collect()
 }
 
+/// The harness name an [`AgentId`] would carry for `raw`, or `None` if nothing
+/// usable survives sanitizing.
+///
+/// Public so that a configuration naming harnesses — the server's roster,
+/// which pins one per worker and keys defaults on the same names — matches
+/// them the way the identity will record them, rather than by the spelling
+/// the operator happened to type.
+pub fn harness_name(raw: &str) -> Option<String> {
+    clamp(raw, HARNESS_MAX)
+}
+
 /// Sanitize `raw` and cut it to `max` characters, or `None` if nothing usable
 /// survives. Shared by the harness and the principal, which have the same
 /// shape and the same reason for a limit.

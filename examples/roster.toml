@@ -16,6 +16,15 @@
 # directory, because the caller's checkout is on another machine.
 project = "/srv/acme"
 
+# What every worker pinned to a harness type starts with. A worker's own
+# `capabilities` add to these; they never subtract. Only a worker that pins
+# `harness` inherits — the name a client gives itself never reaches this
+# table, because a label is something a human grants and a client's name for
+# itself is the one thing it is allowed to be wrong about. A table no worker
+# pins is refused, so a typo here fails at start-up rather than quietly.
+[harness.opencode]
+capabilities = ["browser"]
+
 [[worker]]
 # Generate with `openssl rand -hex 32`. Refused under 24 characters: this is
 # the only thing between a stranger and the queue.
@@ -32,3 +41,13 @@ harness = "codex"
 capabilities = ["linux"]
 # A worker may file into a different project from the default.
 # project = "/srv/other"
+
+# One person, two harnesses, two tokens: the actor is `ana/opencode:…` on
+# this one and `ana/claude-code:…` on the first, so recusal — which bars by
+# harness — can tell them apart. Pinned to opencode, so it starts with
+# `browser` from the table above and adds `linux` of its own.
+[[worker]]
+token = "REPLACE-ME-with-a-third-32-random-bytes"
+identity = "ana"
+harness = "opencode"
+capabilities = ["linux"]

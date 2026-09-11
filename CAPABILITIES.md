@@ -177,14 +177,15 @@ both kinds are legitimate. The merge rule above (type defaults ∪ worker's own)
 is what keeps machine labels per worker while letting harness labels be said
 once.
 
-## Recommendation
+## Recommendation, and what was done
 
-1. **Now:** document the per-(person, harness) token pattern in
-   `examples/roster.toml` and the README; it is the feature, and it is
+1. **Done:** the per-(person, harness) token pattern is documented in
+   `examples/roster.toml` and the README; it is the feature, and it was
    invisible.
-2. **Build:** the `[harness.<name>]` defaults table, union semantics, applied
-   to pinned workers only; and validate roster capability labels at parse
-   time, in the same change.
+2. **Done:** the `[harness.<name>]` defaults table in `server/src/roster.rs`,
+   union semantics, applied to pinned workers only; roster capability labels
+   are validated at parse time; a table no worker pins is refused. DESIGN §31
+   records the reasoning.
 3. **Do not build:** capabilities keyed on `clientInfo.name`. If a single
    token that spans harnesses turns out to be a real need, the per-token named
    sets variant is the bounded form, and it should come with its own §-entry

@@ -2248,6 +2248,32 @@ calls itself. That is §29's rule holding at a distance: a client may name its
 harness, because being wrong there costs a badge, and may never name the
 person. The roster is where an operator can take the first half back too.
 
+### Capabilities per harness type, keyed on the pin and never on the name
+
+Capabilities are per token, which already gives one person two label sets on
+two harnesses: two tokens, each pinned. What that leaves is repetition — every
+OpenCode worker typing the same three labels — and a `[harness.<name>]` table
+of defaults removes it. A worker that pins that harness starts with the
+table's labels and its own `capabilities` add to them. Union, never override:
+a worker that should have fewer labels than its type pins a different type.
+
+The rule that makes this safe is the one that decides what the table is keyed
+on. §25 says no agent may overstate its own environment; §29 says a client may
+name its own harness because nothing valuable hangs on the name. Keying
+capabilities on the client's name would put something valuable on it — a
+session wanting `browser` would call itself `opencode` — so the table is
+reached only by the harness the *operator* pinned. An unpinned worker
+inherits nothing, whatever its client says on the first call. The pin and the
+table key are both matched after the normalization `AgentId` applies, so they
+miss only when they are actually different names.
+
+Two more refusals join the parser's list. A table no worker pins is refused,
+because the likeliest cause is a typo in one of the two names and the
+symptom of accepting it would be tasks quietly marked `incompatible`. And a
+capability label the session would refuse is now refused at parse rather than
+at the moment that one worker connects — which was true of every roster label
+before this, and should not have been.
+
 ### What it deliberately does not do
 
 - **No TLS.** It speaks plain HTTP and says so; a reverse proxy terminates.
