@@ -105,6 +105,16 @@ remote working tree, so a shared queue serves every session with the witness,
 footing and exhibit dark, and should say so by turning them off rather than
 reporting about the server's own directory.
 
+**A classifier at the hooks, not in the binary.** [TYPESAFE.md](TYPESAFE.md)
+assesses putting TypeSafe AI's System One API — typed `Choice`/`Score`/`Noul`
+questions over a JSON state, now with a Rust client — anywhere in hird, and
+finds every use inside the binary lands on the HTTP gate, on local-first or
+on the *Never* list below. What it does find is that the dispatch hook is
+the one place hird's design already hands routing to the user's command, so
+a classifier that breaks ties among the workers recusal and capabilities
+leave standing is legitimate there, outside this repository. The only
+change to hird it asks for is a `--json` on `hird show`.
+
 **Semantic search for memory.** FTS5 finds facts by the words they use;
 recall finds them by the files they touch. Neither finds "the loader ignores
 the config file" when you search for "precedence". Local embeddings could,
