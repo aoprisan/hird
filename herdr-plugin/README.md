@@ -11,7 +11,8 @@ claimable. herdr is a thing that can address an idle agent. The pairing is
 already in hird's docs as two lines of shell; this plugin is that pairing
 packaged, with the part the two lines leave out: routing that survives a
 missing agent, and a summons that never knocks on a recused or unequipped
-door.
+door — and, optionally, one that knocks on the door the task actually
+suits.
 
 ## Install
 
@@ -132,6 +133,82 @@ roster the relay falls back to the same two workers with no special
 capabilities, so ordinary tasks still route while capability-bound work waits
 for an explicit roster entry.
 
+## Routing by fit
+
+The roster is an order you wrote once. It cannot know that this task is a
+sprawling refactor and that one a rename, which is the whole of "choose the
+best tool for the job" — and hird will not choose for you. It is explicit
+about that: the queue knows what a task *requires* and what a caller
+*advertises*, but it has no roster and picks nobody. Fit is a judgement, and
+judgements live out here in the hook.
+
+So ask a classifier. [`jev`](https://crates.io/crates/jev-repl) sends the
+task to TypeSafe AI's System One as a `choice` over your harness names and
+reads back one label with a confidence:
+
+```sh
+cargo install jev-repl
+cp route.jev "$(herdr plugin config-dir hird)/route.jev"   # route.jev ships next to dispatch.sh
+```
+
+Then edit the labels in that copy to your own harness names — the ones in the
+roster's third column — and write what each agent is actually good at. That
+text *is* the rubric; it is all the model reads about your agents.
+
+```text
+harness: Which harness is the better tool for this particular task
+  claude-code = Ambiguous briefs, architectural decisions, sprawling multi-file changes
+  codex = A clear spec carried out exactly: mechanical edits, test writing, a rename
+  copilot = Small local fixes in code somebody already has open
+```
+
+From then on every announcement asks the page which harness fits, and the
+roster is walked twice: that harness first, then everybody. Which is the
+point worth being precise about.
+
+**An opinion is a preference, never a permission.** The answer only reorders
+the roster. Every worker it reaches still has to clear the same three bars —
+not recused, equipped, not busy — and the unfiltered walk follows immediately
+after, so a routing answer can move a worker up and can never rule one out.
+A review recused from `claude-code` does not go to `claude-code` because a
+model liked the idea; it goes to whoever may actually take it. The queue then
+checks the hard facts a third time, atomically, when that agent claims.
+
+**Every way it can go wrong ends in your roster order.** No page, no `jev` on
+`PATH`, no API key, a call that times out, an answer below the confidence bar,
+an answer this cannot parse: all of them are silence, and silence is the relay
+exactly as it behaved before the page existed. Routing is an upgrade over the
+walk, never a gate in front of it.
+
+Four knobs, all optional, all baked into the hook line by `wire`:
+
+| Variable | Default | What it does |
+|---|---|---|
+| `HIRD_JEV_PAGE` | `<config-dir>/route.jev` | The page. Missing is the off switch — `wire` names the path whether or not the file is there, so putting one in later needs no re-wiring. |
+| `HIRD_JEV_CONFIDENCE` | `0.6` | The bar an answer must clear to be heard at all. |
+| `HIRD_JEV_TIMEOUT` | `10` | Seconds one live call may take. |
+| `HIRD_JEV_BIN` | `jev` | Where the binary is, if not on `PATH`. |
+
+Two things to know before leaning on it:
+
+- **The key has to be where the announcement is made.** hird spawns the hook
+  from whichever process announced — an agent's `hird mcp` session, a `hird
+  add` in your shell, a `hird events --follow` that swept an expired lease —
+  so the hook inherits *that* environment. `TYPESAFE_API_KEY` belongs in a
+  shell profile all of them read. Without it `jev` would simulate its
+  answers, and a simulated answer is a coin that lands in the roster order
+  looking exactly like a judgement, so the call is not made at all.
+- **Calibrate before you trust it, and price it first.** Every claimable
+  event is one call: `filed`, `unblocked`, `review_filed`, `sent_back`,
+  `released`, `reopened`, `answered`, `lease_expired`. `jev cost route.jev
+  --price <in>/<out>` says what that costs per announcement, and `jev eval
+  route.jev --cases routed.jsonl` over thirty tasks you have already routed
+  by hand says whether `0.6` is the right bar or whether most answers should
+  be falling through to the order you wrote.
+
+If you wired the hook before this existed, reopen the `wire` pane once: the
+hook line is what carries the page's path.
+
 ## Undo
 
 ```sh
@@ -148,9 +225,11 @@ default.
 
 The usual [herdr plugin guidance](https://herdr.dev/docs/plugins/#trust-and-security)
 applies: this is ordinary code running as your user. It is small on purpose —
-six short POSIX `sh` entry points over one shared `lib.sh`, no build step, no
-dependencies — so the read before the install is a short one. Everything the
-plugin assumes about herdr itself (what a busy worker looks like, what a
-prompt's exit status is worth, how simultaneous relays take turns) is in
-`lib.sh`, which is the file to read first. Its CI-only behavioral check lives
+six short POSIX `sh` entry points over a shared `lib.sh` and `route.sh`, no
+build step, no dependencies — so the read before the install is a short one.
+Everything the plugin assumes about herdr itself (what a busy worker looks
+like, what a prompt's exit status is worth, how simultaneous relays take
+turns) is in `lib.sh`, which is the file to read first; everything it assumes
+about `jev`, including the one call it can be made to pay for, is in
+`route.sh`, which is the file to read before copying a `route.jev`. Its CI-only behavioral check lives
 in `.github/scripts/`.

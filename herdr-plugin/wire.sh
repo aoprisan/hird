@@ -10,8 +10,11 @@
 #      is not already there. The roster is yours after that — herdr
 #      never touches plugin config again.
 #   2. Writes hird's dispatch_hook key to run dispatch.sh, with the
-#      herdr binary and the roster path baked into the hook line, so
-#      the relay needs nothing from hird's environment.
+#      herdr binary, the roster path and the routing page's path baked
+#      into the hook line, so the relay needs nothing from hird's
+#      environment. The page is named whether or not it exists, because
+#      a missing one is how routing stays off: putting route.jev there
+#      later turns it on with no re-wiring.
 #
 # It replaces a hook it wrote before (a reinstall moves the plugin
 # root), treats the shipped default `dispatch_hook = ""` as unset, and
@@ -27,6 +30,7 @@ herdr_bin=${HERDR_BIN_PATH:-herdr}
 hird_conf="${XDG_CONFIG_HOME:-$HOME/.config}/hird/config.toml"
 roster="$conf_dir/dispatch.conf"
 lock="$conf_dir/dispatch.lock"
+page="$conf_dir/route.jev"
 
 # Quote for the shell that will run the hook line (`sh -c`, from hird).
 shq() {
@@ -43,7 +47,7 @@ toml_escape() {
 # script of their own called dispatch.sh.
 marker="# wired by the hird herdr plugin"
 
-hook="HERDR_BIN=$(shq "$herdr_bin") HIRD_HERDR_ROSTER=$(shq "$roster") HIRD_HERDR_LOCK=$(shq "$lock") exec sh $(shq "$root/dispatch.sh")"
+hook="HERDR_BIN=$(shq "$herdr_bin") HIRD_HERDR_ROSTER=$(shq "$roster") HIRD_HERDR_LOCK=$(shq "$lock") HIRD_JEV_PAGE=$(shq "$page") exec sh $(shq "$root/dispatch.sh")"
 line="dispatch_hook = \"$(toml_escape "$hook")\" $marker"
 
 finish() {
@@ -166,6 +170,32 @@ echo
 echo "From here on, every task that becomes claimable — filed, unblocked,"
 echo "review filed, sent back, handed back, lease expired — prompts the"
 echo "first roster worker the queue would not refuse it to."
+echo
+
+# Routing is off until the page is there, which is why the hook can name it
+# unconditionally. Say what turning it on takes rather than turning it on: a
+# relay that started asking a paid API about every announcement because
+# somebody opened a setup pane would be a surprise, and the wrong kind.
+if [ -f "$page" ]; then
+    echo "Routing is on: $page"
+    echo
+    echo "Each announcement asks jev which harness fits the task, and that"
+    echo "harness gets first refusal — among workers the queue would allow"
+    echo "anyway. A live answer also needs TYPESAFE_API_KEY set wherever your"
+    echo "agents and your shell run, since the hook inherits the environment"
+    echo "of whatever made the announcement. Without it the roster order"
+    echo "stands, silently and on purpose."
+else
+    echo "Optional: route by fit rather than by roster order."
+    echo
+    echo "  cp $root/route.jev $page"
+    echo "  cargo install jev-repl"
+    echo
+    echo "With that file in place, each announcement asks jev which harness"
+    echo "is the better tool for the task, and that harness is tried first —"
+    echo "among workers the queue would allow anyway. Edit the labels to your"
+    echo "own harness names first; the file says how. Delete it to go back."
+fi
 echo
 echo "Try it from any shell in a project:"
 echo

@@ -61,7 +61,12 @@ agent than the one the claim would turn away — the review loop runs on a
 swarm of two without ever knocking on the wrong door. That pairing also
 ships packaged, as a herdr plugin — `herdr plugin install
 aoprisan/hird/herdr-plugin` wires the hook, keeps a worker roster, and puts
-the board and the live feed a keypress away; see
+the board and the live feed a keypress away. Recusal and capabilities say
+who may *not* take a task; which of the permitted agents is the better tool
+for it is a judgement hird does not make, and the plugin can put that one to
+a classifier — [`jev`](https://crates.io/crates/jev-repl) reads the task and
+names a harness, which then gets first refusal among the workers the queue
+would have allowed anyway. See
 [herdr-plugin/](herdr-plugin/).
 
 No daemon. No server. No accounts.

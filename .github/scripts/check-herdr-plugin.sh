@@ -5,6 +5,11 @@
 # skips occupied workers (including under simultaneous announcements), degrades
 # toward prompting rather than silence when it cannot read herdr at all, and
 # the doctor recognizes only this installed relay.
+#
+# A fake jev covers the other half of routing — the opinion about fit. What is
+# being checked there is mostly what an opinion may *not* do: outrank a
+# recusal, a capability requirement or a busy worker, or be heard at all when
+# it is unsure, unparseable, or answered by a simulator nobody asked for.
 
 set -eu
 
@@ -207,6 +212,193 @@ FAKE_HERDR_LOG="$tmp/prompts" \
 [ "$(sed -n '1p' "$tmp/prompts")" = codex ] ||
     fail "the manual summons did not skip a blocked worker"
 
+# ------------------------------------------------------------------- routing
+
+# The fake jev. It answers the one question route.sh reads and records the
+# state it was asked about, so a test can check that the relay described the
+# task rather than merely called something.
+cat >"$tmp/bin/jev" <<'EOF'
+#!/bin/sh
+set -eu
+
+state=
+while [ $# -gt 0 ]; do
+    case $1 in
+        --state)
+            state=${2:-}
+            shift 2
+            ;;
+        *) shift ;;
+    esac
+done
+printf '%s\n' "$state" >"$FAKE_JEV_STATE"
+
+# The body is `jev run --json`'s, pretty-printed and field for field —
+# including the `"type": "choice"` that a reader looking for the first
+# `choice` in the document would mistake for the answer.
+case ${FAKE_JEV_MODE:-plain} in
+    fail) exit 1 ;;
+    garbage) echo 'Service Unavailable' ;;
+    *)
+        cat <<JSON
+{
+  "model": "jev-latest",
+  "answers": {
+    "harness": {
+      "type": "choice",
+      "choice": "${FAKE_JEV_CHOICE:-codex}",
+      "probabilities": {
+        "claude-code": 0.2,
+        "codex": 0.8
+      },
+      "confidence": ${FAKE_JEV_CONFIDENCE:-0.9}
+    }
+  },
+  "usage": {
+    "input_tokens": null,
+    "output_tokens": null
+  }
+}
+JSON
+        ;;
+esac
+EOF
+chmod +x "$tmp/bin/jev"
+
+cp "$repo/herdr-plugin/route.jev" "$tmp/route.jev"
+
+jev_mode=plain
+jev_choice=codex
+jev_confidence=0.9
+jev_page="$tmp/route.jev"
+jev_mock=1
+jev_key=
+recused=
+requires=
+
+routing_defaults() {
+    jev_mode=plain
+    jev_choice=codex
+    jev_confidence=0.9
+    jev_page="$tmp/route.jev"
+    jev_mock=1
+    jev_key=
+    recused=
+    requires=
+    printf '%s\n' idle >"$tmp/state/claude"
+    printf '%s\n' idle >"$tmp/state/codex"
+    : >"$tmp/prompts"
+    : >"$tmp/jev-state"
+}
+
+# HIRD_DB names a directory that cannot exist, so route.sh's optional
+# `hird show` upgrade fails the same way on a machine with hird installed as
+# on one without, and the state it falls back to is the announcement's.
+run_routed() {
+    FAKE_HERDR_LOG="$tmp/prompts" \
+        FAKE_HERDR_STATE="$tmp/state" \
+        FAKE_HERDR_MODE=plain \
+        FAKE_JEV_STATE="$tmp/jev-state" \
+        FAKE_JEV_MODE="$jev_mode" \
+        FAKE_JEV_CHOICE="$jev_choice" \
+        FAKE_JEV_CONFIDENCE="$jev_confidence" \
+        HERDR_BIN="$tmp/bin/herdr" \
+        HIRD_HERDR_ROSTER="$tmp/dispatch.conf" \
+        HIRD_HERDR_LOCK="$tmp/dispatch.lock" \
+        HIRD_JEV_BIN="$tmp/bin/jev" \
+        HIRD_JEV_PAGE="$jev_page" \
+        HIRD_JEV_MOCK="$jev_mock" \
+        TYPESAFE_API_KEY="$jev_key" \
+        HIRD_DB="$tmp/no/such/dir/hird.db" \
+        HIRD_EVENT=filed \
+        HIRD_TASK=7 \
+        HIRD_TITLE="rename the config loader" \
+        HIRD_RECUSED="$recused" \
+        HIRD_REQUIRES="$requires" \
+        sh "$repo/herdr-plugin/dispatch.sh"
+}
+
+prompted() {
+    sed -n '1p' "$tmp/prompts"
+}
+
+# The opinion reorders the roster: codex is second and claude is idle, and
+# codex is summoned anyway because the page said this task is its kind.
+routing_defaults
+run_routed
+[ "$(prompted)" = codex ] || fail "the routing answer did not reorder the roster"
+
+# And it was asked about this task, not merely called.
+assert_contains "$(cat "$tmp/jev-state")" "rename the config loader"
+assert_contains "$(cat "$tmp/jev-state")" "task #7"
+
+# A preference is not a permission. Each of the three bars the relay already
+# had outranks the answer, and in every case the walk falls through to the
+# worker the queue would actually allow.
+routing_defaults
+recused=codex,codex-cli
+run_routed
+[ "$(prompted)" = claude ] || fail "a routing answer outranked a recusal"
+
+routing_defaults
+requires=browser,network
+run_routed
+[ "$(prompted)" = claude ] || fail "a routing answer outranked a capability requirement"
+
+routing_defaults
+printf '%s\n' working >"$tmp/state/codex"
+run_routed
+[ "$(prompted)" = claude ] || fail "a routing answer outranked a busy worker"
+
+# A name no roster line carries is not an error, just an opinion about nobody:
+# the preferred pass matches no worker and the ordinary walk follows it.
+routing_defaults
+jev_choice=aider
+run_routed
+[ "$(prompted)" = claude ] || fail "an unroutable answer did not fall through to the roster"
+
+# An unsure answer is worth less than the order a person wrote down.
+routing_defaults
+jev_confidence=0.4
+run_routed
+[ "$(prompted)" = claude ] || fail "an answer below the confidence bar was acted on"
+
+# Every way the call can go wrong ends in the roster order rather than in
+# silence: routing is an upgrade over the walk, never a gate in front of it.
+routing_defaults
+jev_mode=fail
+run_routed
+[ "$(prompted)" = claude ] || fail "a failed routing call did not fall back to the roster"
+
+routing_defaults
+jev_mode=garbage
+run_routed
+[ "$(prompted)" = claude ] || fail "an unparseable routing answer was not ignored"
+
+routing_defaults
+jev_page="$tmp/no-such-page.jev"
+run_routed
+[ "$(prompted)" = claude ] || fail "a missing page did not leave the roster order alone"
+[ ! -s "$tmp/jev-state" ] || fail "a missing page still called jev"
+
+# Without a key jev simulates its answers. A simulated answer would land in
+# the roster order looking exactly like a judgement, so the call is not made
+# at all — and the proof is that the fake was never run.
+routing_defaults
+jev_mock=
+run_routed
+[ "$(prompted)" = claude ] || fail "a keyless routing call did not fall back to the roster"
+[ ! -s "$tmp/jev-state" ] || fail "jev was asked to route with no key and no mock"
+
+# With a key it is asked again, live.
+routing_defaults
+jev_mock=
+jev_key=not-a-real-key
+run_routed
+[ "$(prompted)" = codex ] || fail "a keyed routing call was not made"
+
+routing_defaults
+
 # A similarly named user hook is not plugin wiring.
 printf '%s\n' 'dispatch_hook = "sh ~/scripts/my-dispatch.sh"' >"$tmp/xdg/hird/config.toml"
 doctor=$(PATH="$tmp/bin:$PATH" XDG_CONFIG_HOME="$tmp/xdg" \
@@ -240,5 +432,20 @@ doctor=$(PATH="$tmp/bin:$PATH" XDG_CONFIG_HOME="$tmp/xdg" \
     HERDR_PLUGIN_CONFIG_DIR="$tmp" \
     sh "$repo/herdr-plugin/doctor.sh")
 assert_contains "$doctor" "cannot check which checkout"
+
+# The routing line reports the page, and reports the ordinary case — no page —
+# as off rather than as something broken.
+doctor=$(PATH="$tmp/bin:$PATH" XDG_CONFIG_HOME="$tmp/xdg" \
+    HERDR_PLUGIN_ROOT="$repo/herdr-plugin" \
+    HERDR_PLUGIN_CONFIG_DIR="$tmp" \
+    HIRD_JEV_BIN="$tmp/bin/jev" \
+    sh "$repo/herdr-plugin/doctor.sh")
+assert_contains "$doctor" "routing: $tmp/route.jev"
+
+doctor=$(PATH="$tmp/bin:$PATH" XDG_CONFIG_HOME="$tmp/xdg" \
+    HERDR_PLUGIN_ROOT="$repo/herdr-plugin" \
+    HERDR_PLUGIN_CONFIG_DIR="$tmp/xdg" \
+    sh "$repo/herdr-plugin/doctor.sh")
+assert_contains "$doctor" "routing: off"
 
 echo "herdr plugin checks passed"

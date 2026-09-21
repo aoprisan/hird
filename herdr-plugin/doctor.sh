@@ -5,8 +5,9 @@
 #
 #   herdr plugin log list --plugin hird
 #
-# Three questions, one line each: is hird installed, is its dispatch
-# hook wired to this plugin's relay, does the roster exist.
+# Four questions, one line each: is hird installed, is its dispatch hook
+# wired to this plugin's relay, does the roster exist, and is anything
+# routing by fit on top of the roster's order.
 
 set -u
 
@@ -62,6 +63,20 @@ if [ -r "$roster" ]; then
     echo "roster: $roster ($(grep -c '^worker ' "$roster" 2>/dev/null || echo 0) workers)"
 else
     echo "roster: none yet — the relay will use its built-in claude/codex fallback"
+fi
+
+# The routing page is the off switch, so its absence is the ordinary answer
+# rather than a problem. What this cannot honestly report is the key: the
+# relay inherits its environment from whatever made the announcement, not
+# from the herdr server this runs under, so a key seen here proves nothing
+# about a key seen there. Say what turns it on and leave the claim unmade.
+page=${HIRD_JEV_PAGE:-${HERDR_PLUGIN_CONFIG_DIR:-}/route.jev}
+if [ ! -r "$page" ]; then
+    echo "routing: off — the relay walks the roster in your order (route.jev turns it on)"
+elif ! command -v "${HIRD_JEV_BIN:-jev}" >/dev/null 2>&1; then
+    echo "routing: $page, but jev is not on PATH — install it (cargo install jev-repl) or the roster order stands"
+else
+    echo "routing: $page — jev names the harness that gets first refusal (a live answer needs TYPESAFE_API_KEY where your agents run)"
 fi
 
 exit 0
