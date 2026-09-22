@@ -1,0 +1,31 @@
+A hird task has become claimable and one of several agents should take it.
+---
+# The routing page. Copy it to this plugin's config directory as route.jev
+# (the wire pane prints the path) and the relay starts asking it which
+# harness gets first refusal on each announcement. Delete it and the relay
+# goes back to walking the roster in the order you wrote.
+#
+# Three things this file has to get right:
+#
+#   - The question must be named `harness`. That is the answer route.sh
+#     reads; a page without it is an opinion the relay cannot hear.
+#   - Every label must be a harness name hird itself uses — what `hird
+#     agents` prints, and what the third column of dispatch.conf carries —
+#     because that column is what the answer is matched against. A label of
+#     `claude` where the roster says `claude-code` routes nothing.
+#   - The descriptions are the whole rubric. They are what the model reads
+#     about your agents, so write what each one is actually good at here,
+#     not what it is called.
+#
+# The state above the rule is a placeholder: the relay replaces it with the
+# task, so what is written there only matters when you are shaping the page
+# by hand (`jev run route.jev --state "..."`, or `jev` with `:open`).
+#
+# Worth doing before trusting it: label thirty tasks you have already routed
+# by hand and run `jev eval route.jev --cases routed.jsonl`. The confidence
+# table says what HIRD_JEV_CONFIDENCE buys you, which beats guessing at 0.6.
+
+harness: Which harness is the better tool for this particular task
+  claude-code = Ambiguous briefs, architectural decisions, sprawling multi-file changes, work whose shape is not yet known
+  codex = A clear spec carried out exactly: mechanical edits, test writing, a rename across a package, a single-file change
+  copilot = Small local fixes in code somebody already has open

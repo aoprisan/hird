@@ -450,6 +450,20 @@ herdr agent prompt "$worker" "hird task $HIRD_TASK is ready; work the hird queue
   the <a href="#tui">board</a> in an overlay pane.
 </p>
 
+<p>
+  The roster is an order you wrote once, and it cannot know that this task is
+  a sprawling refactor and that one a rename. hird will not choose for you —
+  it knows what a task <em>requires</em> and what a caller
+  <em>advertises</em>, but it has no roster and picks nobody. Fit is a
+  judgement, and judgements live in the hook: give the plugin a
+  <a href="https://crates.io/crates/jev-repl"><code>jev</code></a> page and
+  every announcement asks which harness suits the work, and that harness gets
+  first refusal. It is a preference and never a permission — the named
+  harness still has to be unrecused, equipped and free, the ordinary walk
+  follows immediately after, and anything that goes wrong along the way
+  leaves the order you wrote exactly as it was.
+</p>
+
 <h3 id="recess">The recess: standing the queue down</h3>
 
 <p>
