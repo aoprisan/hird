@@ -174,6 +174,28 @@ A review recused from `claude-code` does not go to `claude-code` because a
 model liked the idea; it goes to whoever may actually take it. The queue then
 checks the hard facts a third time, atomically, when that agent claims.
 
+**The question is narrowed before it is asked.** Two of those bars are facts
+about the task rather than guesses about the moment — `HIRD_RECUSED` and
+`HIRD_REQUIRES` against the roster's third and fourth columns — so the relay
+applies them to the *labels* and not only to the answer. The page that goes
+over the wire offers exactly the harnesses this task may go to. A choice
+spends its confidence on the options it is given, so leaving a recused
+harness in costs an answer that could only ever match nobody: on a review, the
+one case where the queue has already said your default order is wrong. Two
+consequences worth expecting — a label no roster line carries is cut (it
+routed nothing anyway), and when the bars leave fewer than two harnesses there
+is nothing to decide, so **no call is made at all**. On a swarm of two, that is
+every review.
+
+**Capability or rubric — they are different knobs.** Something an agent's
+environment either has or does not — a browser, credentials, an OS, a GPU — is
+a capability: hird enforces it, and work that requires it waits until an
+equipped worker claims. Something an agent is merely *better at* belongs in
+the page's description, where being wrong costs one summons. Writing
+`refactoring` as a capability to force routing swaps a preference for a
+correctness constraint, and the symptom is a task marked `incompatible`
+forever rather than one that went to the second-best agent.
+
 **Every way it can go wrong ends in your roster order.** No page, no `jev` on
 `PATH`, no API key, a call that times out, an answer below the confidence bar,
 an answer this cannot parse: all of them are silence, and silence is the relay
@@ -199,15 +221,27 @@ Two things to know before leaning on it:
   answers, and a simulated answer is a coin that lands in the roster order
   looking exactly like a judgement, so the call is not made at all.
 - **Calibrate before you trust it, and price it first.** Every claimable
-  event is one call: `filed`, `unblocked`, `review_filed`, `sent_back`,
-  `released`, `reopened`, `answered`, `lease_expired`. `jev cost route.jev
-  --price <in>/<out>` says what that costs per announcement, and `jev eval
-  route.jev --cases routed.jsonl` over thirty tasks you have already routed
-  by hand says whether `0.6` is the right bar or whether most answers should
-  be falling through to the order you wrote.
+  event that leaves two or more harnesses in the running is one call:
+  `filed`, `unblocked`, `review_filed`, `sent_back`, `released`, `reopened`,
+  `answered`, `lease_expired`. `jev cost route.jev --price <in>/<out>` says
+  what that costs per announcement, and `jev eval route.jev --cases
+  routed.jsonl` over thirty tasks you have already routed by hand says
+  whether `0.6` is the right bar or whether most answers should be falling
+  through to the order you wrote. A bar measured on the whole page is a
+  conservative one for the narrowed page actually sent: fewer labels is an
+  easier question, and its confidences run higher.
+- **The startup report says when the two files have drifted.** The page's
+  labels and the roster's third column are the same names kept in two places.
+  `herdr plugin log list --plugin hird` names a label no roster line carries
+  (an answer that routes nothing) and a roster harness the page never
+  describes (an agent that can never be preferred).
 
 If you wired the hook before this existed, reopen the `wire` pane once: the
 hook line is what carries the page's path.
+
+Why it is shaped this way — what a classifier may and may not be asked, and
+what was deliberately left unbuilt — is in
+[ROUTING.md](https://github.com/aoprisan/hird/blob/main/ROUTING.md).
 
 ## Undo
 

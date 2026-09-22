@@ -8,6 +8,14 @@
 # Four questions, one line each: is hird installed, is its dispatch hook
 # wired to this plugin's relay, does the roster exist, and is anything
 # routing by fit on top of the roster's order.
+#
+# The last one asks a fifth thing when there is a page to ask it of. The
+# page's labels and the roster's third column are two lists of the same names
+# kept in two files, and neither of the ways they drift apart says anything at
+# the time it goes wrong: a label no roster harness carries is an answer that
+# routes nothing, and a roster harness with no label is an agent the page can
+# never prefer. The relay cuts the first out of the question it asks, which is
+# correct and silent, so the saying-so belongs here.
 
 set -u
 
@@ -77,6 +85,32 @@ elif ! command -v "${HIRD_JEV_BIN:-jev}" >/dev/null 2>&1; then
     echo "routing: $page, but jev is not on PATH — install it (cargo install jev-repl) or the roster order stands"
 else
     echo "routing: $page — jev names the harness that gets first refusal (a live answer needs TYPESAFE_API_KEY where your agents run)"
+fi
+
+# The two lists, against each other. `page_labels` is route.sh's, so the names
+# read here are exactly the ones the relay narrows the question with.
+if [ -r "$page" ] && [ -r "$roster" ]; then
+    # shellcheck source=route.sh
+    . "$(dirname "$0")/route.sh"
+
+    labels=$(page_labels "$page")
+    harnesses=$(awk '$1 == "worker" && NF >= 3 { print $3 }' "$roster" |
+        tr ',' '\n' | awk 'NF && !seen[$0]++')
+
+    missing() {
+        printf '%s\n' "$1" | while read -r name; do
+            [ -n "$name" ] || continue
+            printf '%s\n' "$2" | grep -qxF -- "$name" || printf '%s, ' "$name"
+        done | sed 's/, $//'
+    }
+
+    unknown=$(missing "$labels" "$harnesses")
+    [ -n "$unknown" ] &&
+        echo "routing labels: $unknown — no roster line carries these, so an answer naming one routes nothing"
+
+    unlabelled=$(missing "$harnesses" "$labels")
+    [ -n "$unlabelled" ] &&
+        echo "roster harnesses: $unlabelled — the page describes no such label, so they can never be preferred"
 fi
 
 exit 0

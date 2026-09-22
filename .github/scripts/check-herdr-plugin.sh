@@ -9,7 +9,10 @@
 # A fake jev covers the other half of routing — the opinion about fit. What is
 # being checked there is mostly what an opinion may *not* do: outrank a
 # recusal, a capability requirement or a busy worker, or be heard at all when
-# it is unsure, unparseable, or answered by a simulator nobody asked for.
+# it is unsure, unparseable, or answered by a simulator nobody asked for. The
+# fake records the page it was handed as well as the state, so what it is not
+# asked is checked too: a harness the queue has ruled out is an absence in the
+# labels, and a question with one answer left is a call that never happened.
 
 set -eu
 
@@ -199,6 +202,24 @@ run_dispatch
     fail "a lock held by a dead owner was not reaped"
 [ ! -d "$tmp/dispatch.lock" ] || fail "the lock outlived the relay that took it"
 
+# No roster file at all. The built-in pairing is one list, read both by the
+# walk and by the narrowing that decides what the routing question is worth
+# asking over, so a recusal has to reach it from either direction.
+printf '%s\n' idle >"$tmp/state/claude"
+printf '%s\n' idle >"$tmp/state/codex"
+: >"$tmp/prompts"
+FAKE_HERDR_LOG="$tmp/prompts" \
+    FAKE_HERDR_STATE="$tmp/state" \
+    HERDR_BIN="$tmp/bin/herdr" \
+    HIRD_HERDR_LOCK="$tmp/dispatch.lock" \
+    HIRD_EVENT=filed \
+    HIRD_TASK=7 \
+    HIRD_TITLE="test the relay" \
+    HIRD_RECUSED=claude-code \
+    sh "$repo/herdr-plugin/dispatch.sh"
+[ "$(sed -n '1p' "$tmp/prompts")" = codex ] ||
+    fail "the built-in fallback roster did not route around a recusal"
+
 # The manual action obeys the same busy-worker contract as the relay. It has no
 # particular task announcement, so capability filtering does not apply.
 printf '%s\n' blocked >"$tmp/state/claude"
@@ -222,16 +243,42 @@ cat >"$tmp/bin/jev" <<'EOF'
 set -eu
 
 state=
+page=
+seen_run=
 while [ $# -gt 0 ]; do
     case $1 in
         --state)
             state=${2:-}
             shift 2
             ;;
-        *) shift ;;
+        --json | --mock)
+            shift
+            ;;
+        --*)
+            shift 2
+            ;;
+        run)
+            seen_run=1
+            shift
+            ;;
+        *)
+            [ -n "$seen_run" ] && [ -z "$page" ] && page=$1
+            shift
+            ;;
     esac
 done
 printf '%s\n' "$state" >"$FAKE_JEV_STATE"
+
+# What page it was actually handed: a path, or one on stdin. The narrowing
+# is only visible here, so a test that wants to see it reads this.
+if [ -n "${FAKE_JEV_PAGE:-}" ]; then
+    printf 'page=%s\n' "$page" >"$FAKE_JEV_PAGE"
+    if [ "$page" = - ]; then
+        cat >>"$FAKE_JEV_PAGE"
+    elif [ -r "$page" ]; then
+        cat "$page" >>"$FAKE_JEV_PAGE"
+    fi
+fi
 
 # The body is `jev run --json`'s, pretty-printed and field for field —
 # including the `"type": "choice"` that a reader looking for the first
@@ -273,6 +320,7 @@ jev_confidence=0.9
 jev_page="$tmp/route.jev"
 jev_mock=1
 jev_key=
+jev_roster="$tmp/dispatch.conf"
 recused=
 requires=
 
@@ -283,12 +331,15 @@ routing_defaults() {
     jev_page="$tmp/route.jev"
     jev_mock=1
     jev_key=
+    jev_roster="$tmp/dispatch.conf"
     recused=
     requires=
     printf '%s\n' idle >"$tmp/state/claude"
     printf '%s\n' idle >"$tmp/state/codex"
+    printf '%s\n' idle >"$tmp/state/copilot"
     : >"$tmp/prompts"
     : >"$tmp/jev-state"
+    : >"$tmp/jev-page"
 }
 
 # HIRD_DB names a directory that cannot exist, so route.sh's optional
@@ -299,11 +350,12 @@ run_routed() {
         FAKE_HERDR_STATE="$tmp/state" \
         FAKE_HERDR_MODE=plain \
         FAKE_JEV_STATE="$tmp/jev-state" \
+        FAKE_JEV_PAGE="$tmp/jev-page" \
         FAKE_JEV_MODE="$jev_mode" \
         FAKE_JEV_CHOICE="$jev_choice" \
         FAKE_JEV_CONFIDENCE="$jev_confidence" \
         HERDR_BIN="$tmp/bin/herdr" \
-        HIRD_HERDR_ROSTER="$tmp/dispatch.conf" \
+        HIRD_HERDR_ROSTER="$jev_roster" \
         HIRD_HERDR_LOCK="$tmp/dispatch.lock" \
         HIRD_JEV_BIN="$tmp/bin/jev" \
         HIRD_JEV_PAGE="$jev_page" \
@@ -332,18 +384,31 @@ run_routed
 assert_contains "$(cat "$tmp/jev-state")" "rename the config loader"
 assert_contains "$(cat "$tmp/jev-state")" "task #7"
 
+# A third harness, so the queue's bars can rule one out and still leave the
+# page something to choose between.
+cat >"$tmp/dispatch-three.conf" <<'EOF'
+worker claude claude-code browser,network
+worker codex codex,codex-cli filesystem,shell
+worker copilot copilot filesystem
+EOF
+
 # A preference is not a permission. Each of the three bars the relay already
-# had outranks the answer, and in every case the walk falls through to the
-# worker the queue would actually allow.
+# had outranks the answer — here an answer naming a harness the narrowing did
+# not even offer — and in every case the walk falls through to the worker the
+# queue would actually allow.
 routing_defaults
-recused=codex,codex-cli
+jev_roster="$tmp/dispatch-three.conf"
+recused=claude-code
+jev_choice=claude-code
 run_routed
-[ "$(prompted)" = claude ] || fail "a routing answer outranked a recusal"
+[ "$(prompted)" = codex ] || fail "a routing answer outranked a recusal"
 
 routing_defaults
-requires=browser,network
+jev_roster="$tmp/dispatch-three.conf"
+requires=filesystem
+jev_choice=claude-code
 run_routed
-[ "$(prompted)" = claude ] || fail "a routing answer outranked a capability requirement"
+[ "$(prompted)" = codex ] || fail "a routing answer outranked a capability requirement"
 
 routing_defaults
 printf '%s\n' working >"$tmp/state/codex"
@@ -397,6 +462,84 @@ jev_key=not-a-real-key
 run_routed
 [ "$(prompted)" = codex ] || fail "a keyed routing call was not made"
 
+# ------------------------------------------------- the narrowed question
+
+# Nothing the queue ruled out, nothing to cut: the page goes over as the path
+# it always was, so an unconstrained announcement is the call it always was.
+routing_defaults
+jev_roster="$tmp/dispatch-three.conf"
+run_routed
+assert_contains "$(cat "$tmp/jev-page")" "page=$tmp/route.jev"
+
+# A recused harness is not an option the page gets to offer. Left in, it takes
+# confidence that belongs to the agents that may actually take the task, to
+# buy a preferred pass that could only ever match nobody.
+routing_defaults
+jev_roster="$tmp/dispatch-three.conf"
+recused=claude-code
+run_routed
+asked=$(cat "$tmp/jev-page")
+assert_contains "$asked" "page=-"
+assert_contains "$asked" "  codex ="
+assert_contains "$asked" "  copilot ="
+case $asked in
+    *"  claude-code ="*) fail "a recused harness was offered as an answer" ;;
+esac
+
+# So is a harness this task is not equipped for.
+routing_defaults
+jev_roster="$tmp/dispatch-three.conf"
+requires=filesystem
+run_routed
+asked=$(cat "$tmp/jev-page")
+assert_contains "$asked" "page=-"
+assert_contains "$asked" "  codex ="
+case $asked in
+    *"  claude-code ="*) fail "an unequipped harness was offered as an answer" ;;
+esac
+[ "$(prompted)" = codex ] || fail "the narrowed answer did not route"
+
+# Under two labels there is nothing to decide. The walk reaches the only
+# permitted harness on its own, so the call is not made at all.
+routing_defaults
+jev_roster="$tmp/dispatch-three.conf"
+requires=browser
+run_routed
+[ ! -s "$tmp/jev-state" ] || fail "jev was asked a question with one possible answer"
+[ "$(prompted)" = claude ] || fail "the only permitted worker was not summoned"
+
+# And when the task is for nobody on the roster, there is no question and no
+# summons — the board keeps it.
+routing_defaults
+jev_roster="$tmp/dispatch-three.conf"
+requires=gpu.cuda
+run_routed
+[ ! -s "$tmp/jev-state" ] || fail "jev was asked about a task no worker may take"
+[ -z "$(prompted)" ] || fail "a task nobody may take was summoned anyway"
+
+# A label no roster harness carries routes nothing whoever says it, so it is
+# cut rather than asked about — and the rest of the page is copied through.
+routing_defaults
+cat >"$tmp/route-drift.jev" <<'EOF'
+A hird task has become claimable and one of several agents should take it.
+---
+# a page whose labels have drifted from the roster
+harness: Which harness is the better tool for this particular task
+  claude-code = Ambiguous briefs and sprawling changes
+  codex = A clear spec carried out exactly
+  aider = A harness nobody on this roster runs
+EOF
+jev_page="$tmp/route-drift.jev"
+run_routed
+asked=$(cat "$tmp/jev-page")
+assert_contains "$asked" "page=-"
+assert_contains "$asked" "harness: Which harness is the better tool"
+assert_contains "$asked" "# a page whose labels have drifted from the roster"
+assert_contains "$asked" "  claude-code = Ambiguous briefs and sprawling changes"
+case $asked in
+    *aider*) fail "a label no roster harness carries was still offered" ;;
+esac
+
 routing_defaults
 
 # A similarly named user hook is not plugin wiring.
@@ -447,5 +590,17 @@ doctor=$(PATH="$tmp/bin:$PATH" XDG_CONFIG_HOME="$tmp/xdg" \
     HERDR_PLUGIN_CONFIG_DIR="$tmp/xdg" \
     sh "$repo/herdr-plugin/doctor.sh")
 assert_contains "$doctor" "routing: off"
+
+# The page's labels and the roster's third column are two lists of the same
+# names in two files, and each way they drift is silent at the moment it goes
+# wrong: the shipped page describes a copilot this roster does not run, and
+# the roster runs a codex-cli the page does not describe.
+doctor=$(PATH="$tmp/bin:$PATH" XDG_CONFIG_HOME="$tmp/xdg" \
+    HERDR_PLUGIN_ROOT="$repo/herdr-plugin" \
+    HERDR_PLUGIN_CONFIG_DIR="$tmp" \
+    HIRD_JEV_BIN="$tmp/bin/jev" \
+    sh "$repo/herdr-plugin/doctor.sh")
+assert_contains "$doctor" "routing labels: copilot"
+assert_contains "$doctor" "roster harnesses: codex-cli"
 
 echo "herdr plugin checks passed"

@@ -464,6 +464,17 @@ herdr agent prompt "$worker" "hird task $HIRD_TASK is ready; work the hird queue
   leaves the order you wrote exactly as it was.
 </p>
 
+<p>
+  And it is asked only about the agents the task may actually go to. Recusal
+  and required capabilities are applied to the page's labels before the call,
+  not only to the answer afterwards, so a choice never spends its confidence
+  on a harness the queue has already ruled out — and when they leave fewer
+  than two harnesses in the running there is nothing to decide and no call is
+  made at all. Which knob is which matters here: what an agent's environment
+  has is a <em>capability</em>, enforced, and what an agent is better at
+  belongs in the page's descriptions, where being wrong costs one summons.
+</p>
+
 <h3 id="recess">The recess: standing the queue down</h3>
 
 <p>

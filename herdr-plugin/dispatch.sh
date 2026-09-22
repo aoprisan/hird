@@ -34,6 +34,13 @@
 # page, no jev, no key, or an unsure answer, and there is one pass in your
 # order, exactly as before.
 #
+# The question it is asked is narrowed by the two bars above before it is
+# asked: only the harnesses this task may actually go to are offered as
+# answers, and when that leaves fewer than two there is nothing to decide and
+# no call is made. Not busyness, though — that is a liveness guess, it is
+# re-read at the prompt, and the routing call is deliberately made before the
+# lock.
+#
 # Absent a readable roster it falls back to the pairing the hird docs
 # use: a worker named claude on the claude-code harness, a worker named
 # codex on codex.
@@ -66,10 +73,72 @@ if [ -n "${HIRD_REQUIRES:-}" ]; then
     summons="$summons This task requires: $HIRD_REQUIRES."
 fi
 
+# Whether a roster line's worker may take this task at all: not recused, and
+# carrying every capability the task requires. Both are facts about the task
+# that hird computed and will check again, atomically, at the claim — unlike
+# busyness, which is a liveness guess and is kept out here, at the prompt.
+#
+# Commas cannot appear in a harness or capability name, so both membership
+# tests are substring tests over a comma-wrapped list.
+worker_permitted() {
+    _permitted=yes
+    _old_ifs=$IFS
+    IFS=,
+    for _h in ${1:-}; do
+        case $recused in
+            *",$_h,"*) _permitted=no ;;
+        esac
+    done
+    for _required in ${HIRD_REQUIRES:-}; do
+        case ",${2:-}," in
+            *",$_required,"*) ;;
+            *) _permitted=no ;;
+        esac
+    done
+    IFS=$_old_ifs
+    [ "$_permitted" = yes ]
+}
+
+# The pairing the hird docs use, for a machine with no roster file yet.
+default_roster() {
+    cat <<'EOF'
+worker claude claude-code
+worker codex codex,codex-cli
+EOF
+}
+
+# The harness names this task may actually go to, deduplicated — what the
+# routing question is worth asking over. A worker barred on any one of its
+# harnesses is barred outright, exactly as the walk below treats it, so the
+# names it contributes are none.
+eligible_harnesses() {
+    if [ -n "$roster" ] && [ -r "$roster" ]; then
+        cat "$roster"
+    else
+        default_roster
+    fi | {
+        while read -r kind agent harnesses capabilities _; do
+            [ "$kind" = "worker" ] || continue
+            [ -n "$agent" ] || continue
+            worker_permitted "${harnesses:-}" "${capabilities:-}" || continue
+            printf '%s\n' "${harnesses:-}" | tr ',' '\n'
+        done
+    } | awk 'NF && !seen[$0]++'
+}
+
 # Asked before the lock is taken, never while holding it: a routing call can
 # wait on a network, and a wave of announcements should not queue up behind
 # one agent's turn to think.
-preferred=$(preferred_harness)
+#
+# It is asked only about the harnesses above, because a choice over labels the
+# queue has already ruled out is a pass that can match nobody, paid for on
+# every announcement — and an answer whose confidence was spent on options
+# that were never available. An empty set is not a narrower question but no
+# question: this task is for nobody on the roster, and the walk below will say
+# so by prompting nobody.
+preferred=
+eligible=$(eligible_harnesses)
+[ -n "$eligible" ] && preferred=$(preferred_harness "$eligible")
 
 trap lock_release 0
 trap 'exit 1' HUP INT TERM
@@ -81,19 +150,20 @@ lock_acquire || :
 
 # Read `worker <agent> <harness[,harness...]> [capability[,capability...]]`
 # lines; anything else is comment. Harnesses route around recusal; the optional
-# fourth column routes work only to workers equipped for it. Commas cannot
-# appear in either kind of name, so both membership tests are safe.
+# fourth column routes work only to workers equipped for it — both through
+# `worker_permitted`, which is the same predicate the routing question was
+# narrowed with, so a preference can never reach further than the walk would.
 try_roster() {
     only=${1:-}
     while read -r kind agent harnesses capabilities _; do
         [ "$kind" = "worker" ] || continue
         [ -n "$agent" ] || continue
-        old_ifs=$IFS
         # The routing pass, when there is one: consider only the workers on
         # the harness that was preferred. Everything below still applies to
         # them — being preferred is not being permitted.
         if [ -n "$only" ]; then
             wanted=no
+            old_ifs=$IFS
             IFS=,
             for h in ${harnesses:-}; do
                 [ "$h" = "$only" ] && wanted=yes
@@ -101,26 +171,7 @@ try_roster() {
             IFS=$old_ifs
             [ "$wanted" = yes ] || continue
         fi
-        barred=no
-        IFS=,
-        for h in ${harnesses:-}; do
-            case $recused in
-                *",$h,"*) barred=yes ;;
-            esac
-        done
-        IFS=$old_ifs
-        [ "$barred" = yes ] && continue
-        equipped=yes
-        IFS=,
-        for required in ${HIRD_REQUIRES:-}; do
-            case ",${capabilities:-}," in
-                *",$required,"*) ;;
-                *) equipped=no ;;
-            esac
-        done
-        IFS=$old_ifs
-        [ "$equipped" = yes ] || continue
-
+        worker_permitted "${harnesses:-}" "${capabilities:-}" || continue
         worker_busy "$agent" && continue
         if worker_prompt "$agent" "$summons"; then
             exit 0
@@ -136,9 +187,8 @@ walk_roster() {
     if [ -n "$roster" ] && [ -r "$roster" ]; then
         try_roster "${1:-}" <"$roster"
     else
-        try_roster "${1:-}" <<'EOF'
-worker claude claude-code
-worker codex codex,codex-cli
+        try_roster "${1:-}" <<EOF
+$(default_roster)
 EOF
     fi
 }
