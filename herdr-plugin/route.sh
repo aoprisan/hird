@@ -21,6 +21,13 @@
 #     capabilities and busyness, and a preferred harness that clears none of
 #     them simply never matches. The relay walks the whole roster straight
 #     afterwards, so an opinion can move a worker up and never rule one out.
+#
+#     Which is also why the hard facts come *first*, into the question rather
+#     than only onto the answer: the relay passes the harnesses this task may
+#     actually go to, and the page is cut down to those before it is sent. A
+#     choice over labels the queue has already ruled out spends its confidence
+#     on options that were never available, and buys a pass that can match
+#     nobody. Under two labels there is nothing to decide and no call is made.
 #   - Every failure is the same failure. No page, no jev, no key, a call that
 #     times out, an answer under the confidence bar, an answer this cannot
 #     parse: all of them print nothing, and the relay behaves exactly as it
@@ -101,11 +108,92 @@ json_after() {
     '
 }
 
+# The labels the page offers under its `harness` question, one per line.
+#
+# The notation is one `label = description` line per label, indented under an
+# unindented `harness:`; the block ends at the next unindented line. A state
+# above the `---` that happened to be shaped like a question would be misread
+# here, and the cost of that is the cost of every other misreading in this
+# file: a page jev refuses, and the roster order you already had.
+page_labels() {
+    awk '
+        /^[ \t]*#/ { next }
+        !body && /^harness[ \t]*:/ { body = 1; next }
+        body && /^[ \t]+[A-Za-z0-9._-]+[ \t]*=/ {
+            label = $0
+            sub(/^[ \t]+/, "", label)
+            sub(/[ \t]*=.*$/, "", label)
+            print label
+            next
+        }
+        body && /^[^ \t]/ { body = 0 }
+    ' "$1"
+}
+
+# The page with the harness question cut down to the labels in `$2`, a
+# comma-wrapped list.
+#
+# Subtractive only: it drops label lines and copies everything else through,
+# which is what makes it safe to generate on the way past. A cut that goes
+# wrong can only produce a page jev will not parse, and route.sh spells that
+# the way it spells every other failure.
+narrowed_page() {
+    awk -v keep="$2" '
+        /^[ \t]*#/ { print; next }
+        !body && /^harness[ \t]*:/ { body = 1; print; next }
+        body && /^[ \t]+[A-Za-z0-9._-]+[ \t]*=/ {
+            label = $0
+            sub(/^[ \t]+/, "", label)
+            sub(/[ \t]*=.*$/, "", label)
+            if (index(keep, "," label ",") == 0) next
+            print
+            next
+        }
+        body && /^[^ \t]/ { body = 0 }
+        { print }
+    ' "$1"
+}
+
+# `$1` is the harness names this task may actually go to, one per line, as the
+# relay computed them from the roster and the announcement. Empty means the
+# caller has nothing to say about eligibility, and the page is asked as
+# written — which is what happens to anyone sourcing this file on its own.
 preferred_harness() {
     [ -n "$jev_page" ] && [ -r "$jev_page" ] || return 0
     command -v "$jev_bin" >/dev/null 2>&1 || return 0
 
-    set -- run "$jev_page" --json --timeout "$jev_timeout" --state "$(routing_state)"
+    _page=$jev_page
+    _stdin=
+    if [ -n "${1:-}" ]; then
+        _eligible=",$(printf '%s' "$1" | tr '\n' ',' | sed 's/,,*/,/g; s/^,//; s/,$//'),"
+        _offered=$(page_labels "$jev_page")
+        _keep=$(printf '%s\n' "$_offered" |
+            while read -r _label; do
+                [ -n "$_label" ] || continue
+                case $_eligible in
+                    *",$_label,"*) printf '%s\n' "$_label" ;;
+                esac
+            done)
+        _kept=$(printf '%s' "$_keep" | grep -c . || :)
+
+        # Fewer than two labels is not a routing decision. One is the answer
+        # the roster was going to give anyway, reached by the ordinary walk
+        # without a call; none means nothing on this page may take the task —
+        # or that the page has no `harness` question at all, which used to be
+        # a call spent on an answer this could never read.
+        [ "$_kept" -ge 2 ] || return 0
+
+        # When the cut removes nothing, send the file rather than a copy of
+        # it: an announcement the queue has not constrained is the call it
+        # always was.
+        if [ "$_kept" -ne "$(printf '%s' "$_offered" | grep -c . || :)" ]; then
+            _stdin=$(narrowed_page "$jev_page" \
+                ",$(printf '%s' "$_keep" | tr '\n' ',' | sed 's/,$//'),")
+            _page=-
+        fi
+    fi
+
+    set -- run "$_page" --json --timeout "$jev_timeout" --state "$(routing_state)"
     if [ -n "${HIRD_JEV_MOCK:-}" ]; then
         set -- "$@" --mock
     elif [ -z "${TYPESAFE_API_KEY:-}" ]; then
@@ -117,8 +205,14 @@ preferred_harness() {
     fi
 
     # stdin is closed because the roster is on the caller's: a jev that read
-    # it would swallow the workers the relay has not looked at yet.
-    _answer=$("$jev_bin" "$@" 2>/dev/null </dev/null) || return 0
+    # it would swallow the workers the relay has not looked at yet. A narrowed
+    # page goes over that same stdin instead — `jev run -` reads one there,
+    # and jev has no flag that subsets a question's labels for one call.
+    if [ "$_page" = - ]; then
+        _answer=$(printf '%s\n' "$_stdin" | "$jev_bin" "$@" 2>/dev/null) || return 0
+    else
+        _answer=$("$jev_bin" "$@" 2>/dev/null </dev/null) || return 0
+    fi
 
     case $_answer in
         *'"harness"'*) ;;

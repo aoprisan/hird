@@ -5,14 +5,20 @@ A hird task has become claimable and one of several agents should take it.
 # harness gets first refusal on each announcement. Delete it and the relay
 # goes back to walking the roster in the order you wrote.
 #
-# Three things this file has to get right:
+# Four things this file has to get right:
 #
 #   - The question must be named `harness`. That is the answer route.sh
 #     reads; a page without it is an opinion the relay cannot hear.
 #   - Every label must be a harness name hird itself uses — what `hird
 #     agents` prints, and what the third column of dispatch.conf carries —
 #     because that column is what the answer is matched against. A label of
-#     `claude` where the roster says `claude-code` routes nothing.
+#     `claude` where the roster says `claude-code` routes nothing, and is cut
+#     from the question rather than asked about; the startup report names it.
+#   - Write every harness you run, not only the ones you expect to win. The
+#     relay cuts this list down to the harnesses each task may actually go to
+#     — recusal and required capabilities are applied to the labels, not only
+#     to the answer — so a page that lists two agents has nothing left to say
+#     about a review recused from one of them.
 #   - The descriptions are the whole rubric. They are what the model reads
 #     about your agents, so write what each one is actually good at here,
 #     not what it is called.

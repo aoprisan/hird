@@ -66,8 +66,11 @@ who may *not* take a task; which of the permitted agents is the better tool
 for it is a judgement hird does not make, and the plugin can put that one to
 a classifier — [`jev`](https://crates.io/crates/jev-repl) reads the task and
 names a harness, which then gets first refusal among the workers the queue
-would have allowed anyway. See
-[herdr-plugin/](herdr-plugin/).
+would have allowed anyway. And it is asked only about those: recusal and
+required capabilities cut the choices down before the question is put, so
+nothing is ever decided about an agent that could not have taken the work —
+and a task with one permitted harness left is not a question at all. See
+[herdr-plugin/](herdr-plugin/) and [ROUTING.md](ROUTING.md).
 
 No daemon. No server. No accounts.
 
