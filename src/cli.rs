@@ -63,54 +63,32 @@ pub enum Command {
     /// List tasks.
     #[command(visible_alias = "list")]
     Ls(LsArgs),
-    /// Show one task in full, with its history.
-    Show { seq: i64 },
-    /// Explain whether a task is claimable right now, and if not, everything
-    /// standing in the way.
+    /// Show one task in full, with its history — or, given a path, one
+    /// file's history across the queue.
     ///
-    /// The claim gates, asked out loud in the order dispatch applies them: a
-    /// live lease, unfinished dependencies, an unanswered question, recusals,
-    /// capability requirements, and file-scope overlap with live work. `hird
-    /// show` says everything about a task; this answers the one question a
-    /// silent queue raises — why is nobody getting this handed to them?
+    /// A task number (`42` or `#42`) shows the task; anything else is read as
+    /// a project-relative path (write `./42` for a file named 42), answered
+    /// with who declared it, whose hands the witness saw in it, and what the
+    /// memory says about it. The flags ask one narrower question of a task.
+    Show(ShowArgs),
+    /// Alias for `hird show SEQ --why`.
+    #[command(hide = true)]
     Why { seq: i64 },
-    /// The history of one file across the queue: who declared it, whose
-    /// hands the witness saw in it, and what the memory says about it.
-    ///
-    /// `hird show` answers for a task; this answers for a file — the question
-    /// a reader asks before editing something the swarm has been through.
-    /// Every line comes from what is already recorded: declared scopes,
-    /// witnessed changes across every round a task was held, and the
-    /// assertions anchored there, with whether they still stand.
-    Blame {
-        /// Project-relative path, as `hird show` lists it.
-        path: String,
-    },
-    /// What happened on the board since you last looked, folded into news.
-    ///
-    /// The trail says everything; this says the difference. Reading it moves
-    /// the bookmark, so the next digest starts where this one ended — unless
-    /// `--peek` says not to. `--since` reads a window instead, and leaves the
-    /// bookmark alone.
+    /// Alias for `hird show PATH`.
+    #[command(hide = true)]
+    Blame { path: String },
+    /// Alias for `hird events --digest`.
+    #[command(hide = true)]
     Digest {
-        /// From this moment instead of the bookmark: an RFC3339 UTC instant,
-        /// prefixes welcome ("2026-08-14"), or how long ago ("90m", "2h").
         #[arg(long, value_name = "WHEN")]
         since: Option<String>,
-        /// Read without moving the bookmark.
         #[arg(long)]
         peek: bool,
         #[command(flatten)]
         scope: ScopeFilterArgs,
     },
-    /// A brief for one task as Markdown: everything a claim would hand an
-    /// agent, on paper, for a session that cannot reach the queue.
-    ///
-    /// Instructions, the ground it builds on, questions and their answers,
-    /// declared files, what has already moved under it, the findings it was
-    /// sent back with, and what earlier work learned about the same files.
-    /// Paste it into a cloud harness, a fresh clone, or a session with no
-    /// MCP at all.
+    /// Alias for `hird show SEQ --brief`.
+    #[command(hide = true)]
     Handoff { seq: i64 },
     /// The diff of what moved under a task, from the versions the witness kept.
     Diff {
@@ -197,22 +175,16 @@ pub enum Command {
     Scope(ScopeArgs),
     /// Show or set the capabilities a claimant must advertise.
     Require(RequireArgs),
-    /// Show which agent is working what, and where they overlap.
-    Agents(ScopeFilterArgs),
+    /// Show which agent is working what, and where they overlap — or, with
+    /// `--record`, each one's track record under review.
+    Agents(AgentsArgs),
     /// Bar whoever worked one task from working another, or lift the bar.
     ///
     /// This is what makes a review a review: the queue refuses the claim from
     /// the harness that did the work, and dispatch routes around it.
     Recuse(RecuseArgs),
-    /// Show each harness's — or each person's — track record under review:
-    /// verdicts received on its work, its first-pass rate, and the verdicts it
-    /// has handed out.
-    ///
-    /// Derived entirely from delivered verdicts, so it measures the one thing
-    /// the queue can measure — whose work survives a reading by a different
-    /// model. `--by person` reads the same verdicts along the other half of
-    /// the actor, for a queue more than one person files into. A report, not a
-    /// scheduler: nothing routes work by it.
+    /// Alias for `hird agents --record`.
+    #[command(hide = true)]
     Record(RecordArgs),
     /// Tail the append-only event trail across every task, oldest first:
     /// claims, check-ins, completions, verdicts, witnessed changes, expiries.
@@ -221,30 +193,19 @@ pub enum Command {
     /// UI, so a swarm can be watched from a second terminal, a tmux pane, or
     /// a script. `--follow` keeps reading as events land, and `--json` makes
     /// each line one machine-readable object for whatever wants to build on
-    /// the feed.
+    /// the feed. `--digest` folds the trail since you last looked into news.
     Events(EventsArgs),
-    /// The board as it stood at a past moment, folded from the event trail.
-    ///
-    /// The trail is append-only so that no question about the past becomes
-    /// unanswerable; this is the command that asks one. "Show me the queue at
-    /// the moment task 23 was sent back" is a fold over events that already
-    /// exist — who held what, which wave was live, what was parked on a
-    /// question — read-only, from the same trail `hird events` prints.
-    /// Statuses are yesterday's; titles are today's, since the trail does not
-    /// version them.
+    /// Alias for `hird ls --at WHEN`.
+    #[command(hide = true)]
     Replay {
-        /// When: an RFC3339 UTC instant, prefixes welcome ("2026-08-14",
-        /// "2026-08-14T10:00"), or how long ago ("90m", "2h", "3d").
         when: String,
         #[command(flatten)]
         scope: ScopeFilterArgs,
     },
-    /// Show what earlier work already learned about a task, and why it is
-    /// relevant. This is what an agent is handed when it claims the task.
+    /// Alias for `hird show SEQ --recall`.
+    #[command(hide = true)]
     Recall {
         seq: i64,
-        /// How many assertions at most. Defaults to the configured
-        /// `recall_limit`.
         #[arg(long, value_name = "N")]
         limit: Option<usize>,
     },
@@ -294,6 +255,79 @@ pub struct EventsArgs {
     /// Every project in the database, not just this one.
     #[arg(long)]
     pub all_projects: bool,
+    /// What happened since you last looked, folded into news rather than
+    /// listed. Reading it moves the bookmark, so the next digest starts where
+    /// this one ended — unless `--peek` says not to.
+    #[arg(long, conflicts_with_all = ["follow", "json", "kinds", "task", "actor"])]
+    pub digest: bool,
+    /// Digest from this moment instead of the bookmark, leaving the bookmark
+    /// alone: an RFC3339 UTC instant, prefixes welcome ("2026-08-14"), or how
+    /// long ago ("90m", "2h").
+    #[arg(long, value_name = "WHEN", requires = "digest")]
+    pub since: Option<String>,
+    /// Digest without moving the bookmark.
+    #[arg(long, requires = "digest")]
+    pub peek: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ShowArgs {
+    /// A task number, or a project-relative file path.
+    pub target: String,
+    /// Explain whether the task is claimable right now, and if not,
+    /// everything standing in the way: a live lease, unfinished
+    /// dependencies, an unanswered question, recusals, capability
+    /// requirements, and file-scope overlap with live work — in the order
+    /// dispatch applies them.
+    #[arg(long, conflicts_with_all = ["recall", "brief"])]
+    pub why: bool,
+    /// What earlier work already learned that bears on the task, and why it
+    /// is relevant — what an agent is handed when it claims it.
+    #[arg(long, conflicts_with = "brief")]
+    pub recall: bool,
+    /// How many assertions `--recall` prints at most. Defaults to the
+    /// configured `recall_limit`.
+    #[arg(long, value_name = "N", requires = "recall")]
+    pub limit: Option<usize>,
+    /// The task as a Markdown brief: everything a claim would hand an agent,
+    /// on paper, for a session that cannot reach the queue — a cloud
+    /// harness, a fresh clone, a session with no MCP at all.
+    #[arg(long)]
+    pub brief: bool,
+}
+
+/// What `hird show` was pointed at.
+#[derive(Debug, PartialEq, Eq)]
+enum ShowTarget<'a> {
+    Task(i64),
+    File(&'a str),
+}
+
+impl ShowArgs {
+    fn target(&self) -> ShowTarget<'_> {
+        let raw = self.target.trim();
+        match raw.strip_prefix('#').unwrap_or(raw).parse::<i64>() {
+            Ok(seq) => ShowTarget::Task(seq),
+            Err(_) => ShowTarget::File(raw),
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct AgentsArgs {
+    #[command(flatten)]
+    pub scope: ScopeFilterArgs,
+    /// Each harness's track record under review instead: verdicts received
+    /// on its work, its first-pass rate, and the verdicts it has handed out.
+    /// Derived entirely from delivered verdicts — a report, not a scheduler;
+    /// nothing routes work by it.
+    #[arg(long)]
+    pub record: bool,
+    /// Group the record by the model that acted, or by the person it acted
+    /// for. Reading by person needs `HIRD_IDENTITY` set on the sessions that
+    /// did the work; verdicts that name nobody are left out.
+    #[arg(long = "by", value_name = "AXIS", requires = "record")]
+    pub by: Option<RecordAxisArg>,
 }
 
 #[derive(Debug, Args)]
@@ -594,8 +628,14 @@ pub struct RequireArgs {
 #[derive(Debug, Args)]
 pub struct LsArgs {
     /// Only tasks in this status.
-    #[arg(long, value_name = "STATUS")]
+    #[arg(long, value_name = "STATUS", conflicts_with = "at")]
     pub status: Option<String>,
+    /// The board as it stood at a past moment, folded from the event trail:
+    /// an RFC3339 UTC instant, prefixes welcome ("2026-08-14"), or how long
+    /// ago ("90m", "2h", "3d"). Statuses are that moment's; titles are
+    /// today's, since the trail does not version them.
+    #[arg(long, value_name = "WHEN")]
+    pub at: Option<String>,
     /// List tasks from every project.
     #[arg(long)]
     pub all_projects: bool,
@@ -721,6 +761,11 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
             announce_claimable(herald.as_ref(), &db, &config, Cause::Filed, seq);
             Ok(())
         }
+        Command::Ls(LsArgs {
+            at: Some(when),
+            all_projects,
+            ..
+        }) => replay(&db, &scope_of(&project, &config, *all_projects), when, out),
         Command::Ls(args) => {
             // The listing now says whether each task has changed anything, and
             // a stale answer to that is worse than none: a task that has been
@@ -728,10 +773,36 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
             look(&db, &config, &project);
             ls(&db, &project, &config, args, out)
         }
-        Command::Show { seq } => {
-            look(&db, &config, &project);
-            show(&db, *seq, &config, out)
-        }
+        Command::Show(args) => match args.target() {
+            ShowTarget::File(path) => {
+                if args.why || args.recall || args.brief {
+                    anyhow::bail!(
+                        "--why, --recall and --brief ask about a task; {path:?} is not a task number"
+                    );
+                }
+                look(&db, &config, &project);
+                blame(&db, &config, &project, path, out)
+            }
+            ShowTarget::Task(seq) if args.why => why(&db, seq, &config, out),
+            ShowTarget::Task(seq) if args.recall => recall(
+                &db,
+                &config,
+                &project,
+                seq,
+                args.limit
+                    .map(|n| n.min(200))
+                    .unwrap_or(config.recall_limit()),
+                out,
+            ),
+            ShowTarget::Task(seq) => {
+                look(&db, &config, &project);
+                if args.brief {
+                    handoff(&db, &config, seq, out)
+                } else {
+                    show(&db, seq, &config, out)
+                }
+            }
+        },
         Command::Why { seq } => why(&db, *seq, &config, out),
         Command::Diff { seq, path, tenure } => {
             diff(&db, *seq, path.as_deref(), *tenure, &config, out)
@@ -832,9 +903,19 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
         }
         Command::Scope(args) => scope_cmd(&db, args, out),
         Command::Require(args) => require_cmd(&db, args, out),
+        Command::Agents(args) if args.record => record(
+            &db,
+            &scope_of(&project, &config, args.scope.all_projects),
+            args.by.unwrap_or(RecordAxisArg::Harness).into(),
+            out,
+        ),
         Command::Agents(args) => {
             look(&db, &config, &project);
-            agents(&db, &scope_of(&project, &config, args.all_projects), out)
+            agents(
+                &db,
+                &scope_of(&project, &config, args.scope.all_projects),
+                out,
+            )
         }
         Command::Recuse(args) => recuse(&db, args, out),
         Command::Record(args) => record(
@@ -849,6 +930,16 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> anyhow::Result<()> {
             when,
             out,
         ),
+        Command::Events(args) if args.digest => {
+            look(&db, &config, &project);
+            digest_cmd(
+                &db,
+                &scope_of(&project, &config, args.all_projects),
+                args.since.as_deref(),
+                args.peek,
+                out,
+            )
+        }
         Command::Events(args) => events_cmd(&db, &project, &config, herald.as_ref(), args, out),
     }
 }
@@ -1731,7 +1822,7 @@ fn status_colour(status: Status) -> &'static str {
     }
 }
 
-/// `hird blame`: one file's history across the queue.
+/// `hird show <path>`: one file's history across the queue.
 fn blame(
     db: &Db,
     config: &Config,
@@ -1845,7 +1936,7 @@ fn blame(
     Ok(())
 }
 
-/// `hird digest`: the trail since the bookmark, as news.
+/// `hird events --digest`: the trail since the bookmark, as news.
 fn digest_cmd(
     db: &Db,
     scope: &ProjectScope,
@@ -1900,7 +1991,7 @@ fn digest_cmd(
         }
     }
     // The bookmark moves on a plain read and stays put on a window or a
-    // peek, so `hird digest --since 2h` is a question and `hird digest` is
+    // peek, so `--digest --since 2h` is a question and `--digest` is
     // the act of catching up.
     if let (Some(project), None, false, Some(cursor)) = (mark, since, peek, digest.cursor) {
         db.bookmarks().set(BOOKMARK, project, cursor)?;
@@ -1908,7 +1999,7 @@ fn digest_cmd(
     Ok(())
 }
 
-/// `hird handoff`: the claim brief, as a document.
+/// `hird show --brief`: the claim brief, as a document.
 fn handoff(db: &Db, config: &Config, seq: i64, out: &mut impl Write) -> anyhow::Result<()> {
     let task = db.tasks().get(seq)?;
     let now = Utc::now();
@@ -1916,7 +2007,7 @@ fn handoff(db: &Db, config: &Config, seq: i64, out: &mut impl Write) -> anyhow::
     writeln!(out)?;
     writeln!(
         out,
-        "<!-- hird handoff, {}. Everything the queue would hand an agent on\n\
+        "<!-- hird show --brief, {}. Everything the queue would hand an agent on\n\
          claiming this task. Report back through any harness registered with\n\
          hird, or hand the result to whoever can. -->",
         now.format("%Y-%m-%d")
@@ -2058,7 +2149,7 @@ fn handoff(db: &Db, config: &Config, seq: i64, out: &mut impl Write) -> anyhow::
     Ok(())
 }
 
-/// `hird replay`: the board as it stood at a past moment.
+/// `hird ls --at`: the board as it stood at a past moment.
 fn replay(db: &Db, scope: &ProjectScope, when: &str, out: &mut impl Write) -> anyhow::Result<()> {
     let now = Utc::now();
     let cutoff = parse_when(when, now)?;
@@ -2251,7 +2342,7 @@ fn reviewer_label(axis: Axis) -> &'static str {
     }
 }
 
-/// `hird record`: each harness's — or each person's — standing in the record.
+/// `hird agents --record`: each harness's — or each person's — standing in the record.
 fn record(db: &Db, scope: &ProjectScope, axis: Axis, out: &mut impl Write) -> anyhow::Result<()> {
     let records = db.verdicts().record(scope, axis)?;
     let workers: Vec<_> = records.iter().filter(|r| r.judged > 0).collect();
@@ -3017,7 +3108,7 @@ pub(crate) fn show(db: &Db, seq: i64, config: &Config, out: &mut impl Write) -> 
     Ok(())
 }
 
-/// `hird why`: the claim gates, run against one task and answered out loud.
+/// `hird show --why`: the claim gates, run against one task and answered out loud.
 ///
 /// Every check `task_claim` and `task_next` apply, in the order they apply
 /// them, each reported rather than silently folded into an empty hand. The

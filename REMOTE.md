@@ -265,7 +265,7 @@ people apart. Whether recusal works at all becomes an accident of whether you
 happened to pick different harnesses.
 
 The same axis error runs through everything keyed on the harness: the routed
-summons (`HIRD_RECUSED` carries harness names), and `hird record`, which
+summons (`HIRD_RECUSED` carries harness names), and `hird agents --record`, which
 measures "whose work survives a reading by a different model" — a sentence
 that quietly means *a different person* once two people share a queue, and
 cannot report it.

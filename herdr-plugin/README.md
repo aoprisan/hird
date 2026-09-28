@@ -117,7 +117,7 @@ worker <herdr agent name> <hird harness[,harness...]> [capability[,capability...
 ```
 
 The agent name is what `herdr agent list` shows. The harness column is how
-hird knows the same agent — what `hird agents` and `hird record` print —
+hird knows the same agent — what `hird agents` and `hird agents --record` print —
 and is what recusal is matched against. The optional fourth column lists the
 capabilities the worker registers with `hird register --capability`; it is
 what `HIRD_REQUIRES` is matched against. List names comma-separated, with no

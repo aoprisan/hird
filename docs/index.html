@@ -500,7 +500,7 @@ herdr agent prompt "$worker" "hird task $HIRD_TASK is ready; work the hird queue
   hand-out, not the work. An agent asking for work is told the difference
   out loud — <em>in recess, not idle</em> — so it stands by instead of
   retrying, and <code>hird ls</code>, <code>hird graph</code>,
-  <code>hird why</code> and the TUI's status bar all wear the recess while it
+  <code>hird show --why</code> and the TUI's status bar all wear the recess while it
   stands.
 </p>
 
@@ -776,7 +776,7 @@ env = { HIRD_HARNESS = <span class="s">"codex"</span> }</code></pre>
   hird is a local queue in a local SQLite file, so there is nothing there for
   it to connect to — register hird in an editor or CLI that runs on the same
   machine as the database (<code>hird db-path</code>). What such a session
-  <em>can</em> be given is the brief: <code>hird handoff &lt;seq&gt;</code>
+  <em>can</em> be given is the brief: <code>hird show &lt;seq&gt; --brief</code>
   renders everything a claim would hand an agent as Markdown, to paste where
   the queue does not reach.
 </p>
@@ -1575,7 +1575,7 @@ codex                3          0</code></pre>
 
 <p>
   <code>task_get</code> carries the same list without claiming anything, and
-  <code>hird recall &lt;seq&gt;</code> shows a human exactly what their agents are
+  <code>hird show &lt;seq&gt; --recall</code> shows a human exactly what their agents are
   being told. Five facts ride along by default; set
   <code>recall_limit = 0</code> to switch it off entirely.
 </p>
@@ -1694,12 +1694,9 @@ shaky     the renderer redraws on every poll
 
 <pre><code>hird add &lt;title&gt; [--body &lt;md&gt;|--body-file &lt;path&gt;] [--priority N] [--project &lt;path&gt;]
                  [--needs &lt;seq&gt;,…] [--path &lt;glob&gt;]… [--requires &lt;capability&gt;]… [--review]
-hird ls [--status &lt;status&gt;] [--all-projects]
-hird show &lt;seq&gt;
-hird why &lt;seq&gt;
-hird blame &lt;path&gt;
-hird digest [--since &lt;when&gt;] [--peek] [--all-projects]
-hird handoff &lt;seq&gt;
+hird ls [--status &lt;status&gt; | --at &lt;when&gt;] [--all-projects]
+hird show &lt;seq&gt; [--why | --recall [--limit N] | --brief]
+hird show &lt;path&gt;
 hird diff &lt;seq&gt; [--path &lt;file&gt;] [--tenure N]
 hird salvage &lt;seq&gt; &lt;path&gt; [--baseline] [--tenure N] [--out &lt;file&gt; [--force]]
 hird cancel &lt;seq&gt; [--reason &lt;text&gt;]
@@ -1715,13 +1712,11 @@ hird plan export [--plan &lt;name&gt;] [--name &lt;name&gt;] [--all] [--project 
 hird graph [--all-projects] [--plan &lt;name&gt;] [--dot | --mermaid | --json]
 hird scope &lt;seq&gt; [--path &lt;glob&gt;]… [--clear]
 hird require &lt;seq&gt; [--capability &lt;name&gt;]… [--clear]
-hird agents [--all-projects]
+hird agents [--record [--by harness|person]] [--all-projects]
 hird recuse &lt;seq&gt; --from &lt;seq&gt;,… [--reason &lt;text&gt;] | --clear
-hird record [--all-projects]
 hird events [--follow] [--json] [--kind &lt;kind&gt;,…] [--task &lt;seq&gt;] [--actor &lt;name&gt;]
             [--limit N] [--all-projects]
-hird replay &lt;when&gt; [--all-projects]
-hird recall &lt;seq&gt; [--limit N]
+hird events --digest [--since &lt;when&gt;] [--peek] [--all-projects]
 hird mem add &lt;content&gt; [--tags a,b] [--task &lt;seq&gt;] [--path &lt;file&gt;]…
 hird mem search [query] [--limit N] [--all-projects] [--include-superseded]
 hird mem standing [--shaky] [--all-projects]
@@ -1738,12 +1733,8 @@ hird db-path</code></pre>
   <thead><tr><th>Command</th><th>What it is for</th></tr></thead>
   <tbody>
     <tr><td><code>add</code></td><td>File a task. Prints the number, which is how you and the agents refer to it.</td></tr>
-    <tr><td><code>ls</code></td><td>The queue as rows: status, holder, lease countdown, what it waits for, and whether it <a href="#footprint">changed anything</a>.</td></tr>
-    <tr><td><code>show</code></td><td>One task in full — body, dependencies, scope, history, what was learned on it, and what the working tree says it did.</td></tr>
-    <tr><td><code>why</code></td><td>Whether a task is claimable right now, verdict first — and if not, every gate in the way: the lease, unfinished dependencies, an unanswered question, recusals, capability requirements, overlap with live work.</td></tr>
-    <tr><td><code>blame</code></td><td>One file's history across the queue: which tasks declared it, whose hands the witness saw in it across every round they were held, and what the memory says about it, each fact marked with whether it still stands. <code>show</code> answers for a task; this answers for a file.</td></tr>
-    <tr><td><code>digest</code></td><td>What happened on the board since you last looked, folded into news. Reading it moves a bookmark so the next digest starts where this one ended; <code>--peek</code> reads without moving it, <code>--since 2h</code> reads a window instead.</td></tr>
-    <tr><td><code>handoff</code></td><td>The claim brief as Markdown — instructions, the ground it builds on, questions and answers, declared files, what has moved under it, the findings it was sent back with, and what earlier work learned about the same files — for a session that cannot reach the queue: a cloud harness, a fresh clone, a session with no MCP at all.</td></tr>
+    <tr><td><code>ls</code></td><td>The queue as rows: status, holder, lease countdown, what it waits for, and whether it <a href="#footprint">changed anything</a>. <code>--at 2h</code> (or an instant, prefixes fine) folds the trail back into the board as it stood at that moment instead.</td></tr>
+    <tr><td><code>show</code></td><td>One task in full — body, dependencies, scope, history, what was learned on it, and what the working tree says it did. Three flags ask it one narrower question: <code>--why</code>, whether it is claimable right now and, if not, every gate in the way in the order dispatch checks them; <code>--recall</code>, what earlier work learned that an agent is handed when it claims it; <code>--brief</code>, the claim brief as Markdown for a session that cannot reach the queue. Given a path instead of a number, <code>show</code> answers for a file: which tasks declared it, whose hands the witness saw in it, and what the memory says about it.</td></tr>
     <tr><td><code>diff</code></td><td>The uncommitted diff of what moved under a task, from the versions the <a href="#exhibit">witness kept</a> — even after the task is done and the tree has moved on. <code>--tenure N</code> reads an archived round instead, after the task has changed hands.</td></tr>
     <tr><td><code>salvage</code></td><td>Recover a version of a file as it stood under a task: the last one the witness saw, or with <code>--baseline</code> the one the task started from. <code>--tenure N</code> reaches an earlier holding's record.</td></tr>
     <tr><td><code>cancel</code> / <code>reopen</code></td><td>Human overrides. They work regardless of who holds the task.</td></tr>
@@ -1754,11 +1745,8 @@ hird db-path</code></pre>
     <tr><td><code>graph</code></td><td>The plan as dispatch waves: workable now, and what each later wave waits for. <code>--dot</code> and <code>--mermaid</code> draw it; <code>--json</code> is the board as one object, for anything that draws it; <code>--plan</code> narrows any of them to one plan's tasks.</td></tr>
     <tr><td><code>scope</code></td><td>Show or set the files a task is expected to touch. Warns about overlaps.</td></tr>
     <tr><td><code>require</code></td><td>Show or set the <a href="#capabilities">capabilities</a> a task's worker must have. Supplying any replaces the set; <code>--clear</code> empties it, which a review only needing its diff sometimes wants.</td></tr>
-    <tr><td><code>agents</code></td><td>Who is working what, what has moved under each of them, and a <code>!!</code> line wherever two agents are in the same files.</td></tr>
-    <tr><td><code>record</code></td><td>Each harness's track record under <a href="#verdict">review</a>: work upheld, work sent back, first-pass rate, and the verdicts it has handed out.</td></tr>
-    <tr><td><code>events</code></td><td>The append-only trail read across tasks, oldest first — <a href="#events">the board as a log</a>. <code>--follow</code> keeps reading; <code>--json</code> makes each line one object.</td></tr>
-    <tr><td><code>replay</code></td><td>The board as it stood at a past moment, folded from the same trail: who held what, which wave was live, what was parked on a question. Takes an instant (<code>2026-08-14T10:00</code>, prefixes fine) or an age (<code>2h</code>, <code>3d</code>).</td></tr>
-    <tr><td><code>recall</code></td><td>What earlier work already learned about a task, and why it is relevant — the same thing an agent is handed when it claims it.</td></tr>
+    <tr><td><code>agents</code></td><td>Who is working what, what has moved under each of them, and a <code>!!</code> line wherever two agents are in the same files. <code>--record</code> reads each harness's track record under <a href="#verdict">review</a> instead: work upheld, work sent back, first-pass rate, and the verdicts it has handed out.</td></tr>
+    <tr><td><code>events</code></td><td>The append-only trail read across tasks, oldest first — <a href="#events">the board as a log</a>. <code>--follow</code> keeps reading; <code>--json</code> makes each line one object. <code>--digest</code> folds what happened since you last looked into news, moving a bookmark so the next one starts where this ended.</td></tr>
     <tr><td><code>mem</code></td><td>Record and search assertions. <code>export</code> writes the project's current facts as Markdown for a CLAUDE.md or AGENTS.md — footing-aware, so a fact whose ground has been rewritten goes out marked for a re-read.</td></tr>
     <tr><td><code>tui</code></td><td>The live board.</td></tr>
     <tr><td><code>web</code></td><td>The live board as a picture in a browser — <a href="#web">the graph, running</a>. Loopback, read-only, gone when the terminal is.</td></tr>
@@ -1940,10 +1928,10 @@ hird web: http://127.0.0.1:7473/</code></pre>
   ground on the left, and on each node its holder, lease countdown, what it
   waits for and what it requires. Nodes light up as harnesses claim them, and
   the trail streams underneath as it lands. Click a node and the panel beside
-  the graph answers <code>hird why</code> and <code>hird show</code> for it.
+  the graph answers <code>hird show</code> and <code>hird show --why</code> for it.
   Narrow the picture to one plan from the header, and drag the
   <strong>replay</strong> slider to see the board as it stood at any moment
-  since the trail began — the same fold <code>hird replay</code> prints, drawn.
+  since the trail began — the same fold <code>hird ls --at</code> prints, drawn.
 </p>
 
 <p>
@@ -2166,7 +2154,7 @@ question_hook = <span class="s">""</span></code></pre>
     </tr>
     <tr>
       <td><a href="https://github.com/aoprisan/hird/blob/main/examples/verdict.sh"><code>verdict.sh</code></a></td>
-      <td>The <a href="#verdict">sent-back loop</a>: a verdict reopens the work carrying the findings, the redo files a fresh review, and <code>hird record</code> keeps score. Makes its own throwaway git repository.</td>
+      <td>The <a href="#verdict">sent-back loop</a>: a verdict reopens the work carrying the findings, the redo files a fresh review, and <code>hird agents --record</code> keeps score. Makes its own throwaway git repository.</td>
     </tr>
     <tr>
       <td><a href="https://github.com/aoprisan/hird/blob/main/examples/dispatch-hook.sh"><code>dispatch-hook.sh</code></a></td>

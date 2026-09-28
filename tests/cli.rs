@@ -569,13 +569,13 @@ fn why_answers_first_and_shows_its_evidence_after() {
     ]);
 
     // Nothing in the way: the verdict is one word and no evidence follows.
-    let free = sandbox.run(&["why", "1"]);
+    let free = sandbox.run(&["show", "1", "--why"]);
     assert!(free.contains("claimable yes"), "{free}");
     assert!(!free.contains("waits for"), "{free}");
 
     // Blocked: the verdict names the dependency, the evidence line details it,
     // and the capability requirement rides along as a caveat for later.
-    let blocked = sandbox.run(&["why", "2"]);
+    let blocked = sandbox.run(&["show", "2", "--why"]);
     assert!(
         blocked.contains("claimable no — waiting on #1"),
         "{blocked}"
@@ -586,7 +586,7 @@ fn why_answers_first_and_shows_its_evidence_after() {
     // Held: the lease is the whole answer.
     let mut codex = McpSession::start(&sandbox, "codex");
     codex.claim(1);
-    let held = sandbox.run(&["why", "1"]);
+    let held = sandbox.run(&["show", "1", "--why"]);
     assert!(held.contains("claimable no — held by codex:"), "{held}");
 
     // A question gate names the answer as what everyone is waiting on.
@@ -600,7 +600,7 @@ fn why_answers_first_and_shows_its_evidence_after() {
             }),
         )
         .unwrap();
-    let asking = sandbox.run(&["why", "1"]);
+    let asking = sandbox.run(&["show", "1", "--why"]);
     assert!(
         asking.contains("claimable no — waiting on an answer"),
         "{asking}"
@@ -669,18 +669,18 @@ fn replay_folds_the_trail_back_into_a_board() {
     codex.claim(1);
 
     // "0s ago" is now: every event has landed, so the replay agrees with ls.
-    let board = sandbox.run(&["replay", "0s"]);
+    let board = sandbox.run(&["ls", "--at", "0s"]);
     assert!(board.contains("the board as of"), "{board}");
     assert!(board.contains("#1    claimed"), "{board}");
     assert!(board.contains("[codex:"), "{board}");
     assert!(board.contains("#2    open"), "{board}");
 
     // Before the first event, there was nothing to see.
-    let empty = sandbox.run(&["replay", "2000-01-01"]);
+    let empty = sandbox.run(&["ls", "--at", "2000-01-01"]);
     assert!(empty.contains("nothing had been filed yet"), "{empty}");
 
     // A moment that is neither an instant nor an age is refused with help.
-    let err = sandbox.run_failing(&["replay", "yesterday"]);
+    let err = sandbox.run_failing(&["ls", "--at", "yesterday"]);
     assert!(err.contains("replay wants a moment"), "{err}");
     codex.shutdown();
 }
@@ -688,7 +688,7 @@ fn replay_folds_the_trail_back_into_a_board() {
 #[test]
 fn why_on_a_missing_task_fails_with_a_plain_sentence() {
     let sandbox = Sandbox::new();
-    let err = sandbox.run_failing(&["why", "42"]);
+    let err = sandbox.run_failing(&["show", "42", "--why"]);
     assert!(err.contains("task 42 not found"), "{err}");
 }
 
@@ -716,7 +716,7 @@ fn a_recess_is_worn_by_the_board_and_lifted_by_resume() {
     assert!(graphed.starts_with("in recess"), "{graphed}");
 
     // `why` treats it as the gate it is, evidence line and all.
-    let why = sandbox.run(&["why", "1"]);
+    let why = sandbox.run(&["show", "1", "--why"]);
     assert!(
         why.contains("claimable no — waiting on hird resume — the queue is in recess"),
         "{why}"
@@ -756,7 +756,7 @@ fn recall_answers_with_what_earlier_work_in_the_same_files_learned() {
     sandbox.run(&["mem", "add", "env vars beat the config file", "--task", "1"]);
     sandbox.run(&["add", "Audit the loader", "--path", "src/*.rs"]);
 
-    let recalled = sandbox.run(&["recall", "2"]);
+    let recalled = sandbox.run(&["show", "2", "--recall"]);
     assert!(
         recalled.contains("env vars beat the config file"),
         "{recalled}"
@@ -775,7 +775,7 @@ fn recall_says_so_when_a_task_stands_alone() {
     let sandbox = Sandbox::new();
     sandbox.run(&["add", "Xyzzy", "--path", "src/xyzzy.rs"]);
     assert!(sandbox
-        .run(&["recall", "1"])
+        .run(&["show", "1", "--recall"])
         .contains("nothing recorded so far touches task 1"));
     // And `show` stays quiet rather than printing an empty heading.
     assert!(!sandbox.run(&["show", "1"]).contains("recalled"));
@@ -790,11 +790,11 @@ fn recall_can_be_turned_off_in_the_config_file() {
     sandbox.run(&["add", "Audit the loader", "--path", "src/config.rs"]);
 
     assert!(sandbox
-        .run(&["recall", "2"])
+        .run(&["show", "2", "--recall"])
         .contains("nothing recorded so far touches task 2"));
     // The limit is a default, not a ceiling: asking explicitly still answers.
     assert!(sandbox
-        .run(&["recall", "2", "--limit", "5"])
+        .run(&["show", "2", "--recall", "--limit", "5"])
         .contains("env vars beat the config file"));
 }
 
@@ -1708,7 +1708,7 @@ fn the_record_reads_by_harness_or_by_person() {
     let show = sandbox.run(&["show", "1"]);
     assert!(show.contains("ana/claude-code"), "{show}");
 
-    let by_harness = sandbox.run(&["record"]);
+    let by_harness = sandbox.run(&["agents", "--record"]);
     assert!(by_harness.contains("as worker"), "{by_harness}");
     assert!(by_harness.contains("claude-code"), "{by_harness}");
     assert!(
@@ -1716,7 +1716,7 @@ fn the_record_reads_by_harness_or_by_person() {
         "the harness reading names models, not people: {by_harness}"
     );
 
-    let by_person = sandbox.run(&["record", "--by", "person"]);
+    let by_person = sandbox.run(&["agents", "--record", "--by", "person"]);
     assert!(by_person.contains("ana"), "{by_person}");
     assert!(by_person.contains("ben"), "{by_person}");
 }
@@ -1756,8 +1756,8 @@ fn reading_the_record_by_person_says_when_nobody_is_named() {
         .unwrap();
     claude.shutdown();
 
-    assert!(sandbox.run(&["record"]).contains("codex"));
-    let by_person = sandbox.run(&["record", "--by", "person"]);
+    assert!(sandbox.run(&["agents", "--record"]).contains("codex"));
+    let by_person = sandbox.run(&["agents", "--record", "--by", "person"]);
     assert!(by_person.contains("HIRD_IDENTITY"), "{by_person}");
 }
 
@@ -1857,7 +1857,7 @@ fn a_sent_back_verdict_reopens_the_work_and_the_record_keeps_score() {
     );
 
     // And the record kept score, on both sides of the verdict.
-    let record = sandbox.run(&["record"]);
+    let record = sandbox.run(&["agents", "--record"]);
     assert!(record.contains("as worker"), "{record}");
     assert!(record.contains("codex"), "{record}");
     assert!(record.contains("as reviewer"), "{record}");
@@ -1869,7 +1869,7 @@ fn a_sent_back_verdict_reopens_the_work_and_the_record_keeps_score() {
 fn the_record_with_no_verdicts_says_how_to_get_some() {
     let sandbox = Sandbox::new();
     sandbox.run(&["add", "t"]);
-    let record = sandbox.run(&["record"]);
+    let record = sandbox.run(&["agents", "--record"]);
     assert!(record.contains("no verdicts on record"), "{record}");
     assert!(record.contains("--review"), "{record}");
 }
@@ -2270,7 +2270,7 @@ fn blame_tells_a_files_story_across_rounds_and_memory() {
         .unwrap();
     claude.shutdown();
 
-    let blamed = sandbox.run(&["blame", "src/config.rs"]);
+    let blamed = sandbox.run(&["show", "src/config.rs"]);
     assert!(blamed.starts_with("src/config.rs\n"), "{blamed}");
     assert!(blamed.contains("declared by"), "{blamed}");
     assert!(blamed.contains("port the loader"), "{blamed}");
@@ -2290,10 +2290,10 @@ fn blame_tells_a_files_story_across_rounds_and_memory() {
 
     // The ground moves; the fact is now shaky, and blame says so.
     sandbox.write_file("src/config.rs", "// rewritten by hand\n");
-    let again = sandbox.run(&["blame", "./src/config.rs"]);
+    let again = sandbox.run(&["show", "./src/config.rs"]);
     assert!(again.contains("shaky; claude-code:"), "{again}");
 
-    let nothing = sandbox.run(&["blame", "docs/nowhere.md"]);
+    let nothing = sandbox.run(&["show", "docs/nowhere.md"]);
     assert!(nothing.contains("nothing on record"), "{nothing}");
 }
 
@@ -2313,14 +2313,14 @@ fn digest_folds_the_trail_since_the_bookmark_and_moves_it() {
     sandbox.run(&["add", "pick a port"]);
     sandbox.run(&["add", "sit there"]);
 
-    let first = sandbox.run(&["digest"]);
+    let first = sandbox.run(&["events", "--digest"]);
     assert!(
         first.contains("on 3 tasks since the board began"),
         "{first}"
     );
     assert!(first.contains("filed\n  #1 port the loader"), "{first}");
     // Read once, and the bookmark has moved.
-    let quiet = sandbox.run(&["digest"]);
+    let quiet = sandbox.run(&["events", "--digest"]);
     assert!(
         quiet.contains("nothing has happened since you last looked"),
         "{quiet}"
@@ -2362,7 +2362,7 @@ fn digest_folds_the_trail_since_the_bookmark_and_moves_it() {
     claude.shutdown();
 
     // A window, asked without moving the bookmark.
-    let peeked = sandbox.run(&["digest", "--peek"]);
+    let peeked = sandbox.run(&["events", "--digest", "--peek"]);
     assert!(peeked.contains("since you last looked"), "{peeked}");
     assert!(
         peeked.contains("sent back\n  #1 port the loader\n      misses the empty case"),
@@ -2379,17 +2379,17 @@ fn digest_folds_the_trail_since_the_bookmark_and_moves_it() {
     );
     assert!(!peeked.contains("sit there"), "{peeked}");
     // --peek left the bookmark alone: the same digest reads again.
-    let read = sandbox.run(&["digest"]);
+    let read = sandbox.run(&["events", "--digest"]);
     assert!(read.contains("sent back\n  #1 port the loader"), "{read}");
     // And now it has moved.
     assert!(
         sandbox
-            .run(&["digest"])
+            .run(&["events", "--digest"])
             .contains("nothing has happened since you last looked"),
         "the read moved the bookmark"
     );
     // A window reads the past without touching the bookmark either.
-    let window = sandbox.run(&["digest", "--since", "1h"]);
+    let window = sandbox.run(&["events", "--digest", "--since", "1h"]);
     assert!(window.contains("since"), "{window}");
     assert!(
         window.contains("waiting on you\n  #2 pick a port"),
@@ -2397,11 +2397,11 @@ fn digest_folds_the_trail_since_the_bookmark_and_moves_it() {
     );
     assert!(
         sandbox
-            .run(&["digest"])
+            .run(&["events", "--digest"])
             .contains("nothing has happened since you last looked"),
         "--since is a question, not a read"
     );
-    let err = sandbox.run_failing(&["digest", "--since", "yesterday"]);
+    let err = sandbox.run_failing(&["events", "--digest", "--since", "yesterday"]);
     assert!(err.contains("wants a moment"), "{err}");
 }
 
@@ -2457,7 +2457,7 @@ fn handoff_writes_the_claim_brief_as_markdown() {
     codex.shutdown();
     sandbox.run(&["answer", "2", "Yes, keep it."]);
 
-    let brief = sandbox.run(&["handoff", "2"]);
+    let brief = sandbox.run(&["show", "2", "--brief"]);
     assert!(brief.starts_with("# Task #2: port the loader\n"), "{brief}");
     assert!(brief.contains("**status** open"), "{brief}");
     assert!(brief.contains("**priority** 2"), "{brief}");
@@ -2492,14 +2492,14 @@ fn handoff_writes_the_claim_brief_as_markdown() {
 
     // A blocked task says what it waits for, and an unanswered question how
     // to answer it.
-    let blocked = sandbox.run(&["handoff", "3"]);
+    let blocked = sandbox.run(&["show", "3", "--brief"]);
     assert!(
         blocked.contains("## Still waiting for\n\n- #2 port the loader (open)"),
         "{blocked}"
     );
     assert!(blocked.contains("_No body beyond the title._"), "{blocked}");
 
-    let err = sandbox.run_failing(&["handoff", "42"]);
+    let err = sandbox.run_failing(&["show", "42", "--brief"]);
     assert!(err.contains("task 42 not found"), "{err}");
 }
 
@@ -2556,4 +2556,63 @@ requires = ["browser"]
         refused.contains("no task here was filed from plan \"nope\""),
         "{refused}"
     );
+}
+
+#[test]
+fn folded_readings_keep_their_old_names_but_leave_the_help() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["add", "Port the loader", "--path", "src/config.rs"]);
+
+    // Each old name answers exactly as the form it folded into.
+    for (old, new) in [
+        (vec!["why", "1"], vec!["show", "1", "--why"]),
+        (vec!["recall", "1"], vec!["show", "1", "--recall"]),
+        (vec!["handoff", "1"], vec!["show", "1", "--brief"]),
+        (
+            vec!["blame", "src/config.rs"],
+            vec!["show", "src/config.rs"],
+        ),
+        (
+            vec!["replay", "2999-01-01"],
+            vec!["ls", "--at", "2999-01-01"],
+        ),
+        (vec!["record"], vec!["agents", "--record"]),
+        (
+            vec!["digest", "--peek"],
+            vec!["events", "--digest", "--peek"],
+        ),
+    ] {
+        let (a, b) = (sandbox.run(&old), sandbox.run(&new));
+        // The brief is stamped with the moment it was written.
+        let strip = |s: &str| {
+            s.lines()
+                .skip(usize::from(old[0] == "handoff"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert_eq!(strip(&a), strip(&b), "{old:?} vs {new:?}");
+    }
+
+    let help = sandbox.run(&["--help"]);
+    for gone in [
+        "why", "recall", "handoff", "blame", "replay", "record", "digest",
+    ] {
+        assert!(
+            !help
+                .lines()
+                .any(|l| l.trim_start().starts_with(&format!("{gone} "))),
+            "{gone} still listed:\n{help}"
+        );
+    }
+}
+
+#[test]
+fn show_reads_a_hash_number_as_a_task_and_refuses_task_flags_on_a_path() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["add", "Port the loader"]);
+    assert!(sandbox.run(&["show", "#1"]).contains("Port the loader"));
+    let err = sandbox.run_failing(&["show", "src/config.rs", "--why"]);
+    assert!(err.contains("not a task number"), "{err}");
+    let err = sandbox.run_failing(&["ls", "--at", "1h", "--status", "open"]);
+    assert!(err.contains("cannot be used with"), "{err}");
 }

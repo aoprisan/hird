@@ -94,9 +94,9 @@ hird show "$port"
 
 # ------------------------------------------------------------- the record
 
-say "hird record — whose work survives a reading by a different model"
+say "hird agents --record — whose work survives a reading by a different model"
 
-hird record
+hird agents --record
 
 say "next"
 

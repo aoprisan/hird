@@ -34,7 +34,7 @@ use crate::model::{now_ts, Contention, EventKind, Footprint, Observed, Status, W
 use crate::witness::{Change, Tree};
 
 /// One hand that was in a file: a task, in one of its rounds, and what the
-/// witness saw it do there. What `hird blame` is made of.
+/// witness saw it do there. What `hird show <path>` is made of.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileTouch {
     pub seq: i64,

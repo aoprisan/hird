@@ -16,13 +16,14 @@ verdicts and the sent-back loop (v1.7), footprints (v1.8), the ground a task
 builds on (v1.9), the exhibit — kept versions, `hird diff`, `hird salvage`
 (v2.0), tenures (v2.1), the dispatch hook (v2.2), the event feed (v2.3),
 routed summonses (v2.4), human question gates (v2.5), capability-aware
-dispatch (v2.6), the readings — `hird why`, `plan lint`, `replay`,
+dispatch (v2.6), the readings — `hird show --why`, `plan lint`, `ls --at`,
 `mem export` and the question hook (v2.7), the recess — `hird recess` /
 `hird resume`, the human standing a queue down without killing anything
 (v2.8) — and the picture: `hird graph --json`, the TUI's graph screen, and
 `hird web`, the board drawn live in a browser with a scrubber over the trail
 (v2.9), the principal (v3.0), per-connection sessions (v3.1), and
-`hird-server`, the central queue over HTTP as a second binary (v3.2). The herdr
+`hird-server`, the central queue over HTTP as a second binary (v3.2) — and the fold that put the readings back under four commands
+(v3.3). The herdr
 plugin packages the pairing, with an optional harness classifier. Releases are
 tagged and published; the current one is 0.2.2.
 
@@ -59,11 +60,12 @@ and a roadmap item that breaks one is a different project:
 ## Next
 
 **Consolidation before features.** The agent surface has held at twelve
-tools, but the human one has not: `why`, `blame`, `digest`, `handoff`,
-`replay`, `record`, `diff`, `salvage`, `events` and `graph` are ten ways of
-reading one trail. Before anything on the *later* list, find out which of them
-people actually reach for, and fold or group the rest so `hird --help` reads
-as one tool.
+tools; v3.3 (§32) brought the human one back into line by folding seven
+readings into the commands they were questions about, taking `hird --help`
+from thirty-one commands to twenty-four. The old names still answer, unlisted.
+What remains is to drop them at the next breaking release, and to hold the
+line: a new reading is a flag on `show`, `ls`, `events` or `agents` before it
+is a command.
 
 **More first-class registrations.** `hird register` knows six harnesses — the
 Gemini CLI is in, at the project scope `gemini mcp add` itself defaults to —

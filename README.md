@@ -322,7 +322,7 @@ in an ephemeral container with no access to your machine. hird is a local
 queue in a local SQLite file, so there is nothing there for it to connect to —
 register hird in an editor or CLI that runs on the same machine as the
 database (`hird db-path`). What such a session *can* be given is the brief:
-`hird handoff <seq>` renders everything a claim would hand an agent as
+`hird show <seq> --brief` renders everything a claim would hand an agent as
 Markdown, to paste where the queue does not reach.
 
 Confirm the binary works at all before blaming the wiring: `hird ls` from a
@@ -401,7 +401,7 @@ refusal carrying your reason; `task_next` answers *in recess*, not *idle*,
 so an agent stands by instead of retrying; and the dispatch hook stays
 quiet. Work already claimed is untouched — leases run, check-ins land,
 completions finish — because a recess stops the hand-out, not the work.
-`hird ls`, `hird graph`, `hird why` and the TUI status bar all wear it while
+`hird ls`, `hird graph`, `hird show --why` and the TUI status bar all wear it while
 it stands. `hird resume` lifts it, and everything that became claimable
 while the queue stood down wakes the dispatch hook then, as
 `HIRD_EVENT=resumed`. Calling and lifting a recess are human acts, like
@@ -962,7 +962,7 @@ work, which round — the queue accumulates the one measurement it is uniquely
 placed to take:
 
 ```
-$ hird record
+$ hird agents --record
 as worker       judged  upheld  sent back  first pass
 claude-code          3       3          0        2/2
 codex                2       1          1        0/1
@@ -1104,11 +1104,11 @@ which supersedes the old fact and stops it being recalled again. Nothing is
 stored for recall — it is derived at read time from the assertion trail and the
 declared scopes, so there is no index to rebuild and no migration to run.
 
-`task_get` carries the same list without claiming anything, and `hird recall`
+`task_get` carries the same list without claiming anything, and `hird show --recall`
 shows a human exactly what their agents are being told:
 
 ```
-$ hird recall 7
+$ hird show 7 --recall
 the loader reads HIRD_DB before the config file
     learned on task 4 (Port the config loader), working src/config.rs  (codex:9f2c, 2h ago)
 ```
@@ -1210,12 +1210,9 @@ server's instructions do not mention it.
 ```
 hird add <title> [--body <md>|--body-file <path>] [--priority N] [--project <path>]
                  [--needs <seq>,…] [--path <glob>]… [--requires <capability>]… [--review]
-hird ls [--status <status>] [--all-projects]
-hird show <seq>
-hird why <seq>
-hird blame <path>
-hird digest [--since <when>] [--peek] [--all-projects]
-hird handoff <seq>
+hird ls [--status <status> | --at <when>] [--all-projects]
+hird show <seq> [--why | --recall [--limit N] | --brief]
+hird show <path>
 hird diff <seq> [--path <file>] [--tenure N]
 hird salvage <seq> <path> [--baseline] [--tenure N] [--out <file> [--force]]
 hird cancel <seq> [--reason <text>]
@@ -1231,13 +1228,11 @@ hird plan export [--plan <name>] [--name <name>] [--all] [--project <path>]
 hird graph [--all-projects] [--plan <name>] [--dot | --mermaid | --json]
 hird scope <seq> [--path <glob>]… [--clear]
 hird require <seq> [--capability <name>]… [--clear]
-hird agents [--all-projects]
+hird agents [--record [--by harness|person]] [--all-projects]
 hird recuse <seq> --from <seq>,… [--reason <text>] | --clear
-hird record [--all-projects]
 hird events [--follow] [--json] [--kind <kind>,…] [--task <seq>] [--actor <name>]
             [--limit N] [--all-projects]
-hird replay <when> [--all-projects]
-hird recall <seq> [--limit N]
+hird events --digest [--since <when>] [--peek] [--all-projects]
 hird mem add <content> [--tags a,b] [--task <seq>] [--path <file>]…
 hird mem search [query] [--limit N] [--all-projects] [--include-superseded]
 hird mem standing [--shaky] [--all-projects]
@@ -1370,32 +1365,35 @@ answers *wake somebody when work appears*, its twin `question_hook` answers
 that — what the swarm did, as it does it, in a form both halves of your
 tooling can read.
 
-And because the trail is append-only, the past stays a board too: `hird
-replay 2h` (or a timestamp) folds the events back into the queue as it stood
+And because the trail is append-only, the past stays a board too: `hird ls
+--at 2h` (or a timestamp) folds the events back into the queue as it stood
 at that moment — who held what, which wave was live, what was parked on a
 question — for the post-mortem question `--follow` was too late for.
 
 ## The queue explains itself
 
-Everything above is written down as it happens. These commands read it back
-in the shape a particular question has, and none of them writes anything.
+Everything above is written down as it happens. These read it back in the
+shape a particular question has, and none of them writes anything. Most are a
+flag on a command you already know: questions about one task are `hird show`,
+questions about time are `hird ls` and `hird events`.
 
-- **`hird why <seq>`** — whether a task is claimable right now, and if not,
+- **`hird show <seq> --why`** — whether a task is claimable right now, and if not,
   every gate in the way in the order dispatch checks them: a standing recess,
   the lease, unfinished dependencies, an unanswered question, recusals,
   capability requirements, overlap with live work. It is the same answer an
   agent gets in a refusal, read by a human before they go and ask.
-- **`hird blame <path>`** — one file's history across the queue: which tasks
+- **`hird show <path>`** — one file's history across the queue: which tasks
   declared it, whose hands the witness saw in it across every round they were
   held, and what the memory says about it, each fact marked with whether it
-  still stands. `hird show` answers for a task; this answers for a file,
+  still stands. Given a number `hird show` answers for a task; given a path
+  it answers for a file,
   which is the question a reader asks before editing something the swarm has
   been through.
-- **`hird digest`** — what happened on the board since you last looked,
+- **`hird events --digest`** — what happened on the board since you last looked,
   folded into news rather than replayed as a trail. Reading it moves a
   bookmark so the next digest starts where this one ended; `--peek` reads
   without moving it, and `--since 2h` (or an instant) reads a window instead.
-- **`hird handoff <seq>`** — the claim brief as Markdown: instructions, the
+- **`hird show <seq> --brief`** — the claim brief as Markdown: instructions, the
   ground it builds on, questions and their answers, declared files, what has
   already moved under it, the findings it was sent back with, and what earlier
   work learned about the same files. Everything a `task_claim` would hand an
@@ -1410,7 +1408,7 @@ in the shape a particular question has, and none of them writes anything.
   TOML `hird plan apply` reads, unfinished tasks by default and everything
   with `--all`. Tasks filed from a plan keep the names it gave them; the rest
   are named from their titles. `--plan <name>` exports one plan's tasks.
-- **`hird replay <when>`** — the board as it stood at a past moment, folded
+- **`hird ls --at <when>`** — the board as it stood at a past moment, folded
   from the trail; see [the board as a log](#the-board-as-a-log).
 - **`hird mem export`** — the project's current facts as Markdown for a
   `CLAUDE.md` or `AGENTS.md`, footing intact: a fact whose ground has moved
@@ -1433,9 +1431,9 @@ One column per dispatch wave, an arrow for every dependency, the finished
 ground on the left, and on each node its holder, lease countdown, what it
 waits for and what it requires. Nodes light up as harnesses claim them, and
 the trail streams underneath as it lands. Click a node and the panel beside
-the graph answers `hird why` and `hird show` for it. Narrow the picture to
+the graph answers `hird show` and `hird show --why` for it. Narrow the picture to
 one plan from the header, and drag the **replay** slider to see the board as
-it stood at any moment since the trail began — the same fold `hird replay`
+it stood at any moment since the trail began — the same fold `hird ls --at`
 prints, drawn.
 
 **A viewer, not a transport.** `hird web` has the TUI's posture and nothing
