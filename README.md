@@ -11,68 +11,33 @@ work; you tell any agent in any harness *"pick up task 42"*; it claims the task,
 works it, records what it learned, and marks it done. Everything lands in one
 SQLite file, and a terminal UI shows you the board while it happens.
 
-Or file a whole plan and say *"work the queue"* to all three at once. The queue
-knows which tasks are blocked by unfinished dependencies and which ones would
-put two agents in the same file, so it hands each agent something it can
-actually do, and nothing that collides. Nobody assigns anything.
+Four things make it more than a to-do list:
 
-What the work teaches gets written down, and the next agent to touch those files
-is handed it without having to know to ask.
+- **Nobody assigns anything.** File a plan and say *"work the queue"* to every
+  agent at once. Dependencies are enforced and declared file scopes keep two
+  agents out of the same file, so each one is handed something it can
+  actually do. [More](#working-the-queue-without-assigning-anything)
+- **It watches the working tree.** When a file two agents both declared moves
+  under both of them, they hear about it while there is still time to re-read
+  it, not at merge time. [More](#what-actually-happened)
+- **Memory that knows when it may be stale.** What the work teaches is handed
+  to the next agent to touch those files, and a fact whose files have since
+  been rewritten arrives marked *unverified*. [More](#memory)
+- **No agent reviews its own work.** A task marked for review files a review
+  the queue refuses to the harness that did the work; a *sent back* verdict
+  reopens it with the findings, until a review is *upheld*.
+  [More](#no-agent-reviews-its-own-work)
 
-And because a board built entirely out of what agents say about themselves has
-one blind spot, `hird` also watches the working tree — so when a file two agents
-both declared moves under both of them, they hear about it while there is still
-time to re-read it, instead of at merge time.
+Agents pull; hird never assigns. To have idle agents woken when work becomes
+claimable, set `dispatch_hook` to any command — the [herdr
+plugin](herdr-plugin/) is a packaged one, and [ROUTING.md](ROUTING.md) covers
+its optional harness classifier. Picking a worker stays the hook's job, not
+hird's.
 
-The same look at the tree is what keeps the memory honest. A fact is recorded
-against the files it was read off, so when that code is rewritten the fact
-arrives marked *unverified* rather than arriving looking exactly like one
-learned this morning. Confirm it and it goes back to standing; the way to
-confirm it is to say it again.
-
-And because the point of running three different models is that they are not
-the same model, work can be marked for review: finishing it files a review of
-exactly what changed, and the queue refuses that review to the harness that did
-the changing. No agent gets to be the last word on its own work — and the
-review is not the last word either, because it ends in a verdict the queue
-acts on: work that is *sent back* reopens carrying the reviewer's findings,
-the redo files a fresh review, and the loop runs until one is *upheld*, with
-you nowhere in the transport. Every verdict lands on a record, so `hird
-record` can tell you whose work survives a reading by a different model.
-
-And when a task outlives a holder — a lease expires mid-work, work is handed
-back, a review sends it back — the queue archives what each holding did
-instead of forgetting it. The next agent's claim names whose uncommitted
-leavings are in its tree, and every earlier round stays diffable after the
-redo has written over it.
-
-All of that is pull: agents ask, hird answers, and a task that becomes ready
-while nobody is asking waits in silence. One config key closes that seam
-without a daemon. Set `dispatch_hook` to a command and hird runs it, detached,
-the moment a task becomes claimable — which task, why, whom the queue would
-refuse it to, and any capabilities its worker must have, in its environment.
-Point it at anything that can wake an
-agent — under [herdr](https://herdr.dev), `herdr agent prompt worker "work
-the hird queue"` — and the plan's next wave, the freshly filed review, the
-work a verdict sent back, each arrives at an idle agent with nobody carrying
-it there. And because a filed review is announced with its author's harness
-in `HIRD_RECUSED`, one `case` in the hook routes the summons to a different
-agent than the one the claim would turn away — the review loop runs on a
-swarm of two without ever knocking on the wrong door. That pairing also
-ships packaged, as a herdr plugin — `herdr plugin install
-aoprisan/hird/herdr-plugin` wires the hook, keeps a worker roster, and puts
-the board and the live feed a keypress away. Recusal and capabilities say
-who may *not* take a task; which of the permitted agents is the better tool
-for it is a judgement hird does not make, and the plugin can put that one to
-a classifier — [`jev`](https://crates.io/crates/jev-repl) reads the task and
-names a harness, which then gets first refusal among the workers the queue
-would have allowed anyway. And it is asked only about those: recusal and
-required capabilities cut the choices down before the question is put, so
-nothing is ever decided about an agent that could not have taken the work —
-and a task with one permitted harness left is not a question at all. See
-[herdr-plugin/](herdr-plugin/) and [ROUTING.md](ROUTING.md).
-
-No daemon. No server. No accounts.
+No daemon and no accounts. `hird` itself never opens a network port an agent
+connects through; to share one queue between people or machines, see [Two
+people, one queue](#two-people-one-queue) — over SSH, or through the separate
+`hird-server` binary.
 
 - 📖 **Documentation: [aoprisan.github.io/hird](https://aoprisan.github.io/hird/)**
   — install, dispatching, file scope,
