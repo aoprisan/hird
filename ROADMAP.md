@@ -16,34 +16,41 @@ verdicts and the sent-back loop (v1.7), footprints (v1.8), the ground a task
 builds on (v1.9), the exhibit — kept versions, `hird diff`, `hird salvage`
 (v2.0), tenures (v2.1), the dispatch hook (v2.2), the event feed (v2.3),
 routed summonses (v2.4), human question gates (v2.5), capability-aware
-dispatch (v2.6), the readings — `hird why`, `plan lint`, `replay`,
+dispatch (v2.6), the readings — `hird show --why`, `plan lint`, `ls --at`,
 `mem export` and the question hook (v2.7), the recess — `hird recess` /
 `hird resume`, the human standing a queue down without killing anything
 (v2.8) — and the picture: `hird graph --json`, the TUI's graph screen, and
 `hird web`, the board drawn live in a browser with a scrubber over the trail
-(v2.9). The herdr plugin packages the pairing.
+(v2.9), the principal (v3.0), per-connection sessions (v3.1), and
+`hird-server`, the central queue over HTTP as a second binary (v3.2) — and the fold that put the readings back under four commands
+(v3.3). The herdr
+plugin packages the pairing, with an optional harness classifier. Releases are
+tagged and published; the current one is 0.2.2.
 
 `DESIGN.md` records each of those decisions as it was made and stays the
 specification. This file is only about what is not built yet.
 
 ## What every item below must respect
 
-These are the constraints the design has held through twenty-five sections,
+These are the constraints the design has held through thirty-one sections,
 and a roadmap item that breaks one is a different project:
 
 - **Twelve MCP tools, six statuses.** Everything an agent is told without
   asking rides along on calls it already makes. A feature that needs a
   thirteenth tool needs a better design first.
 - **Pull, not push.** `task_next` is a tool an agent chooses to call. The
-  dispatch hook wakes workers; nothing assigns, routes or schedules. hird has
-  no roster and chooses nobody.
-- **No daemon, no accounts, and no server an agent depends on.** One binary,
-  one SQLite file, one process per session. `hird web` (v2.9) listens on a
+  dispatch hook wakes workers; nothing in hird assigns, routes or schedules.
+  hird has no worker roster and chooses nobody — a hook, such as the herdr
+  plugin's classifier, may, and that choice stays outside the binary.
+- **No daemon, no accounts, and no server inside `hird`.** One binary, one
+  SQLite file, one process per session. `hird web` (v2.9) listens on a
   socket, and it is worth being exact about why that is not a breach: it is a
   loopback, read-only viewer with the TUI's posture — it dies with the
   terminal and no agent ever talks to it. The line it draws is between a
-  *screen* and a *transport*, and a transport agents reach the queue through
-  is still the deferral below.
+  *screen* and a *transport*. The transport agents reach a shared queue
+  through is a second binary, `hird-server` (v3.2); its token roster maps a
+  credential to a person, not a task to a worker, and CI keeps every HTTP
+  dependency out of `hird`.
 - **Plans are data.** Nothing may appear in a plan file that is not already
   stored task state — no conditionals, loops, retries or schedules, ever.
 - **Reports, not verdicts.** The witness says what moved, not who typed;
@@ -52,12 +59,13 @@ and a roadmap item that breaks one is a different project:
 
 ## Next
 
-**The first tagged release.** The release engineering is in place — pushing a
-`v*` tag builds static Linux and macOS binaries, attaches them with checksums
-to a GitHub release that `scripts/get.sh` installs from, and publishes to
-crates.io once the `CARGO_REGISTRY_TOKEN` secret is set. What remains is the
-human act: set the secret, tag `v0.1.0`, and confirm `get.sh` and
-`cargo install hird` both land a working binary.
+**Consolidation before features.** The agent surface has held at twelve
+tools; v3.3 (§32) brought the human one back into line by folding seven
+readings into the commands they were questions about, taking `hird --help`
+from thirty-one commands to twenty-four. The old names still answer, unlisted.
+What remains is to drop them at the next breaking release, and to hold the
+line: a new reading is a flag on `show`, `ls`, `events` or `agents` before it
+is a command.
 
 **More first-class registrations.** `hird register` knows six harnesses — the
 Gemini CLI is in, at the project scope `gemini mcp add` itself defaults to —
@@ -68,12 +76,11 @@ hand-written configs get wrong and the reason `register` exists.
 
 ## Later
 
-The two items below — sync and a remote transport — are assessed together in
-[REMOTE.md](REMOTE.md), which surveys what could be bought instead of built
-and reaches a recommendation: dumb object storage with conditional writes for
-the queue, a tunnel for the transport, and no hosted orchestrator at any
-price. It also prices two costs this file understates — the `seq` collision
-and the witness's per-machine blind spot.
+Sync and a remote transport were assessed together in
+[REMOTE.md](REMOTE.md), which recommends dumb object storage with conditional
+writes for the queue and no hosted orchestrator at any price, and prices the
+`seq` collision and the witness's per-machine blind spot. The transport has
+since shipped as `hird-server` (v3.2); sync has not.
 
 **Multi-machine sync (`hird sync`).** The flagship deferral, and the reason
 the event trail is append-only: every mutation in hird already lands as an
@@ -131,7 +138,9 @@ Recorded here so their absence keeps reading as a decision rather than a gap:
 - **A router.** The queue knows what a task requires and what a caller
   advertises, and it stops there. No roster, no idle-worker tracking, no
   placement scores. The dispatch hook maps labels to workers, and that
-  mapping belongs to the user's command, not to hird.
+  mapping belongs to the user's command, not to hird — the herdr plugin's
+  roster and classifier are exactly such a command, and they stay in the
+  plugin.
 - **Dispatch steered by the record.** Agents graded by a table they can see
   are agents optimizing the table. The record measures; humans decide.
 - **A daemon.** Lazy sweeps, one process per session, and a hook that runs

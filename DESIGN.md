@@ -2290,3 +2290,37 @@ before this, and should not have been.
   would be the design's one genuinely false report.
 - **Nothing routes.** Work still crosses machines because a human says "file
   this" on one side and "pick up 42" on the other.
+
+## 32. (v3.3) The fold — a reading is a question about something
+
+Nine versions of readings left the command line with thirty-one entries, and
+seven of them were questions about a thing another command already names. A
+reading is now a flag on the command for the thing it asks about:
+
+| Was | Is | Because it asks about |
+|---|---|---|
+| `hird why <seq>` | `hird show <seq> --why` | one task |
+| `hird recall <seq>` | `hird show <seq> --recall` | one task |
+| `hird handoff <seq>` | `hird show <seq> --brief` | one task |
+| `hird blame <path>` | `hird show <path>` | one file |
+| `hird replay <when>` | `hird ls --at <when>` | the board |
+| `hird digest` | `hird events --digest` | the trail |
+| `hird record` | `hird agents --record` | the agents |
+
+`hird show` reads its argument as a task when it is a number (`42` or `#42`)
+and as a project-relative path otherwise; `./42` names a file called 42. The
+task flags refuse a path rather than guess. `ls --at` refuses `--status`, and
+`events --digest` refuses the flags that shape a tail, because each pair would
+be two questions at once.
+
+Nothing about what any reading says changed; the functions behind them are
+the same functions. The old names stay as hidden subcommands so scripts and
+muscle memory keep working, and a test holds each one to the output of the
+form it folded into. They go at the next breaking release.
+
+`diff` and `salvage` stay commands: they read the exhibit, not the trail, and
+`salvage` writes a file. `graph` stays: it is a picture, not a question.
+
+The rule this leaves behind is the human-side twin of the twelve-tool line: a
+new reading is a flag on `show`, `ls`, `events` or `agents` before it is a
+command.

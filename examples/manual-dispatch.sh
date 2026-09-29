@@ -80,7 +80,7 @@ $(call 1 task_claim "{\"seq\": $audit}")
 JSON
 
 # You can see exactly what your agents are being told, and spot it going stale.
-hird recall "$audit"
+hird show "$audit" --recall
 
 # ------------------------------------------------------------ what you can drive
 

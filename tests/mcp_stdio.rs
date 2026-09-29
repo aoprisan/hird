@@ -247,7 +247,7 @@ fn what_one_harness_learned_is_handed_to_the_next_agent_in_those_files() {
     claude.shutdown();
 
     // And the human can see exactly what their agents are being told.
-    let brief = sandbox.run(&["recall", "2"]);
+    let brief = sandbox.run(&["show", "2", "--recall"]);
     assert!(
         brief.contains("the loader reads HIRD_DB before the config file"),
         "{brief}"

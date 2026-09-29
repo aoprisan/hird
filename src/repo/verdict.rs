@@ -34,7 +34,7 @@
 //! And because every verdict is delivered on the record — who judged, whose
 //! work, which round — the queue accumulates the one measurement it is
 //! uniquely placed to take: whose work survives a reading by a different
-//! model. `hird record` is that table. It is a report, not a scheduler;
+//! model. `hird agents --record` is that table. It is a report, not a scheduler;
 //! nothing routes work by it. Reading it is the human's job, and deciding
 //! what to do about a harness that ships rework is exactly the kind of call
 //! hird leaves to people.
